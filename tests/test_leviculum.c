@@ -33,7 +33,7 @@ typedef struct peer {
     lev_identity_t *identity;
     lev_link_t *oracle_link;
     pthread_t worker;
-    atomic_int connected;
+    atomic_int connected, established;
     int worker_started, connect_result, connect_stage, server, loss, started, active, identified;
     char connect_error[256];
     int messages, delivered, oracle_messages, oracle_identified, oracle_closed, reply_sent, closing;
@@ -206,8 +206,20 @@ static void *connect_peer(void *context) {
         p->connect_stage = 2;
         p->connect_result = lev_link_id(p->oracle_link, address, sizeof(address), &size);
         if (p->connect_result == LEV_OK && size == 16) {
-            p->connect_stage = 3;
-            p->connect_result = lev_link_identify(p->node, address, p->identity, 5000);
+            unsigned attempts;
+            /* connect returns a pending handle, not a completed handshake. */
+            for (attempts = 0;
+                 attempts < 5000 && !atomic_load_explicit(&p->established, memory_order_acquire);
+                 ++attempts) {
+                struct timespec delay = {0, 1000000};
+                nanosleep(&delay, NULL);
+            }
+            if (!atomic_load_explicit(&p->established, memory_order_acquire)) {
+                p->connect_result = LEV_ERR_TIMEOUT;
+            } else {
+                p->connect_stage = 3;
+                p->connect_result = lev_link_identify(p->node, address, p->identity, 5000);
+            }
         }
     }
     if (p->connect_result != LEV_OK) {
@@ -228,8 +240,11 @@ static void oracle_events(peer *p) {
             size_t size;
             CHECK(lev_event_link_id(event, address, sizeof(address), &size) == LEV_OK && size == 16);
             CHECK(rnc_link_address(p->link, expected) == RNC_OK && !memcmp(address, expected, 16));
-            if (type == LEV_EVENT_LINK_ESTABLISHED && !p->server)
-                CHECK(lev_accept_link(p->node, address, 1000, &p->oracle_link) == LEV_OK);
+            if (type == LEV_EVENT_LINK_ESTABLISHED) {
+                if (!p->server)
+                    CHECK(lev_accept_link(p->node, address, 1000, &p->oracle_link) == LEV_OK);
+                atomic_store_explicit(&p->established, 1, memory_order_release);
+            }
             if (type == LEV_EVENT_LINK_MESSAGE) {
                 uint8_t data[425];
                 uint16_t message_type, sequence;
@@ -274,6 +289,7 @@ int main(int argc, char **argv) {
     instance = p;
     p->listener = p->fd = -1;
     atomic_init(&p->connected, 0);
+    atomic_init(&p->established, 0);
     p->server = !strcmp(argv[1], "server");
     p->loss = !strcmp(argv[1], "loss");
     CHECK(rnc_identity_generate(&p->own, random_bytes, NULL) == RNC_OK);
