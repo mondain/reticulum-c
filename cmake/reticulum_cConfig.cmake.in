@@ -1,0 +1,5 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(OpenSSL 3.0 COMPONENTS Crypto)
+include("${CMAKE_CURRENT_LIST_DIR}/reticulum_cTargets.cmake")
+check_required_components(reticulum_c)
