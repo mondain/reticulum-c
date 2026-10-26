@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev clang
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev libbz2-dev clang
       - name: Configure
         shell: bash
         run: |
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev python3-venv
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev libbz2-dev python3-dev python3-venv
       - name: Prepare unmodified RNS 1.5.5 oracle
         run: |
           git clone https://github.com/markqvist/Reticulum.git "$RUNNER_TEMP/rns"
@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev pkg-config libdbus-1-dev libudev-dev
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev libbz2-dev pkg-config libdbus-1-dev libudev-dev
       - name: Prepare pinned, unmodified Leviculum oracle
         run: |
           git clone https://codeberg.org/Lew_Palm/leviculum.git "$RUNNER_TEMP/leviculum"

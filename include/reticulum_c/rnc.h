@@ -9,10 +9,12 @@ extern "C" {
 #endif
 
 #define RNC_MTU 500u
+#define RNC_MAX_MTU 4096u
+#define RNC_MAX_FRAME (RNC_MAX_MTU + 64u)
 #define RNC_ADDRESS_SIZE 16u
 #define RNC_NAME_HASH_SIZE 10u
 #define RNC_SINGLE_MDU 383u
-#define RNC_HDLC_MAX (2u * RNC_MTU + 2u)
+#define RNC_HDLC_MAX (2u * RNC_MAX_FRAME + 2u)
 
 typedef enum rnc_result {
     RNC_OK = 0, RNC_AGAIN, RNC_INVALID, RNC_NO_SPACE, RNC_AUTH,
@@ -37,7 +39,7 @@ typedef struct rnc_identity {
 typedef struct rnc_packet {
     uint8_t flags, hops, transport_id[16], destination[16], context;
     size_t data_size;
-    uint8_t data[RNC_MTU - 19u];
+    uint8_t data[RNC_MAX_MTU - 19u];
 } rnc_packet;
 
 /* Start each byte stream with `rnc_hdlc state = {0}`. Zero the whole structure
@@ -46,7 +48,7 @@ typedef struct rnc_packet {
 typedef struct rnc_hdlc {
     size_t size;
     int active, escaped, discard;
-    uint8_t data[RNC_MTU];
+    uint8_t data[RNC_MAX_FRAME];
 } rnc_hdlc;
 
 typedef struct rnc_announce {

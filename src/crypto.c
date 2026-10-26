@@ -172,10 +172,10 @@ done:
 
 rnc_result rnc_token_seal(const uint8_t key[64], const void *data, size_t size,
     rnc_random_fn random, void *context, uint8_t *output, size_t capacity, size_t *written) {
-    uint8_t token[480]; EVP_CIPHER_CTX *ctx = NULL; int n = 0, final = 0;
+    uint8_t token[RNC_MAX_MTU]; EVP_CIPHER_CTX *ctx = NULL; int n = 0, final = 0;
     size_t needed; rnc_result result;
     if (written) *written = 0;
-    if (!key || (!data && size) || !random || !output || !written || size > RNC_LINK_MDU) return RNC_INVALID;
+    if (!key || (!data && size) || !random || !output || !written || size > RNC_LINK_MAX_MDU) return RNC_INVALID;
     needed = 48u + (size/16u+1u)*16u;
     if (capacity < needed) return RNC_NO_SPACE;
     result = random(context, token, 16);
@@ -193,16 +193,16 @@ done:
 
 rnc_result rnc_token_open(const uint8_t key[64], const uint8_t *data, size_t size,
     uint8_t *output, size_t capacity, size_t *written) {
-    uint8_t tag[32], plain[432]; EVP_CIPHER_CTX *ctx = NULL;
+    uint8_t tag[32], plain[RNC_LINK_MAX_MDU+1u]; EVP_CIPHER_CTX *ctx = NULL;
     int n = 0, final = 0; rnc_result result = RNC_AUTH;
     if (written) *written = 0;
     if (!key || !data || !output || !written) return RNC_INVALID;
-    if (size < 64 || size > 480 || (size-48u)%16u) return RNC_AUTH;
+    if (size < 64 || size > RNC_LINK_MAX_MDU+49u || (size-48u)%16u) return RNC_AUTH;
     if (!mac(key, data, size-32u, tag) || CRYPTO_memcmp(tag, data+size-32u, 32)) goto done;
     ctx = EVP_CIPHER_CTX_new();
     if (!ctx || EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key+32, data) != 1) { result = RNC_CRYPTO; goto done; }
     if (EVP_DecryptUpdate(ctx, plain, &n, data+16, (int)(size-48u)) != 1 ||
-        EVP_DecryptFinal_ex(ctx, plain+n, &final) != 1 || (size_t)(n+final) > RNC_LINK_MDU) goto done;
+        EVP_DecryptFinal_ex(ctx, plain+n, &final) != 1 || (size_t)(n+final) > RNC_LINK_MAX_MDU) goto done;
     if (capacity < (size_t)(n+final)) { result = RNC_NO_SPACE; goto done; }
     memcpy(output, plain, (size_t)(n+final)); *written = (size_t)(n+final); result = RNC_OK;
 done:
