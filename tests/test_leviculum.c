@@ -17,12 +17,11 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+static void fail(const char *file, int line, const char *expression);
 #define CHECK(x)                                                                                             \
     do {                                                                                                     \
-        if (!(x)) {                                                                                          \
-            fprintf(stderr, "%s:%d: %s; oracle: %s\n", __FILE__, __LINE__, #x, lev_last_error());            \
-            exit(1);                                                                                         \
-        }                                                                                                    \
+        if (!(x))                                                                                            \
+            fail(__FILE__, __LINE__, #x);                                                                    \
     } while (0)
 #define TX_CAPACITY (64u * RNC_HDLC_MAX)
 static const char outgoing_text[] = "native-c-to-leviculum", incoming_text[] = "leviculum-to-native-c";
@@ -35,7 +34,8 @@ typedef struct peer {
     lev_link_t *oracle_link;
     pthread_t worker;
     atomic_int connected;
-    int worker_started, connect_result, server, loss, started, active, identified;
+    int worker_started, connect_result, connect_stage, server, loss, started, active, identified;
+    char connect_error[256];
     int messages, delivered, oracle_messages, oracle_identified, oracle_closed, reply_sent, closing;
     unsigned outgoing_packets, incoming_packets, proofs, dropped_data, dropped_proof;
     uint8_t destination[16], name[10], tx[TX_CAPACITY];
@@ -99,6 +99,17 @@ static void cleanup(void) {
         remove_tree(p->directory);
     free(p);
     instance = NULL;
+}
+static void fail(const char *file, int line, const char *expression) {
+    const char *detail = lev_last_error();
+    fprintf(stderr, "%s:%d: %s; oracle: %s\n", file, line, expression,
+            detail ? detail : "no thread-local error detail");
+    if (instance && instance->connect_result != LEV_OK)
+        fprintf(stderr, "connect stage=%d code=%d detail=%s\n", instance->connect_stage,
+                instance->connect_result, instance->connect_error);
+    /* C atexit runs after Rust TLS destruction; release the oracle explicitly. */
+    cleanup();
+    exit(1);
 }
 static rnc_result random_bytes(void *context, uint8_t *out, size_t size) {
     (void)context;
@@ -189,11 +200,19 @@ static void *connect_peer(void *context) {
     peer *p = context;
     uint8_t address[16];
     size_t size;
+    p->connect_stage = 1;
     p->connect_result = lev_connect(p->node, p->destination, 5000, &p->oracle_link);
     if (p->connect_result == LEV_OK) {
+        p->connect_stage = 2;
         p->connect_result = lev_link_id(p->oracle_link, address, sizeof(address), &size);
-        if (p->connect_result == LEV_OK && size == 16)
+        if (p->connect_result == LEV_OK && size == 16) {
+            p->connect_stage = 3;
             p->connect_result = lev_link_identify(p->node, address, p->identity, 5000);
+        }
+    }
+    if (p->connect_result != LEV_OK) {
+        const char *detail = lev_last_error();
+        snprintf(p->connect_error, sizeof(p->connect_error), "%s", detail ? detail : "no detail");
     }
     atomic_store_explicit(&p->connected, 1, memory_order_release);
     return NULL;
@@ -255,7 +274,6 @@ int main(int argc, char **argv) {
     instance = p;
     p->listener = p->fd = -1;
     atomic_init(&p->connected, 0);
-    atexit(cleanup);
     p->server = !strcmp(argv[1], "server");
     p->loss = !strcmp(argv[1], "loss");
     CHECK(rnc_identity_generate(&p->own, random_bytes, NULL) == RNC_OK);
@@ -389,5 +407,6 @@ int main(int argc, char **argv) {
     printf("Leviculum live %s: identity proofs, exact bidirectional Channel payloads, signed RNC delivery, "
            "single application delivery and graceful close passed\n",
            argv[1]);
+    cleanup();
     return 0;
 }
