@@ -1,0 +1,26 @@
+if(BUILD_TESTING AND RNC_INTEROP_TESTS)
+    if(NOT UNIX)
+        message(FATAL_ERROR "The live oracle harness currently requires POSIX process/socket APIs")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    find_package(Git REQUIRED)
+    execute_process(COMMAND ${GIT_EXECUTABLE} -C "${RNC_REFERENCE_DIR}" rev-parse HEAD
+        OUTPUT_VARIABLE rns_head OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE rns_git_status)
+    if(NOT rns_git_status EQUAL 0 OR NOT rns_head STREQUAL "e40191b3d193b46b7f2d8a44424a594cd758839b")
+        message(FATAL_ERROR "Live oracle requires RNS 1.5.5 commit e40191b3d193b46b7f2d8a44424a594cd758839b")
+    endif()
+    execute_process(COMMAND ${GIT_EXECUTABLE} -C "${RNC_REFERENCE_DIR}" diff HEAD --quiet -- RNS Examples/Channel.py
+        RESULT_VARIABLE rns_modified)
+    if(NOT rns_modified EQUAL 0)
+        message(FATAL_ERROR "Live oracle source must be unmodified")
+    endif()
+    add_executable(test_rnc_interop ${PROJECT_SOURCE_DIR}/tests/test_interop.c)
+    target_link_libraries(test_rnc_interop PRIVATE reticulum_c OpenSSL::Crypto)
+    target_compile_options(test_rnc_interop PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    foreach(role client server loss)
+        add_test(NAME reticulum_live_${role} COMMAND ${CMAKE_COMMAND} -E env
+            "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+            $<TARGET_FILE:test_rnc_interop> ${Python3_EXECUTABLE} "${RNC_REFERENCE_DIR}/Examples/Channel.py" ${role})
+        set_tests_properties(reticulum_live_${role} PROPERTIES TIMEOUT 30 LABELS "reticulum_interop;network")
+    endforeach()
+endif()
