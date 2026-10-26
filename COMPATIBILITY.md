@@ -23,23 +23,41 @@ sandbox denied socket creation (EPERM) and LeakSanitizer process tracing. Those
 runs do not refresh live network or leak evidence. The room/bot adapters and
 application protocol remain in the separate consumer project.
 
-## Standalone preparation status
+## Verified standalone SDK
 
-The relocated installed-package consumer and all ten socket-free tests pass
-locally. The generic C text peer compiles, but its TCP process test is blocked
-by the same sandbox. The optional Leviculum C driver is prepared against the
-pinned API; its external library could not be built locally because an offline
-Rust dependency was missing. Neither preparation alone counts as a live pass.
+Snapshot `69d64d5d936fc6565791ee3f487c7d0604c352a5` passed the complete
+[hosted SDK matrix](https://github.com/mondain/reticulum-c/actions/runs/40401903210).
 
-CI is configured to execute:
+| Job | Result | Scope |
+| --- | --- | --- |
+| Linux static | 11/11 | Protocol units, actual C TCP peers, relocated installed consumer. |
+| Linux shared | 11/11 | Same tests using the shared library. |
+| Linux address/undefined/leak sanitizers | 11/11 | ASAN detect_leaks=1 and UBSAN halt_on_error=1, including process and installed consumer. |
+| macOS Release | 11/11 | Protocol units, actual C TCP peers and relocated installed consumer. |
+| RNS 1.5.5 | 14/14 | Baseline plus C initiator/responder and dropped data/proof cases. |
+| Leviculum C API | 14/14 | Baseline plus C initiator/responder and dropped data/proof cases. |
 
-- Linux static/shared unit, text-process and installed-consumer builds.
-- Linux address/undefined sanitizers with leak detection enabled.
-- Pinned RNS 1.5.5 C initiator/responder/loss cases.
-- Pinned Leviculum C-API initiator/responder/loss cases.
-- macOS Release build and applicable process/SDK tests.
+The pinned RNS oracle is `e40191b3d193b46b7f2d8a44424a594cd758839b`;
+Leviculum is `395edd42fbbffcdfb438fcd80afa17668459d331`. Both live harnesses
+require exact bidirectional application payloads, signed RNC delivery, single
+application delivery and graceful close. The Leviculum cases additionally verify
+initiator identity proofs; its handle-returning connect call is asynchronous,
+so identification waits for LINK_ESTABLISHED. Its external FFI library is built
+from unmodified source, separately from this C library and SDK.
 
-Record actual run links and conclusions here after they finish. macOS and the
-new standalone live oracle remain pending until CI proves them. Windows,
-multi-hop networks, IFAC, radio hardware and other implementations remain
-unexecuted. Room/client/bot TCP validation belongs to the consumer's CI.
+The separate Chitchatr consumer snapshot
+`7c03cb0d7e9ac0c978602e75b7c9663cb7e07ff4` passed
+[26/26 tests in normal and sanitizer/leak builds](https://github.com/mondain/chitchatr/actions/runs/40402377485).
+Those runners install a pinned SDK and remove the bundled protocol directory
+before configuring. Actual TCP room/client/bot cases include synchronization,
+full text, private replies, room isolation/moves, disconnect/reconnect, wrong
+pins and admission denial. Its application adapters remain outside this repo.
+
+Locally, the original sandbox still denies sockets/LeakSanitizer tracing. Static
+and shared SDK socket-free tests each pass 10/10, installed-package consumer
+21/21 and source-provider consumer 30/30. Those local selections supplement,
+and do not replace, the hosted network/leak results above.
+
+Windows, multi-hop routing, IFAC, radio hardware and other implementations remain
+unexecuted. The passing matrix certifies only the tested subset at these exact
+revisions. It does not establish complete Reticulum stack or radio compatibility.
