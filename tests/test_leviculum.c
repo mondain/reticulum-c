@@ -282,7 +282,7 @@ int main(int argc, char **argv) {
     CHECK(builder);
     CHECK(lev_builder_identity(builder, p->identity) == LEV_OK &&
           lev_builder_storage_path(builder, p->directory) == LEV_OK);
-    CHECK(lev_builder_share_instance(builder, 0) == LEV_OK &&
+    CHECK(lev_builder_enable_transport(builder, 0) == LEV_OK &&
           lev_builder_add_tcp_client(builder, endpoint) == LEV_OK);
     p->node = lev_builder_build(builder);
     lev_builder_free(builder);

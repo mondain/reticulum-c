@@ -1,3 +1,6 @@
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #define _POSIX_C_SOURCE 200809L
 /* C protocol peer/process driver. Only the external, unmodified oracle is Python. */
 #include <reticulum_c/rnc_link.h>
