@@ -10,6 +10,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
+#include <reticulum_c/rnc_log.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1134,6 +1135,56 @@ static void kiss_test(void) {
   close(master);
   puts("host KISS tests passed");
 }
+typedef struct host_journal {
+  unsigned count;
+  int level[16];
+  char text[16][160];
+} host_journal;
+static void host_record(void *context, int level, const char *module,
+                        const char *message) {
+  host_journal *j = context;
+  if (j->count < 16) {
+    j->level[j->count] = level;
+    snprintf(j->text[j->count], sizeof(j->text[0]), "%s: %s", module, message);
+  }
+  j->count++;
+}
+/* interface lifecycle shows up in the log */
+static void log_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  host_journal j = {0};
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  int up = -1, down = -1;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  host = rnc_host_new(node);
+  CHECK(node && host);
+  rnc_log_set_handler(host_record, &j);
+  rnc_log_set_level(RNC_LOG_INFO);
+  cfg.kind = RNC_HOST_UDP;
+  cfg.name = "Log Probe";
+  cfg.address = "127.0.0.1";
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  CHECK(rnc_host_remove(host, 1) == RNC_OK);
+  for (i = 0; i < j.count && i < 16; ++i) {
+    if (strstr(j.text[i], "host:") && strstr(j.text[i], "Log Probe") &&
+        strstr(j.text[i], " up"))
+      up = j.level[i];
+    if (strstr(j.text[i], "host:") && strstr(j.text[i], "Log Probe") &&
+        strstr(j.text[i], " down"))
+      down = j.level[i];
+  }
+  CHECK(up == RNC_LOG_INFO && down == RNC_LOG_INFO);
+  rnc_log_set_handler(NULL, NULL);
+  rnc_log_set_level(RNC_LOG_NOTICE);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host log tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -1160,6 +1211,8 @@ int main(int argc, char **argv) {
     serial_params_test();
   else if (!strcmp(argv[1], "kiss"))
     kiss_test();
+  else if (!strcmp(argv[1], "log"))
+    log_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))

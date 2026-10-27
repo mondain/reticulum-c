@@ -1298,6 +1298,71 @@ static void discovery_autoconnect(const char *exe) {
   remove_tree(dir);
   puts("node discovery auto-connect tests passed");
 }
+/* The daemon's [logging] section sets the level and destination. */
+static int file_contains(const char *path, const char *needle) {
+  char buf[65536];
+  FILE *f = fopen(path, "r");
+  size_t n;
+  if (!f)
+    return 0;
+  n = fread(buf, 1, sizeof(buf) - 1, f);
+  fclose(f);
+  buf[n] = 0;
+  return strstr(buf, needle) != NULL;
+}
+static void logging_config(const char *exe) {
+  char dir[] = "/tmp/rnc-node-log-XXXXXX", cfg[256], key[256], admin[256],
+       logfile[256], id[33];
+  unsigned port = unused_port(), pass, waited;
+  int fd;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(logfile, sizeof(logfile), "%s/daemon.log", dir) > 0);
+  for (pass = 0; pass < 2; ++pass) {
+    int peer;
+    (void)unlink(logfile);
+    write_config(cfg,
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "instance_name = logtest\n[logging]\nloglevel = %u\n"
+                 "logdestination = file\nlogfile = %s\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = %u\n",
+                 pass ? 3u : 4u, logfile, port);
+    p = start(exe, cfg, key, admin, &fd);
+    ready_line(fd, id);
+    peer = tcp_connect(port); /* an accepted connection is a new interface */
+    for (waited = 0; waited < 30; ++waited) {
+      struct timespec t = {0, 100000000};
+      if (file_contains(logfile, "is up"))
+        break;
+      nanosleep(&t, NULL);
+    }
+    close(peer);
+    {
+      struct timespec t = {0, 300000000};
+      nanosleep(&t, NULL);
+    }
+    stop(p, fd);
+    if (pass == 0) {
+      /* level 4 (info): the connection is logged, with the RNS-style prefix */
+      CHECK(file_contains(logfile, "[Info]"));
+      CHECK(file_contains(logfile, "is up"));
+    } else
+      /* level 3 (notice): info messages are not */
+      CHECK(!file_contains(logfile, "is up"));
+  }
+  /* an invalid level is a configuration error */
+  write_config(cfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+               "[logging]\nloglevel = 12\n[interfaces]\n[[TCP]]\ntype = "
+               "TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = 0\n");
+  CHECK(run_check(exe, cfg) != 0);
+  remove_tree(dir);
+  puts("node logging config tests passed");
+}
 static void shared(const char *exe, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-node-shared-XXXXXX", cfg[256], keypath[256],
        admin[256], storage[256], text[2048], identity[33];
@@ -1970,6 +2035,8 @@ int main(int argc, char **argv) {
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+  else if (!strcmp(argv[2], "logging") && argc == 3)
+    logging_config(argv[1]);
   else if (!strcmp(argv[2], "disc_autoconnect") && argc == 3)
     discovery_autoconnect(argv[1]);
   else if (!strcmp(argv[2], "disc_listen") && argc == 3)

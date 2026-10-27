@@ -1,6 +1,8 @@
 #ifndef RNC_INTERNAL_H
 #define RNC_INTERNAL_H
 #include <reticulum_c/rnc_link.h>
+#include <reticulum_c/rnc_log.h>
+#include <stdio.h>
 #define RNC_LINK_IDLE 0
 #define RNC_LINK_WAIT_PROOF 1
 #define RNC_LINK_WAIT_RTT 2
@@ -56,4 +58,11 @@ rnc_result rnc_channel_receive(rnc_link *link, const rnc_packet *packet,
     const uint8_t *plain, size_t size);
 rnc_result rnc_channel_proof(rnc_link *link, const rnc_packet *packet);
 rnc_result rnc_channel_tick(rnc_link *link, uint64_t now_ms);
+/* Lower-case hex of a hash for log messages (n up to 16 bytes). */
+static inline const char *rnc_hex_label(const uint8_t *bytes, size_t n, char out[33]) {
+    size_t i;
+    for (i = 0; i < n && i < 16; i++)
+        (void)snprintf(out + 2 * i, 3, "%02x", bytes[i]);
+    return out;
+}
 #endif

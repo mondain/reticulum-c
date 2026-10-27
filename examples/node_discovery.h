@@ -152,7 +152,7 @@ static int discovery_describe(const interface_config *f, rnc_discovery_info *inf
         sscanf(out, "%lf , %lf , %lf", &lat, &lon, &height) != 3 ||
         lat < -90 || lat > 90 || lon < -180 || lon > 180 || height < -4000 ||
         height > 1e6) {
-      fprintf(stderr, "discovery: location command for %s failed\n", f->name);
+      rnc_logf(RNC_LOG_ERROR, "discovery", "location command for %s failed", f->name);
       return 0;
     }
     info->has_latitude = info->has_longitude = info->has_height = 1;
@@ -163,8 +163,8 @@ static int discovery_describe(const interface_config *f, rnc_discovery_info *inf
   if (f->publish_ifac) {
     if (strlen(f->netname) >= sizeof(info->ifac_netname) ||
         strlen(f->passphrase) >= sizeof(info->ifac_netkey)) {
-      fprintf(stderr, "discovery: IFAC name or passphrase of %s is too long to "
-                      "publish\n", f->name);
+      rnc_logf(RNC_LOG_ERROR, "discovery", "IFAC name or passphrase of %s is too long to "
+                      "publish", f->name);
       return 0;
     }
     memcpy(info->ifac_netname, f->netname, strlen(f->netname) + 1u);
@@ -179,12 +179,12 @@ static int discovery_describe(const interface_config *f, rnc_discovery_info *inf
     (void)snprintf(reachable, sizeof(reachable), "%s", f->reachable_on);
     if (is_executable_file(reachable) &&
         !capture_command(f->reachable_on, reachable, sizeof(reachable))) {
-      fprintf(stderr, "discovery: reachable_on command for %s failed\n", f->name);
+      rnc_logf(RNC_LOG_ERROR, "discovery", "reachable_on command for %s failed", f->name);
       return 0;
     }
     if (!rnc_discovery_is_ip_address(reachable) &&
         !rnc_discovery_is_hostname(reachable)) {
-      fprintf(stderr, "discovery: reachable_on \"%s\" for %s is not an address\n",
+      rnc_logf(RNC_LOG_ERROR, "discovery", "reachable_on \"%s\" for %s is not an address",
               reachable, f->name);
       return 0;
     }
@@ -212,7 +212,7 @@ static int discovery_describe(const interface_config *f, rnc_discovery_info *inf
     (void)snprintf(info->modulation, sizeof(info->modulation), "%s",
                    f->disc_modulation);
   } else {
-    fprintf(stderr, "discovery: %s cannot be announced (unsupported type)\n",
+    rnc_logf(RNC_LOG_ERROR, "discovery", "%s cannot be announced (unsupported type)",
             f->name);
     return 0;
   }
@@ -269,15 +269,15 @@ static void discovery_begin(size_t i, uint64_t now) {
   if (!discovery_describe(f, &info))
     return;
   if (f->disc_encrypt && !disc.has_network) {
-    fprintf(stderr, "discovery: encryption requested for %s but no network "
-                    "identity is configured\n", f->name);
+    rnc_logf(RNC_LOG_ERROR, "discovery", "encryption requested for %s but no network "
+                    "identity is configured", f->name);
     return;
   }
   if (rnc_discovery_pack(&info, j->packed, sizeof(j->packed) - RNC_STAMP_SIZE,
                          &j->packed_size) != RNC_OK ||
       rnc_discovery_stamp_material(j->packed, j->packed_size, material) !=
           RNC_OK) {
-    fprintf(stderr, "discovery: cannot describe %s\n", f->name);
+    rnc_logf(RNC_LOG_ERROR, "discovery", "cannot describe %s", f->name);
     return;
   }
   work = (size_t)RNC_DISCOVERY_STAMP_ROUNDS * RNC_STAMP_ROUND_SIZE;
@@ -305,13 +305,15 @@ static void discovery_finish(const uint8_t stamp[RNC_STAMP_SIZE],
                          data, sizeof(data), &n) != RNC_OK ||
       rnc_node_set_destination_data(mgmt.node, disc.destination, data, n) !=
           RNC_OK) {
-    fprintf(stderr, "discovery: announce for %s does not fit (%zu bytes)\n",
+    rnc_logf(RNC_LOG_ERROR, "discovery", "announce for %s does not fit (%zu bytes)",
             mgmt.settings.interfaces[j->iface].name, j->packed_size);
     return;
   }
   (void)rnc_node_announce(mgmt.node, disc.destination, unix_seconds, now);
   printf("discovery announce interface=%s bytes=%zu\n",
          mgmt.settings.interfaces[j->iface].name, n);
+  rnc_logf(RNC_LOG_VERBOSE, "discovery", "announced %s (%zu bytes)",
+           mgmt.settings.interfaces[j->iface].name, n);
 }
 static void autoconnect_monitor(uint64_t unix_seconds, uint64_t now);
 static void discovery_step(uint64_t unix_seconds, uint64_t now) {
@@ -533,6 +535,8 @@ static void discovery_heard(const rnc_node_event *event, uint64_t unix_seconds) 
   discovered_save(&rec);
   printf("discovered %s \"%s\" value=%u hops=%u\n", rec.info.type,
          rec.info.name, value, rec.hops);
+  rnc_logf(RNC_LOG_DEBUG, "discovery", "discovered %s \"%s\" (stamp value %u, %u hop(s))",
+           rec.info.type, rec.info.name, value, rec.hops);
   autoconnect(&rec);
 }
 /* Admin listing, most available and best-stamped first. */
@@ -700,7 +704,7 @@ static void autoconnect(const rnc_discovery_record *rec) {
   }
   if (rnc_host_add(mgmt.host, AUTOCONNECT_ID_BASE + disc.ac_next_id, &cfg) !=
       RNC_OK) {
-    fprintf(stderr, "discovery: cannot auto-connect %s\n", name);
+    rnc_logf(RNC_LOG_ERROR, "discovery", "cannot auto-connect %s", name);
     return;
   }
   disc.ac[slot].used = 1;
