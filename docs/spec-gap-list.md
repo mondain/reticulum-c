@@ -127,7 +127,7 @@ Largest gaps, in priority order:
 | MISS | `await_path`; `request_path` on_interface/recursive options | |
 | IMPL | `blackhole_identity` / `unblackhole_identity` / `is_blackholed`, expiry, reference file format | Node API, daemon admin (`BLACKHOLE` / `UNBLACKHOLE` / `BLACKHOLES`), RPC get/set, persisted beside `--state`; verified with the reference `rnpath -B/-b/-U` |
 | IMPL | Blackhole publishing (`rnstransport.info.blackhole`, `/list`, open to all) | Daemon `publish_blackhole`; verified with the reference `rnpath -p` |
-| MISS | Blackhole sources (subscribing to remote lists, `blackhole_sources`, update interval) | Needs link initiation from the daemon |
+| IMPL | Blackhole sources: `blackhole_sources`, `blackhole_update_interval` (minutes, default 60), first-run wait 20 s | Daemon `BlackholeUpdater` equivalent on `rnc_requester`; lists persist as `<state>.blackhole.<source hash>`; verified against a reference publisher |
 | IMPL | `remote_management_enabled` | `rnstransport.remote.management` with `/status` and `/path` (table; rates is empty), identity allow list |
 | MISS | `discovered_interfaces`, discovery sources | |
 
@@ -190,8 +190,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | MISS | `instance_name`, `loglevel` | No logging subsystem |
 | MISS | `panic_on_interface_error`, `use_implicit_proof`, `respond_to_probes`, `link_mtu_discovery` | |
 | IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
-| IMPL | `publish_blackhole` | |
-| MISS | `discover_interfaces` and related, `blackhole_sources`, `blackhole_update_interval`, `network_identity` | |
+| IMPL | `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval` | |
+| MISS | `discover_interfaces` and related, `network_identity` | |
 | MISS | `~/.reticulum` config/storage layout | Daemon uses `--identity` and `--state` |
 
 ### Utilities (lower priority for an SDK)
@@ -202,7 +202,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | PART | `rnstatus`, `rnpath` | Backends via RPC exist; no CLI; RPC is GET-only (no drop path / drop announce queues, no blackhole mutation) |
 | MISS | `rnprobe` | Needs proofs |
 | MISS | `rncp`, `rnx`, `rnsh`, `rnid`, `rnodeconf` | Library primitives exist for `rncp`, `rnid`, `rnx` |
-| PART | Remote management and blackhole publishing done; blackhole federation (subscribing) and interface discovery missing | |
+| PART | Remote management, blackhole publishing and subscribing done; interface discovery missing | |
 
 ## 6. Examples (manual ch13)
 

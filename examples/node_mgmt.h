@@ -2,9 +2,15 @@
  * rnstransport.remote.management (/status, /path; identities on the allow list
  * only) and rnstransport.info.blackhole (/list; everyone), as the reference
  * Transport registers them. Included by node_daemon.c after node_rpc.h. */
+#include <reticulum_c/rnc_requester.h>
 #include <reticulum_c/rnc_responder.h>
 typedef struct management {
   rnc_responder *responder;
+  rnc_requester *requester; /* blackhole source updates */
+  uint64_t source_last[RNC_SERVICE_ALLOWLIST], source_retry[RNC_SERVICE_ALLOWLIST],
+      source_path_since[RNC_SERVICE_ALLOWLIST],
+      source_path_asked[RNC_SERVICE_ALLOWLIST];
+  int source_pending[RNC_SERVICE_ALLOWLIST];
   rnc_host *host;
   rnc_node *node;
   config settings; /* a copy: the caller's config may be replaced on reload */
@@ -14,6 +20,7 @@ typedef struct management {
 static management mgmt;
 static void mgmt_stop(void) {
   rnc_responder_free(mgmt.responder);
+  rnc_requester_free(mgmt.requester);
   memset(&mgmt, 0, sizeof(mgmt));
 }
 /* Only the shapes the reference clients send are accepted. */
@@ -109,11 +116,20 @@ static int mgmt_start(const config *c, const rnc_identity *id, rnc_node *node,
                       rnc_host *host) {
   uint8_t destination[16];
   mgmt_stop();
-  if (!c->remote_management && !c->publish_blackhole)
+  if (!c->remote_management && !c->publish_blackhole && !c->bh_source_count)
     return 1;
-  mgmt.responder = rnc_responder_new(node, RNC_RPC_MESSAGE_MAX, secure_random, NULL);
-  if (!mgmt.responder)
-    return 0;
+  if (c->remote_management || c->publish_blackhole) {
+    mgmt.responder =
+        rnc_responder_new(node, RNC_RPC_MESSAGE_MAX, secure_random, NULL);
+    if (!mgmt.responder)
+      return 0;
+  }
+  if (c->bh_source_count) {
+    mgmt.requester =
+        rnc_requester_new(node, RNC_RPC_MESSAGE_MAX, secure_random, NULL);
+    if (!mgmt.requester)
+      goto fail;
+  }
   mgmt.host = host;
   mgmt.node = node;
   mgmt.settings = *c;
@@ -148,4 +164,97 @@ static int mgmt_start(const config *c, const rnc_identity *id, rnc_node *node,
 fail:
   mgmt_stop();
   return 0;
+}
+/* Hands a LOCAL node event to whichever link engine owns it. */
+static void mgmt_local_event(const rnc_node_event *event,
+                             uint64_t unix_seconds, uint64_t now) {
+  if (mgmt.responder &&
+      rnc_responder_input(mgmt.responder, event, unix_seconds, now) !=
+          RNC_AGAIN)
+    return;
+  if (mgmt.requester)
+    (void)rnc_requester_input(mgmt.requester, event, unix_seconds, now);
+}
+#define BLACKHOLE_SOURCE_TIMEOUT_MS 25000u
+#define BLACKHOLE_JOB_INTERVAL_MS 60000u
+/* BlackholeUpdater: after an initial wait, fetch each subscribed source's
+ * published list once per interval, merge the identities not yet listed and
+ * keep the list on disk. */
+static void blackhole_updates(uint64_t unix_seconds, uint64_t now) {
+  const config *c = &mgmt.settings;
+  rnc_requester_result result;
+  static uint8_t response[RNC_RPC_MESSAGE_MAX];
+  size_t i;
+  uint64_t wait = (c->bh_initial_wait ? c->bh_initial_wait : 20u) * 1000u;
+  uint64_t interval =
+      (c->bh_interval_minutes ? c->bh_interval_minutes : 60u) * 60000u;
+  while (rnc_requester_poll(mgmt.requester, &result, response,
+                            sizeof(response)) == RNC_OK) {
+    size_t source = result.tag, added = 0;
+    if (source >= c->bh_source_count)
+      continue;
+    mgmt.source_pending[source] = 0;
+    if (result.status != RNC_REQUESTER_DONE ||
+        rnc_node_blackhole_merge(mgmt.node, response, result.size,
+                                 c->bh_sources[source], unix_seconds,
+                                 &added) != RNC_OK) {
+      printf("blackhole update failed source=");
+      print_hex(c->bh_sources[source], 16);
+      printf("\n");
+      continue;
+    }
+    printf("blackhole update source=");
+    print_hex(c->bh_sources[source], 16);
+    printf(" added=%zu\n", added);
+    if (added) {
+      char path[1200];
+      if (blackhole_source_path(path, sizeof(path), c->bh_sources[source]))
+        (void)write_file_atomic(path, response, result.size);
+    }
+  }
+  if (now < mgmt.started + wait)
+    return;
+  for (i = 0; i < c->bh_source_count; ++i) {
+    uint8_t destination[16], name_hash[10];
+    rnc_identity source = {0};
+    rnc_route route;
+    const uint8_t nil = 0xc0;
+    if (mgmt.source_pending[i] || now < mgmt.source_retry[i] ||
+        (mgmt.source_last[i] && now < mgmt.source_last[i] + interval))
+      continue;
+    memcpy(source.hash, c->bh_sources[i], 16);
+    if (rnc_destination_hash("rnstransport.info.blackhole", &source, name_hash,
+                             destination) != RNC_OK)
+      continue;
+    if (rnc_node_lookup(mgmt.node, destination, now, &route) != RNC_OK) {
+      if (!mgmt.source_path_since[i])
+        mgmt.source_path_since[i] = now;
+      /* ask again while waiting: the first request may predate the link */
+      if (!mgmt.source_path_asked[i] || now - mgmt.source_path_asked[i] >= 5000u) {
+        mgmt.source_path_asked[i] = now;
+        (void)rnc_node_request_path(mgmt.node, destination, now);
+      }
+      if (now - mgmt.source_path_since[i] > BLACKHOLE_SOURCE_TIMEOUT_MS) {
+        mgmt.source_path_since[i] = 0; /* no path: try again next job round */
+        mgmt.source_path_asked[i] = 0;
+        mgmt.source_retry[i] = now + BLACKHOLE_JOB_INTERVAL_MS;
+      }
+      continue;
+    }
+    mgmt.source_path_since[i] = 0;
+    if (rnc_requester_start(mgmt.requester, destination, NULL, "/list", &nil, 1,
+                            (uint32_t)i, BLACKHOLE_SOURCE_TIMEOUT_MS,
+                            unix_seconds, now) == RNC_OK) {
+      mgmt.source_pending[i] = 1;
+      mgmt.source_last[i] = now;
+    }
+  }
+}
+static void mgmt_step(uint64_t unix_seconds, uint64_t now) {
+  if (mgmt.responder)
+    (void)rnc_responder_tick(mgmt.responder, unix_seconds, now);
+  if (mgmt.requester) {
+    (void)rnc_requester_tick(mgmt.requester, unix_seconds, now);
+    blackhole_updates(unix_seconds, now);
+  }
 }

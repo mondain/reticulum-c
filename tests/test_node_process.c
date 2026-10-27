@@ -732,6 +732,89 @@ static void management(const char *exe) {
   remove_tree(dir);
   puts("node remote management tests passed");
 }
+/* Blackhole sources: a daemon subscribed to another daemon's published list
+ * picks up its entries, keeps them across a restart, and never lets a source
+ * override what it listed itself. */
+static void wait_for(const char *admin, const char *command, const char *needle,
+                     unsigned seconds, char *reply, size_t size) {
+  unsigned waited;
+  for (waited = 0; waited < seconds * 10; ++waited) {
+    struct timespec t = {0, 100000000};
+    admin_command(admin, command, reply, size);
+    if (strstr(reply, needle))
+      return;
+    nanosleep(&t, NULL);
+  }
+  fprintf(stderr, "never saw \"%s\"; last reply:\n%s\n", needle, reply);
+  CHECK(0);
+}
+static void blackhole_sources(const char *exe) {
+  char dir[] = "/tmp/rnc-node-src-XXXXXX", acfg[256], akey[256], aadmin[256],
+       bcfg[256], bkey[256], badmin[256], bstate[256], text[1024], aid[33],
+       bid[33], reply[2048], source_file[300];
+  unsigned port = unused_port();
+  int afd, bfd;
+  pid_t a, b;
+  struct stat st;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(acfg, sizeof(acfg), "%s/a.config", dir) > 0);
+  CHECK(snprintf(akey, sizeof(akey), "%s/a.identity", dir) > 0);
+  CHECK(snprintf(aadmin, sizeof(aadmin), "%s/a.admin", dir) > 0);
+  CHECK(snprintf(bcfg, sizeof(bcfg), "%s/b.config", dir) > 0);
+  CHECK(snprintf(bkey, sizeof(bkey), "%s/b.identity", dir) > 0);
+  CHECK(snprintf(badmin, sizeof(badmin), "%s/b.admin", dir) > 0);
+  CHECK(snprintf(bstate, sizeof(bstate), "%s/b.state", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "publish_blackhole = Yes\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = %u\n",
+                 port) > 0);
+  config_file(acfg, text);
+  a = start(exe, acfg, akey, aadmin, &afd);
+  ready_line(afd, aid);
+  admin_command(aadmin,
+                "BLACKHOLE 55555555555555555555555555555555 0 from source",
+                reply, sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "blackhole_sources = %s\nblackhole_initial_wait = 1\n"
+                 "[interfaces]\n[[Upstream]]\ntype = TCPClientInterface\n"
+                 "target_host = 127.0.0.1\ntarget_port = %u\n"
+                 "reconnect_wait = 1\n",
+                 aid, port) > 0);
+  config_file(bcfg, text);
+  b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+  ready_line(bfd, bid);
+  /* B asks for a path to A's list, links, requests it and merges the result */
+  admin_command(badmin,
+                "BLACKHOLE 66666666666666666666666666666666 0 mine", reply,
+                sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  wait_for(badmin, "BLACKHOLES", "55555555555555555555555555555555", 40, reply,
+           sizeof(reply));
+  CHECK(strstr(reply, "reason=from source"));
+  {
+    char expected[64];
+    CHECK(snprintf(expected, sizeof(expected), "source=%s", aid) > 0);
+    CHECK(strstr(reply, expected)); /* attributed to the subscribed source */
+  }
+  CHECK(snprintf(source_file, sizeof(source_file), "%s.blackhole.%s", bstate,
+                 aid) > 0);
+  CHECK(!stat(source_file, &st) && (st.st_mode & 0777) == 0600);
+  stop(b, bfd);
+  stop(a, afd);
+  /* with the source gone, a restart still has its entries */
+  b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+  ready_line(bfd, bid);
+  admin_command(badmin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, "55555555555555555555555555555555") &&
+        strstr(reply, "66666666666666666666666666666666"));
+  stop(b, bfd);
+  remove_tree(dir);
+  puts("node blackhole source tests passed");
+}
 static void shared(const char *exe, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-node-shared-XXXXXX", cfg[256], keypath[256],
        admin[256], storage[256], text[2048], identity[33];
@@ -1045,18 +1128,121 @@ static void remote_management_reference(const char *exe, const char *reference,
   remove_tree(dir);
   puts("unmodified RNS rnstatus/rnpath remote management passed");
 }
+/* The reference as the publishing end: it blackholes an identity and serves its
+ * list; the daemon, subscribed to the reference's transport identity, must pick
+ * it up. */
+static const char *reference_publisher =
+    "import RNS, sys, time\n"
+    "r = RNS.Reticulum(configdir=sys.argv[1], loglevel=1)\n"
+    "RNS.Transport.blackhole_identity(bytes.fromhex(sys.argv[3]),\n"
+    "                                 reason='reference list')\n"
+    "print('IDENTITY ' + RNS.Transport.identity.hexhash, flush=True)\n"
+    "time.sleep(float(sys.argv[2]))\n";
+static void blackhole_source_reference(const char *exe, const char *reference,
+                                       const char *python) {
+  char dir[] = "/tmp/rnc-bh-ref-XXXXXX", rdir[256], rcfg[256], cfg[256],
+       key[256], admin[256], text[1024], daemon[33], publisher_id[33],
+       out[4096], reply[2048], limit[16], hash[] =
+           "77777777777777777777777777777777";
+  unsigned port = unused_port(), tries;
+  int pfd, dfd, found = 0;
+  size_t used = 0;
+  pid_t publisher, d;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(limit, sizeof(limit), "60") > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = "
+                 "No\npublish_blackhole = Yes\n[interfaces]\n[[Server]]\n"
+                 "type = TCPServerInterface\nenabled = yes\nlisten_ip = "
+                 "127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(rcfg, text);
+  {
+    int fds[2];
+    CHECK(!pipe(fds));
+    publisher = fork();
+    CHECK(publisher >= 0);
+    if (!publisher) {
+      close(fds[0]);
+      CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 &&
+            dup2(fds[1], STDERR_FILENO) >= 0);
+      close(fds[1]);
+      CHECK(!setenv("PYTHONPATH", reference, 1));
+      execl(python, python, "-c", reference_publisher, rdir, limit, hash,
+            (char *)NULL);
+      _exit(127);
+    }
+    close(fds[1]);
+    pfd = fds[0];
+  }
+  out[0] = 0;
+  for (tries = 0; tries < 300 && !strstr(out, "IDENTITY "); ++tries) {
+    struct pollfd pf = {pfd, POLLIN, 0};
+    CHECK(poll(&pf, 1, 100) >= 0);
+    if (pf.revents & POLLIN) {
+      ssize_t n = read(pfd, out + used, sizeof(out) - 1 - used);
+      CHECK(n >= 0);
+      used += (size_t)n;
+    }
+    out[used] = 0;
+  }
+  if (!strstr(out, "IDENTITY ")) {
+    fprintf(stderr, "reference publisher output:\n%s\n", out);
+    (void)kill(publisher, SIGKILL);
+    CHECK(0);
+  }
+  memcpy(publisher_id, strstr(out, "IDENTITY ") + 9, 32);
+  publisher_id[32] = 0;
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "blackhole_sources = %s\nblackhole_initial_wait = 1\n"
+                 "[interfaces]\n[[Upstream]]\ntype = TCPClientInterface\n"
+                 "target_host = 127.0.0.1\ntarget_port = %u\n"
+                 "reconnect_wait = 1\n",
+                 publisher_id, port) > 0);
+  config_file(cfg, text);
+  d = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, daemon);
+  for (tries = 0; tries < 400 && !found; ++tries) {
+    struct timespec t = {0, 100000000};
+    admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+    found = strstr(reply, hash) && strstr(reply, "reason=reference list");
+    if (!found)
+      nanosleep(&t, NULL);
+  }
+  if (!found)
+    fprintf(stderr, "daemon never merged the reference's list:\n%s\n", reply);
+  (void)kill(publisher, SIGKILL);
+  CHECK(waitpid(publisher, NULL, 0) == publisher);
+  close(pfd);
+  stop(d, dfd);
+  CHECK(found);
+  remove_tree(dir);
+  puts("unmodified RNS published blackhole list subscribed by the daemon "
+       "passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 5);
   if (!strcmp(argv[2], "cli"))
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+  else if (!strcmp(argv[2], "sources") && argc == 3)
+    blackhole_sources(argv[1]);
   else if (!strcmp(argv[2], "management") && argc == 3)
     management(argv[1]);
   else if (!strcmp(argv[2], "blackhole") && argc == 3)
     blackhole(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
+  else if (!strcmp(argv[2], "source_ref") && argc == 5)
+    blackhole_source_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "remote") && argc == 5)
     remote_management_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "backbone") && argc == 5)

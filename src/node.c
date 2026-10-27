@@ -2102,7 +2102,8 @@ static int rmp_until(rmp *r, uint64_t *until) {
 }
 static rnc_result blackhole_parse(rnc_node *n, const void *input, size_t size,
                                   const uint8_t source[16],
-                                  uint64_t unix_seconds, int apply) {
+                                  uint64_t unix_seconds, int apply,
+                                  int only_new, size_t *added) {
   rmp r = {input, size, 0};
   size_t pairs, i;
   rnc_result result = RNC_OK;
@@ -2139,14 +2140,16 @@ static rnc_result blackhole_parse(rnc_node *n, const void *input, size_t size,
       continue;
     if (apply) {
       const node_blackhole *old = blackhole_find(n, key);
+      int live = old && blackhole_live(old, unix_seconds);
       rnc_result s;
-      if (old && blackhole_live(old, unix_seconds) &&
-          same(old->entry.source, n->id))
+      if (live && (only_new || same(old->entry.source, n->id)))
         continue; /* a local entry is never overridden */
       s = blackhole_set(n, key, source ? source : n->id, until, reason,
                         reason_size, 1, unix_seconds);
       if (s == RNC_AGAIN)
         result = RNC_NO_SPACE;
+      else if (s == RNC_OK && added)
+        ++*added;
     }
   }
   return r.i == r.n ? result : RNC_PROTOCOL;
@@ -2157,8 +2160,21 @@ rnc_result rnc_node_blackhole_import(rnc_node *n, const void *input,
   rnc_result r;
   if (!n || !input || !size)
     return RNC_INVALID;
-  r = blackhole_parse(n, input, size, source, unix_seconds, 0);
+  r = blackhole_parse(n, input, size, source, unix_seconds, 0, 0, NULL);
   if (r != RNC_OK)
     return r;
-  return blackhole_parse(n, input, size, source, unix_seconds, 1);
+  return blackhole_parse(n, input, size, source, unix_seconds, 1, 0, NULL);
+}
+rnc_result rnc_node_blackhole_merge(rnc_node *n, const void *input,
+                                    size_t size, const uint8_t source[16],
+                                    uint64_t unix_seconds, size_t *added) {
+  rnc_result r;
+  if (added)
+    *added = 0;
+  if (!n || !input || !size)
+    return RNC_INVALID;
+  r = blackhole_parse(n, input, size, source, unix_seconds, 0, 1, NULL);
+  if (r != RNC_OK)
+    return r;
+  return blackhole_parse(n, input, size, source, unix_seconds, 1, 1, added);
 }

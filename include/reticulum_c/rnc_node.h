@@ -197,6 +197,12 @@ rnc_result rnc_node_blackhole_export(const rnc_node *node, void *output,
 rnc_result rnc_node_blackhole_import(rnc_node *node, const void *input,
                                      size_t size, const uint8_t source[16],
                                      uint64_t unix_seconds);
+/* Live update from a subscribed source (BlackholeUpdater): same format, but
+ * only identities not already listed are added, whoever listed them. *added
+ * (optional) receives the number of new entries. Validation is as for import. */
+rnc_result rnc_node_blackhole_merge(rnc_node *node, const void *input,
+                                    size_t size, const uint8_t source[16],
+                                    uint64_t unix_seconds, size_t *added);
 /* Known-destination store (Identity.recall). Every valid, fresh announce for
  * a non-local destination is remembered independently of path lifetime, in a
  * table bounded to RNC_NODE_KNOWN entries (least recently heard is evicted).

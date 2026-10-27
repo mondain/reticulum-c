@@ -164,3 +164,26 @@ reporting); eight concurrent responder links; requests and responses are capped
 at 64 KiB in the daemon. A request on a stale or closed link is not answered.
 The reference reports an empty path table as a failed request; this applies to
 the reference client regardless of server.
+
+## Management plane: blackhole sources (`feature/management-plane`)
+
+New library component `rnc_requester` (sans-I/O): opens a link to a destination
+the node has a route to, optionally identifies, sends one request, returns the
+response and closes the link. Four concurrent jobs. The daemon's blackhole
+updater uses it: after an initial wait it asks for a path, requests `/list`
+from each subscribed source once per interval, merges identities nobody has
+listed yet (a local entry is never overridden) and stores the list.
+
+Local Linux evidence: 153/153 with the pinned RNS oracle, 124/124 without it,
+121/121 under sanitizers (differential cases excluded).
+
+Differential: the daemon, subscribed to the transport identity of an unmodified
+reference instance with `publish_blackhole`, picks up an identity the reference
+blackholed. Native: requester tests (echo, no route, silent handler, identify
+with an allow list, job limit, argument checks), merge semantics, and two
+daemons (publisher and subscriber) including persistence across a restart.
+
+Differences from the reference updater: the daemon re-asks for a missing path
+every 5 s for up to 25 s instead of one blocking wait; the first-run delay can
+be set with `blackhole_initial_wait` (seconds, reference fixed at 20); lists are
+stored as `<state>.blackhole.<hex>` beside `--state`.

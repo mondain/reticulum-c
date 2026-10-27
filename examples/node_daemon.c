@@ -26,6 +26,32 @@
 #define CONFIG_INTERFACES 8u
 #define BLACKHOLE_MAX 65536u
 static int decode_hex(const char *s, uint8_t *out);
+/* Identity hashes separated by commas and/or blanks (at most the allow-list
+ * size); replaces any previous content. */
+static int parse_hash_list(const char *value, uint8_t (*out)[16],
+                           size_t *count) {
+  const char *token = value, *end;
+  *count = 0;
+  while (*token) {
+    char hex[33];
+    while (*token == ',' || *token == ' ' || *token == '\t')
+      ++token;
+    if (!*token)
+      break;
+    end = token;
+    while (*end && *end != ',' && *end != ' ' && *end != '\t')
+      ++end;
+    if (end - token != 32 || *count == RNC_SERVICE_ALLOWLIST)
+      return 0;
+    memcpy(hex, token, 32);
+    hex[32] = 0;
+    if (!decode_hex(hex, out[*count]))
+      return 0;
+    ++*count;
+    token = end;
+  }
+  return 1;
+}
 #define STATE_MAX (96u + RNC_NODE_ROUTES * (14u + RNC_MTU))
 typedef struct interface_config {
   rnc_host_config host;
@@ -40,6 +66,10 @@ typedef struct config {
   int transport, share, share_tcp, remote_management, publish_blackhole;
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
+  /* blackhole subscriptions: sources, update interval and first-run delay */
+  uint8_t bh_sources[RNC_SERVICE_ALLOWLIST][16];
+  size_t bh_source_count;
+  unsigned bh_interval_minutes, bh_initial_wait;
   uint16_t shared_port, control_port;
   uint8_t rpc_key[RNC_RPC_KEY_MAX];
   size_t rpc_key_size;
@@ -660,37 +690,26 @@ static int read_config(const char *path, config *c) {
           c->shared_port = (uint16_t)n;
         else
           c->control_port = (uint16_t)n;
-      } else if (!strcmp(s, "remote_management_allowed")) {
-        /* identity hashes separated by commas and/or blanks */
-        char *token = value, *end;
-        c->mgmt_allowed_count = 0;
-        while (*token) {
-          size_t len;
-          while (*token == ',' || *token == ' ' || *token == '\t')
-            ++token;
-          if (!*token)
-            break;
-          end = token;
-          while (*end && *end != ',' && *end != ' ' && *end != '\t')
-            ++end;
-          len = (size_t)(end - token);
-          if (len != 32 || c->mgmt_allowed_count == RNC_SERVICE_ALLOWLIST) {
-            valid = 0;
-            break;
-          }
-          {
-            char hex[33];
-            memcpy(hex, token, 32);
-            hex[32] = 0;
-            if (!decode_hex(hex, c->mgmt_allowed[c->mgmt_allowed_count++])) {
-              valid = 0;
-              break;
-            }
-          }
-          token = end;
-        }
-        if (!valid)
+      } else if (!strcmp(s, "remote_management_allowed") ||
+                 !strcmp(s, "blackhole_sources")) {
+        int sources = s[0] == 'b';
+        if (!parse_hash_list(value,
+                             sources ? c->bh_sources : c->mgmt_allowed,
+                             sources ? &c->bh_source_count
+                                     : &c->mgmt_allowed_count)) {
+          valid = 0;
           break;
+        }
+      } else if (!strcmp(s, "blackhole_update_interval") ||
+                 !strcmp(s, "blackhole_initial_wait")) {
+        if (!number(value, 100000, &n) || !n) {
+          valid = 0;
+          break;
+        }
+        if (s[10] == 'u')
+          c->bh_interval_minutes = (unsigned)n;
+        else
+          c->bh_initial_wait = (unsigned)n;
       } else if (!strcmp(s, "rpc_key")) {
         size_t length = strlen(value), j;
         if (!length || length % 2 || length / 2 > RNC_RPC_KEY_MAX) {
@@ -870,14 +889,15 @@ done:
 /* Blackhole list: the reference's MessagePack file format, kept beside the
  * state file as <state>.blackhole (absent when no --state is given). */
 static char blackhole_path[1100];
-static int blackhole_load(rnc_node *node) {
+/* Reads a blackhole file (the reference's MessagePack layout) into the node,
+ * attributing entries to `source` (NULL = this node). A missing file is fine. */
+static int blackhole_load_file(rnc_node *node, const char *path,
+                               const uint8_t *source) {
   uint8_t *data;
   struct stat st;
   int fd, ok = 0;
   size_t used = 0;
-  if (!blackhole_path[0])
-    return 1;
-  fd = open(blackhole_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+  fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
   if (fd < 0)
     return errno == ENOENT;
   if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
@@ -900,33 +920,21 @@ static int blackhole_load(rnc_node *node) {
   }
   close(fd);
   if (used == (size_t)st.st_size)
-    ok = rnc_node_blackhole_import(node, data, used, NULL,
+    ok = rnc_node_blackhole_import(node, data, used, source,
                                    (uint64_t)time(NULL)) == RNC_OK;
   free(data);
   return ok;
 }
-static int blackhole_save(rnc_node *node) {
-  uint8_t *data;
-  char temp[1120];
-  size_t size, used = 0;
+static int write_file_atomic(const char *path, const uint8_t *data,
+                             size_t size) {
+  char temp[1200];
+  size_t used = 0;
   int fd, ok = 0;
-  if (!blackhole_path[0])
-    return 1;
-  if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", blackhole_path) >=
-      (int)sizeof(temp))
+  if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", path) >= (int)sizeof(temp))
     return 0;
-  data = malloc(BLACKHOLE_MAX);
-  if (!data)
-    return 0;
-  if (rnc_node_blackhole_export(node, data, BLACKHOLE_MAX, &size) != RNC_OK) {
-    free(data);
-    return 0;
-  }
   fd = mkstemp(temp);
-  if (fd < 0) {
-    free(data);
+  if (fd < 0)
     return 0;
-  }
   if (fchmod(fd, 0600) == 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0) {
     while (used < size) {
       ssize_t n = write(fd, data + used, size - used);
@@ -938,15 +946,47 @@ static int blackhole_save(rnc_node *node) {
     }
     ok = used == size && fsync(fd) == 0;
   }
-  ok = close(fd) == 0 && ok && rename(temp, blackhole_path) == 0;
+  ok = close(fd) == 0 && ok && rename(temp, path) == 0;
   if (!ok)
     (void)unlink(temp);
+  return ok;
+}
+static int blackhole_load(rnc_node *node) {
+  return !blackhole_path[0] || blackhole_load_file(node, blackhole_path, NULL);
+}
+static int blackhole_save(rnc_node *node) {
+  uint8_t *data;
+  size_t size;
+  int ok;
+  if (!blackhole_path[0])
+    return 1;
+  data = malloc(BLACKHOLE_MAX);
+  if (!data)
+    return 0;
+  ok = rnc_node_blackhole_export(node, data, BLACKHOLE_MAX, &size) == RNC_OK &&
+       write_file_atomic(blackhole_path, data, size);
   free(data);
   return ok;
+}
+/* A subscribed source's last list lives in <list>.<source identity hash>. */
+static int blackhole_source_path(char *out, size_t size,
+                                 const uint8_t source[16]) {
+  size_t i, n;
+  if (!blackhole_path[0])
+    return 0;
+  n = (size_t)snprintf(out, size, "%s.", blackhole_path);
+  if (n + 33 > size)
+    return 0;
+  for (i = 0; i < 16; ++i)
+    (void)snprintf(out + n + 2 * i, 3, "%02x", source[i]);
+  return 1;
 }
 static int mgmt_start(const config *c, const rnc_identity *id, rnc_node *node,
                       rnc_host *host);
 static void mgmt_stop(void);
+static void mgmt_local_event(const rnc_node_event *event, uint64_t unix_seconds,
+                             uint64_t now);
+static void mgmt_step(uint64_t unix_seconds, uint64_t now);
 static int start_node(config *c, const rnc_identity *id, const char *state,
                       rnc_node **node, rnc_host **host) {
   size_t i;
@@ -989,6 +1029,14 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
   if (!blackhole_load(*node)) {
     fprintf(stderr, "Invalid or unreadable blackhole list\n");
     goto fail;
+  }
+  for (i = 0; i < c->bh_source_count; ++i) {
+    char path[1200];
+    if (blackhole_source_path(path, sizeof(path), c->bh_sources[i]) &&
+        !blackhole_load_file(*node, path, c->bh_sources[i])) {
+      fprintf(stderr, "Invalid or unreadable blackhole source list\n");
+      goto fail;
+    }
   }
   if (!mgmt_start(c, id, *node, *host)) {
     fprintf(stderr, "Cannot start management destinations\n");
@@ -1135,6 +1183,9 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
       append(c, "blackhole identity=");
       for (j = 0; j < 16; ++j)
         append(c, "%02x", e.identity[j]);
+      append(c, " source=");
+      for (j = 0; j < 16; ++j)
+        append(c, "%02x", e.source[j]);
       append(c, " until=%llu reason=%s\n", (unsigned long long)e.until,
              e.reason);
     }
@@ -1346,9 +1397,9 @@ int main(int argc, char **argv) {
       if (event.type == RNC_HOST_UP || event.type == RNC_HOST_DOWN)
         printf("interface id=%u %s error=%d\n", event.interface_id,
                event.type == RNC_HOST_UP ? "up" : "down", event.error_number);
-      else if (event.node.type == RNC_NODE_LOCAL && mgmt.responder) {
-        (void)rnc_responder_input(mgmt.responder, &event.node,
-                                  (uint64_t)time(NULL), monotonic_ms());
+      else if (event.node.type == RNC_NODE_LOCAL &&
+               (mgmt.responder || mgmt.requester)) {
+        mgmt_local_event(&event.node, (uint64_t)time(NULL), monotonic_ms());
       } else if (event.node.type == RNC_NODE_ANNOUNCE) {
         printf("announce destination=");
         print_hex(event.node.route.destination, 16);
@@ -1356,9 +1407,7 @@ int main(int argc, char **argv) {
                (unsigned)event.node.route.hops);
       }
     }
-    if (mgmt.responder)
-      (void)rnc_responder_tick(mgmt.responder, (uint64_t)time(NULL),
-                               monotonic_ms());
+    mgmt_step((uint64_t)time(NULL), monotonic_ms());
     admin_step(admin, clients, host, node, &id, state_path, monotonic_ms());
     rpc_step(&rpc, host, node, &current, &id, monotonic_ms());
     if (reloading) {

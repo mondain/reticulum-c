@@ -192,6 +192,51 @@ static void persistence(void) {
   rnc_node_free(m);
   rnc_node_free(n);
 }
+/* A live update adds only identities nobody has listed, and counts them. */
+static void merge(void) {
+  rnc_identity own;
+  rnc_node *n = make(&own);
+  uint8_t local[16], first[16], second[16], source[16], blob[512];
+  rnc_blackhole_entry e;
+  size_t added = 99, written;
+  rnc_node *remote = make(&own);
+  memset(local, 0x11, 16);
+  memset(first, 0x22, 16);
+  memset(second, 0x44, 16);
+  memset(source, 0x33, 16);
+  /* the "remote list": three entries, one of which the node already has */
+  CHECK(rnc_node_blackhole(remote, local, 0, "remote reason", 100) == RNC_OK);
+  CHECK(rnc_node_blackhole(remote, first, 0, "r1", 100) == RNC_OK);
+  CHECK(rnc_node_blackhole(remote, second, 0, NULL, 100) == RNC_OK);
+  CHECK(rnc_node_blackhole_export(remote, blob, sizeof(blob), &written) ==
+        RNC_OK);
+  CHECK(rnc_node_blackhole(n, local, 0, "mine", 100) == RNC_OK);
+  CHECK(rnc_node_blackhole_merge(n, blob, written, source, 100, &added) ==
+        RNC_OK);
+  CHECK(added == 2);
+  CHECK(rnc_node_is_blackholed(n, first, 100) &&
+        rnc_node_is_blackholed(n, second, 100));
+  CHECK(rnc_node_blackhole_at(n, 0, 100, &e) == RNC_OK &&
+        !strcmp(e.reason, "mine"));
+  /* a second merge finds nothing new */
+  CHECK(rnc_node_blackhole_merge(n, blob, written, source, 100, &added) ==
+        RNC_OK && added == 0);
+  /* sources keep what they listed, and merged entries are attributed to them */
+  {
+    size_t k, found = 0;
+    for (k = 0; rnc_node_blackhole_at(n, k, 100, &e) == RNC_OK; ++k)
+      if (!memcmp(e.identity, first, 16)) {
+        CHECK(!memcmp(e.source, source, 16) && !strcmp(e.reason, "r1"));
+        found = 1;
+      }
+    CHECK(found);
+  }
+  CHECK(rnc_node_blackhole_merge(n, "x", 1, source, 100, NULL) == RNC_PROTOCOL);
+  CHECK(rnc_node_blackhole_merge(NULL, blob, written, source, 100, NULL) ==
+        RNC_INVALID);
+  rnc_node_free(remote);
+  rnc_node_free(n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "announces"))
@@ -204,6 +249,8 @@ int main(int argc, char **argv) {
     expiry();
   else if (!strcmp(argv[1], "reference_file"))
     reads_reference_file();
+  else if (!strcmp(argv[1], "merge"))
+    merge();
   else if (!strcmp(argv[1], "persistence"))
     persistence();
   else
