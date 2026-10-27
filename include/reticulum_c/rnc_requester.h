@@ -46,6 +46,13 @@ rnc_result rnc_requester_input(rnc_requester *requester,
                                uint64_t unix_seconds, uint64_t now_ms);
 rnc_result rnc_requester_tick(rnc_requester *requester, uint64_t unix_seconds,
                               uint64_t now_ms);
+/* RequestReceipt view of the job started with this tag: SENT while the link
+ * opens and the request travels, DELIVERED once a Resource-sized request has
+ * arrived, RECEIVING with a 0..1 progress while a Resource-sized response
+ * arrives, READY (1.0) or FAILED once finished, until the result is polled.
+ * RNC_STATE for an unknown tag. */
+rnc_result rnc_requester_progress(const rnc_requester *requester, uint32_t tag,
+                                  rnc_request_state *state, double *progress);
 /* Next finished job; RNC_AGAIN if none. NO_SPACE (nothing consumed) if the
  * response does not fit capacity; *size says how much is needed. */
 rnc_result rnc_requester_poll(rnc_requester *requester,

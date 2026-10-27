@@ -222,6 +222,110 @@ static void arguments(void) {
   CHECK(rnc_requester_new(NULL, 0, rng, NULL) == NULL);
   teardown(&n);
 }
+/* Drives the job to completion, recording the request state each step. */
+typedef struct trace {
+  unsigned seen[5];
+  double last, max_receiving;
+  int monotonic, partial;
+} trace;
+static rnc_requester_result run_traced(net *n, uint32_t tag, trace *t,
+                                       uint8_t *buf, size_t capacity,
+                                       unsigned steps) {
+  rnc_requester_result r;
+  unsigned i;
+  memset(t, 0, sizeof(*t));
+  t->monotonic = 1;
+  for (i = 0; i < steps; i++) {
+    rnc_request_state state;
+    double progress;
+    pump(n, 1);
+    if (rnc_requester_progress(n->requester, tag, &state, &progress) ==
+        RNC_OK) {
+      t->seen[state]++;
+      if (progress < t->last)
+        t->monotonic = 0;
+      t->last = progress;
+      if (state == RNC_REQUEST_RECEIVING && progress > 0 && progress < 1)
+        t->partial = 1;
+    }
+    if (rnc_requester_poll(n->requester, &r, buf, capacity) == RNC_OK)
+      return r;
+  }
+  CHECK(0);
+  return r;
+}
+/* An inline request goes SENT then READY, never through the resource states. */
+static void progress_inline(void) {
+  net n;
+  const uint8_t value[] = {0x92, 0x01, 0xa2, 'o', 'k'};
+  uint8_t out[64];
+  rnc_request_state state = RNC_REQUEST_READY;
+  double progress = 1;
+  trace t;
+  setup(&n, 1);
+  CHECK(rnc_requester_progress(n.requester, 77, &state, &progress) ==
+        RNC_STATE);
+  CHECK(rnc_requester_start(n.requester, n.destination, NULL, "/echo", value,
+                            sizeof(value), 77, 5000, UNIX, n.now) == RNC_OK);
+  CHECK(rnc_requester_progress(n.requester, 77, &state, &progress) == RNC_OK &&
+        state == RNC_REQUEST_SENT && progress == 0);
+  CHECK(run_traced(&n, 77, &t, out, sizeof(out), 300).status ==
+        RNC_REQUESTER_DONE);
+  CHECK(t.seen[RNC_REQUEST_SENT] && t.seen[RNC_REQUEST_READY] &&
+        !t.seen[RNC_REQUEST_DELIVERED] && !t.seen[RNC_REQUEST_RECEIVING] &&
+        !t.seen[RNC_REQUEST_FAILED] && t.last == 1.0 && t.monotonic);
+  teardown(&n);
+}
+/* A request and response too large for one packet travel as Resources: the
+ * request resource completing is DELIVERED, then the response arrives in
+ * parts (RECEIVING with a fractional progress) before READY. */
+static void progress_resource(void) {
+  net n;
+  uint8_t value[3008], out[4096];
+  rnc_requester_result r;
+  trace t;
+  size_t i;
+  value[0] = 0xc5; /* bin 16: 3000 bytes */
+  value[1] = 0x0b;
+  value[2] = 0xb8;
+  for (i = 0; i < 3000; i++)
+    value[3 + i] = (uint8_t)(i * 7u + 1u);
+  setup(&n, 1);
+  CHECK(rnc_requester_start(n.requester, n.destination, NULL, "/echo", value,
+                            3003, 5, 60000, UNIX, n.now) == RNC_OK);
+  r = run_traced(&n, 5, &t, out, sizeof(out), 6000);
+  CHECK(r.status == RNC_REQUESTER_DONE && r.size == 3003);
+  CHECK(t.seen[RNC_REQUEST_SENT] && t.seen[RNC_REQUEST_DELIVERED] &&
+        t.seen[RNC_REQUEST_RECEIVING] && t.seen[RNC_REQUEST_READY]);
+  CHECK(t.partial && t.monotonic && t.last == 1.0);
+  teardown(&n);
+}
+/* A request that never gets an answer ends FAILED. */
+static void progress_failed(void) {
+  net n;
+  const uint8_t value[] = {0xc0};
+  uint8_t out[16];
+  rnc_request_state state;
+  double progress;
+  rnc_requester_result r;
+  unsigned i;
+  int failed = 0;
+  setup(&n, 1);
+  CHECK(rnc_requester_start(n.requester, n.destination, NULL, "/quiet", value,
+                            1, 9, 1500, UNIX, n.now) == RNC_OK);
+  for (i = 0; i < 600; i++) {
+    pump(&n, 1);
+    if (rnc_requester_progress(n.requester, 9, &state, &progress) == RNC_OK &&
+        state == RNC_REQUEST_FAILED)
+      failed = 1;
+    if (rnc_requester_poll(n.requester, &r, out, sizeof(out)) == RNC_OK) {
+      CHECK(r.status == RNC_REQUESTER_FAILED);
+      break;
+    }
+  }
+  CHECK(failed && i < 600);
+  teardown(&n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "echo"))
@@ -236,6 +340,12 @@ int main(int argc, char **argv) {
     busy();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
+  else if (!strcmp(argv[1], "progress_inline"))
+    progress_inline();
+  else if (!strcmp(argv[1], "progress_resource"))
+    progress_resource();
+  else if (!strcmp(argv[1], "progress_failed"))
+    progress_failed();
   else
     CHECK(0);
   puts("requester test passed");
