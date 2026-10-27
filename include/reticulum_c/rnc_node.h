@@ -169,6 +169,41 @@ rnc_result rnc_node_tick(rnc_node *node, uint64_t unix_seconds,
                          uint64_t now_ms);
 rnc_result rnc_node_lookup(const rnc_node *node, const uint8_t destination[16],
                            uint64_t now_ms, rnc_route *route);
+/* Tunnels (Transport.synthesize_tunnel / handle_tunnel). An interface that can
+ * come back with a different address (a TCP client, I2P) announces a tunnel
+ * made of the node's transport identity and a stable interface hash. A peer
+ * that sees the same tunnel again on a new interface restores the paths it had
+ * learned through it, without waiting for fresh announces. Entries expire after
+ * eight hours without use. */
+#define RNC_NODE_TUNNELS 8u
+#define RNC_NODE_TUNNEL_PATHS 16u
+#define RNC_TUNNEL_TIMEOUT_MS (UINT64_C(8) * 3600u * 1000u)
+typedef struct rnc_tunnel_info {
+  uint8_t id[32];
+  uint32_t interface_id; /* 0 while the interface is away */
+  uint64_t expires_ms;
+  size_t paths;
+} rnc_tunnel_info;
+/* Queues the synthesis packet on the interface. Needs the node's identity with
+ * its private key (RNC_STATE otherwise) and a configured interface. */
+rnc_result rnc_node_synthesize_tunnel(rnc_node *node, uint32_t interface_id,
+                                      const uint8_t interface_hash[32],
+                                      uint64_t now_ms);
+/* Owner-signed checkpoint of the tunnel table (like rnc_node_state_export, but
+ * a separate record so the route checkpoint format is unchanged). Imported
+ * tunnels have no interface until their peer reappears; expired tunnels and
+ * paths are skipped. Import is atomic and only into an empty tunnel table. */
+#define RNC_NODE_TUNNEL_STATE_MAX \
+  (96u + RNC_NODE_TUNNELS * (42u + RNC_NODE_TUNNEL_PATHS * (18u + RNC_MTU)))
+rnc_result rnc_node_tunnels_export(const rnc_node *node, const rnc_identity *owner,
+                                   uint64_t unix_seconds, uint64_t now_ms,
+                                   void *output, size_t capacity, size_t *written);
+rnc_result rnc_node_tunnels_import(rnc_node *node, const rnc_identity *owner,
+                                   uint64_t unix_seconds, uint64_t now_ms,
+                                   const void *input, size_t size);
+size_t rnc_node_tunnel_count(const rnc_node *node);
+rnc_result rnc_node_tunnel_at(const rnc_node *node, size_t index,
+                              rnc_tunnel_info *info);
 /* Identity blackholing (Transport.blackhole_identity). Announces from a
  * blackholed identity are dropped after signature verification, their
  * destinations' paths are removed, and path requests for them are not answered.

@@ -2030,6 +2030,7 @@ static void discovery_listen_reference(const char *exe, const char *reference,
   puts("this daemon discovered an unmodified RNS interface announce");
 }
 
+
 /* Runs the CLI tool with NULL-terminated arguments; returns its exit status
  * and captures stdout and stderr together. */
 static int ctl_run(const char *ctl, char *out, size_t size, ...) {
@@ -2340,16 +2341,241 @@ static void cli_id_reference(const char *ctl, const char *reference,
   remove_tree(dir);
   puts("cli id reference tests passed");
 }
+
+/* The reference's TCP client names a tunnel when it connects. After it leaves
+ * and comes back (same identity, same interface) this daemon restores the path
+ * it had learned, without a new announce. */
+static int path_within(const char *admin, const char *hash, unsigned seconds) {
+  unsigned w;
+  for (w = 0; w < seconds * 10; ++w) {
+    struct timespec t = {0, 100000000};
+    if (admin_has_path(admin, hash))
+      return 1;
+    nanosleep(&t, NULL);
+  }
+  return 0;
+}
+static const char *reference_tunnel_peer =
+    "import RNS, sys, time\n"
+    "r = RNS.Reticulum(configdir=sys.argv[1], loglevel=1)\n"
+    "if sys.argv[2] == 'announce':\n"
+    "    i = RNS.Identity()\n"
+    "    d = RNS.Destination(i, RNS.Destination.IN, RNS.Destination.SINGLE,\n"
+    "                        'reticulum_c', 'tunnel')\n"
+    "    print(d.hexhash, flush=True)\n"
+    "    end = time.time() + float(sys.argv[3])\n"
+    "    while time.time() < end:\n"
+    "        d.announce()\n"
+    "        time.sleep(1)\n"
+    "else:\n"
+    "    print('idle', flush=True)\n"
+    "    time.sleep(float(sys.argv[3]))\n";
+static void tunnel_reference(const char *exe, const char *reference,
+                             const char *python) {
+  char dir[] = "/tmp/rnc-tunnel-ref-XXXXXX", rdir[256], rcfg[256], cfg[256],
+       key[256], admin[256], text[1024], id[33], hash[33], reply[4096];
+  unsigned port = unused_port(), waited;
+  int fd, pfd;
+  pid_t daemon, peer;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  /* a stable transport identity is what makes the tunnel the same one again;
+   * the reference only keeps it across runs when transport is enabled */
+  write_config(rcfg,
+               "[reticulum]\nenable_transport = True\nshare_instance = No\n"
+               "[interfaces]\n[[Daemon]]\ntype = TCPClientInterface\n"
+               "enabled = yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+               port);
+  write_config(cfg,
+               "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+               "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\nlisten_ip = "
+               "127.0.0.1\nlisten_port = %u\n",
+               port);
+  daemon = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  /* first visit: announce a destination */
+  {
+    int fds[2];
+    size_t n = 0;
+    char out[2048];
+    CHECK(!pipe(fds));
+    peer = fork();
+    CHECK(peer >= 0);
+    if (!peer) {
+      close(fds[0]);
+      CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+      close(fds[1]);
+      CHECK(!setenv("PYTHONPATH", reference, 1));
+      execl(python, python, "-c", reference_tunnel_peer, rdir, "announce", "40",
+            (char *)NULL);
+      _exit(127);
+    }
+    close(fds[1]);
+    pfd = fds[0];
+    out[0] = 0;
+    hash[0] = 0;
+    for (waited = 0; waited < 300 && !hash[0]; ++waited) {
+      struct pollfd pf = {pfd, POLLIN, 0};
+      size_t at;
+      CHECK(poll(&pf, 1, 100) >= 0);
+      if (pf.revents & POLLIN) {
+        ssize_t got = read(pfd, out + n, sizeof(out) - 1 - n);
+        CHECK(got >= 0);
+        n += (size_t)got;
+        out[n] = 0;
+      }
+      /* a line made of exactly 32 hex digits is the destination hash */
+      for (at = 0; at + 32 <= n && !hash[0]; ++at) {
+        size_t k;
+        if (at && out[at - 1] != '\n')
+          continue;
+        for (k = 0; k < 32 && strchr("0123456789abcdef", out[at + k]); ++k) {
+        }
+        if (k == 32 && (at + 32 == n || out[at + 32] == '\n')) {
+          memcpy(hash, out + at, 32);
+          hash[32] = 0;
+        }
+      }
+    }
+    CHECK(hash[0]);
+  }
+  CHECK(path_within(admin, hash, 20));
+  admin_command(admin, "TUNNELS", reply, sizeof(reply));
+  CHECK(strstr(reply, "tunnel id=") && strstr(reply, "paths=1"));
+  /* the peer leaves: the path through its connection goes, the tunnel keeps it */
+  (void)kill(peer, SIGKILL);
+  CHECK(waitpid(peer, NULL, 0) == peer);
+  close(pfd);
+  for (waited = 0; waited < 200 && admin_has_path(admin, hash); ++waited) {
+    struct timespec t = {0, 100000000};
+    nanosleep(&t, NULL);
+  }
+  CHECK(!admin_has_path(admin, hash));
+  admin_command(admin, "TUNNELS", reply, sizeof(reply));
+  CHECK(strstr(reply, "interface=0 paths=1"));
+  /* second visit, same identity and interface, no announce this time */
+  {
+    int devnull;
+    peer = fork();
+    CHECK(peer >= 0);
+    if (!peer) {
+      devnull = open("/dev/null", O_WRONLY);
+      if (devnull >= 0) {
+        (void)dup2(devnull, STDOUT_FILENO);
+        (void)dup2(devnull, STDERR_FILENO);
+      }
+      CHECK(!setenv("PYTHONPATH", reference, 1));
+      execl(python, python, "-c", reference_tunnel_peer, rdir, "idle", "40",
+            (char *)NULL);
+      _exit(127);
+    }
+  }
+  for (waited = 0; waited < 300 && !admin_has_path(admin, hash); ++waited) {
+    struct timespec t = {0, 100000000};
+    nanosleep(&t, NULL);
+  }
+  CHECK(admin_has_path(admin, hash));
+  admin_command(admin, "TUNNELS", reply, sizeof(reply));
+  CHECK(!strstr(reply, "interface=0 "));
+  (void)kill(peer, SIGKILL);
+  CHECK(waitpid(peer, NULL, 0) == peer);
+  stop(daemon, fd);
+  remove_tree(dir);
+  puts("unmodified RNS tunnel restored its path in this daemon");
+}
+/* The tunnel table is saved with the state and brings a returning peer's path
+ * back after a restart of the receiving daemon. */
+static void tunnel_persistence(const char *exe) {
+  char dir[] = "/tmp/rnc-node-tun-XXXXXX", acfg[256], akey[256], aadmin[256],
+       bcfg[256], bkey[256], badmin[256], bstate[256], aid[33], bid[33],
+       dest_hex[33], reply[2048], tunnels_file[300];
+  unsigned port = unused_port(), k;
+  int afd, bfd, keyfd;
+  pid_t a, b;
+  uint8_t private_key[64], name_hash[10], destination[16];
+  rnc_identity a_identity = {0};
+  struct stat st;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(acfg, sizeof(acfg), "%s/a.config", dir) > 0);
+  CHECK(snprintf(akey, sizeof(akey), "%s/a.identity", dir) > 0);
+  CHECK(snprintf(aadmin, sizeof(aadmin), "%s/a.admin", dir) > 0);
+  CHECK(snprintf(bcfg, sizeof(bcfg), "%s/b.config", dir) > 0);
+  CHECK(snprintf(bkey, sizeof(bkey), "%s/b.identity", dir) > 0);
+  CHECK(snprintf(badmin, sizeof(badmin), "%s/b.admin", dir) > 0);
+  CHECK(snprintf(bstate, sizeof(bstate), "%s/b.state", dir) > 0);
+  CHECK(snprintf(tunnels_file, sizeof(tunnels_file), "%s.tunnels", bstate) > 0);
+  write_config(bcfg,
+               "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+               "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\nlisten_ip = "
+               "127.0.0.1\nlisten_port = %u\n",
+               port);
+  /* A connects as a client (so it names a tunnel) and announces on a
+   * discoverable interface; its discovery destination is the path we follow */
+  write_config(acfg,
+               "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+               "discovery_job_interval = 1\n[interfaces]\n[[Up]]\ntype = "
+               "TCPClientInterface\ntarget_host = 127.0.0.1\ntarget_port = %u\n"
+               "reconnect_wait = 1\n[[Public]]\ntype = BackboneInterface\n"
+               "listen_ip = 127.0.0.1\nport = 0\ndiscoverable = yes\n"
+               "discovery_name = Tunnel Source\ndiscovery_stamp_value = 8\n"
+               "reachable_on = 127.0.0.1\nannounce_interval_seconds = 2\n",
+               port);
+  b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+  ready_line(bfd, bid);
+  a = start(exe, acfg, akey, aadmin, &afd);
+  ready_line(afd, aid);
+  keyfd = open(akey, O_RDONLY);
+  CHECK(keyfd >= 0 && read(keyfd, private_key, 64) == 64);
+  close(keyfd);
+  CHECK(rnc_identity_from_private(&a_identity, private_key) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.discovery.interface", &a_identity,
+                             name_hash, destination) == RNC_OK);
+  for (k = 0; k < 16; ++k)
+    CHECK(snprintf(dest_hex + 2 * k, 3, "%02x", destination[k]) == 2);
+  CHECK(path_within(badmin, dest_hex, 30));
+  admin_command(badmin, "TUNNELS", reply, sizeof(reply));
+  CHECK(strstr(reply, "tunnel id=") && strstr(reply, "paths=1"));
+  admin_command(badmin, "SAVE", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  CHECK(!stat(tunnels_file, &st) && (st.st_mode & 0777) == 0600);
+  /* B restarts while A is away: the table is back, with no interface */
+  stop(a, afd);
+  stop(b, bfd);
+  b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+  ready_line(bfd, bid);
+  admin_command(badmin, "TUNNELS", reply, sizeof(reply));
+  CHECK(strstr(reply, "interface=0 paths=1"));
+  CHECK(!admin_has_path(badmin, dest_hex));
+  /* A returns (same identity and interface): its path is back before its next
+   * announce could have arrived */
+  a = start(exe, acfg, akey, aadmin, &afd);
+  ready_line(afd, aid);
+  CHECK(path_within(badmin, dest_hex, 30));
+  stop(a, afd);
+  stop(b, bfd);
+  remove_tree(dir);
+  puts("node tunnel persistence tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 4 || argc == 5);
   if (!strcmp(argv[2], "cli"))
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+
   else if (!strcmp(argv[2], "cli_id_ref") && argc == 5)
     cli_id_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "cli_tools") && argc == 4)
     cli_tools(argv[1], argv[3]);
+
+  else if (!strcmp(argv[2], "tunnel_persist") && argc == 3)
+    tunnel_persistence(argv[1]);
+
   else if (!strcmp(argv[2], "logging") && argc == 3)
     logging_config(argv[1]);
   else if (!strcmp(argv[2], "disc_autoconnect") && argc == 3)
@@ -2372,6 +2598,8 @@ int main(int argc, char **argv) {
     shared(argv[1], NULL, NULL);
   else if (!strcmp(argv[2], "netid_ref") && argc == 5)
     network_identity_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "tunnel_ref") && argc == 5)
+    tunnel_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "disc_listen_ref") && argc == 5)
     discovery_listen_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "disc_ref") && argc == 5)

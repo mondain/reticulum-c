@@ -27,6 +27,9 @@
 #define CONFIG_INTERFACES 8u
 #define BLACKHOLE_MAX 65536u
 static int decode_hex(const char *s, uint8_t *out);
+static int tunnels_save(const char *state, rnc_node *node,
+                        const rnc_identity *owner, uint64_t unix_seconds,
+                        uint64_t now);
 /* the management module (node_mgmt.h) owns the network identity */
 static const uint8_t *network_identity_hash(void);
 /* Identity hashes separated by commas and/or blanks (at most the allow-list
@@ -1115,6 +1118,8 @@ static int save_state(const char *path, rnc_node *node,
   fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (fd < 0 || fsync(fd) < 0)
     goto done;
+  if (!tunnels_save(path, node, owner, unix_seconds, now))
+    goto done;
   ok = 1;
 done:
   if (fd >= 0)
@@ -1191,6 +1196,61 @@ static int write_file_atomic(const char *path, const uint8_t *data,
     (void)unlink(temp);
   return ok;
 }
+/* The tunnel table lives beside the state file as <state>.tunnels. */
+#define TUNNEL_STATE_MAX RNC_NODE_TUNNEL_STATE_MAX
+static int tunnels_save(const char *state, rnc_node *node,
+                        const rnc_identity *owner, uint64_t unix_seconds,
+                        uint64_t now) {
+  uint8_t *data;
+  char path[1200];
+  size_t size;
+  int ok;
+  if (!state || snprintf(path, sizeof(path), "%s.tunnels", state) >= (int)sizeof(path))
+    return 1;
+  if (!rnc_node_tunnel_count(node)) { /* nothing to keep: drop any old table */
+    (void)unlink(path);
+    return 1;
+  }
+  data = malloc(TUNNEL_STATE_MAX);
+  if (!data)
+    return 0;
+  ok = rnc_node_tunnels_export(node, owner, unix_seconds, now, data,
+                               TUNNEL_STATE_MAX, &size) == RNC_OK &&
+       write_file_atomic(path, data, size);
+  free(data);
+  return ok;
+}
+static int tunnels_load(const char *state, rnc_node *node,
+                        const rnc_identity *owner, uint64_t unix_seconds,
+                        uint64_t now) {
+  uint8_t *data;
+  char path[1200];
+  struct stat st;
+  int fd, ok = 0;
+  ssize_t n;
+  if (!state || snprintf(path, sizeof(path), "%s.tunnels", state) >= (int)sizeof(path))
+    return 1;
+  fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+  if (fd < 0)
+    return errno == ENOENT;
+  if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+      (st.st_mode & 077) || st.st_size < 96 || st.st_size > (off_t)TUNNEL_STATE_MAX) {
+    close(fd);
+    return 0;
+  }
+  data = malloc(TUNNEL_STATE_MAX);
+  if (!data) {
+    close(fd);
+    return 0;
+  }
+  n = read(fd, data, TUNNEL_STATE_MAX);
+  close(fd);
+  ok = n == st.st_size &&
+       rnc_node_tunnels_import(node, owner, unix_seconds, now, data, (size_t)n) ==
+           RNC_OK;
+  free(data);
+  return ok;
+}
 static int blackhole_load(rnc_node *node) {
   return !blackhole_path[0] || blackhole_load_file(node, blackhole_path, NULL);
 }
@@ -1264,6 +1324,10 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
   }
   if (!load_state(state, *node, id, (uint64_t)time(NULL), now)) {
     fprintf(stderr, "Invalid or unreadable signed network state\n");
+    goto fail;
+  }
+  if (!tunnels_load(state, *node, id, (uint64_t)time(NULL), now)) {
+    fprintf(stderr, "Invalid or unreadable tunnel table\n");
     goto fail;
   }
   if (!blackhole_load(*node)) {
@@ -1430,6 +1494,15 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
       append(c, " until=%llu reason=%s\n", (unsigned long long)e.until,
              e.reason);
     }
+  } else if (!strcmp(request, "TUNNELS")) {
+    rnc_tunnel_info t;
+    size_t k, j;
+    for (k = 0; rnc_node_tunnel_at(node, k, &t) == RNC_OK; ++k) {
+      append(c, "tunnel id=");
+      for (j = 0; j < 32; ++j)
+        append(c, "%02x", t.id[j]);
+      append(c, " interface=%u paths=%zu\n", t.interface_id, t.paths);
+    }
   } else if (!strcmp(request, "DISCOVERED")) {
     discovery_list(c, (uint64_t)time(NULL));
   } else if (!strcmp(request, "NETWORK")) {
@@ -1446,7 +1519,7 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
                ? "OK"
                : "ERROR no state path or write failed");
   } else
-    append(c, "ERROR commands: STATUS ROUTES PATH <32hex> BLACKHOLE UNBLACKHOLE BLACKHOLES NETWORK DISCOVERED SAVE\n");
+    append(c, "ERROR commands: STATUS ROUTES PATH <32hex> BLACKHOLE UNBLACKHOLE BLACKHOLES NETWORK DISCOVERED TUNNELS SAVE\n");
   if (!c->output_size)
     append(c, "EMPTY\n");
 }

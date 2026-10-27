@@ -188,11 +188,30 @@ static void access_point(void) {
   CHECK(sends_on(n, 2) >= 1);
   rnc_node_free(n);
 }
+/* An interface that leaves while its announce retry is pending (a TCP client
+ * disconnecting) must not crash the retry, nor resend the announce. */
+static void ingress_removed(void) {
+  rnc_node *n = make(1, 0, NULL);
+  rnc_identity src;
+  rnc_packet a;
+  CHECK(rnc_identity_generate(&src, rng, NULL) == RNC_OK);
+  a = announce_from(&src, 1000);
+  CHECK(rnc_node_input(n, 1, &a, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1000, 500) == RNC_OK);
+  CHECK(sends_on(n, 2) == 1);
+  CHECK(rnc_node_remove_interface(n, 1) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1000, 6500) == RNC_OK); /* the retry falls due */
+  CHECK(sends_on(n, 2) == 0);
+  CHECK(rnc_node_tick(n, 1000, 60000) == RNC_OK);
+  rnc_node_free(n);
+}
 int main(int argc, char **argv) {
   if (argc != 2)
     return 2;
   if (!strcmp(argv[1], "retry"))
     retry();
+  else if (!strcmp(argv[1], "ingress_removed"))
+    ingress_removed();
   else if (!strcmp(argv[1], "heard_twice"))
     heard_twice();
   else if (!strcmp(argv[1], "heard_once"))
