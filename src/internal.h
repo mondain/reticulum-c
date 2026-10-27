@@ -12,13 +12,13 @@ typedef struct rnc_tx_message {
     uint16_t sequence;
     size_t size, attempts;
     uint64_t deadline;
-    uint8_t data[RNC_LINK_MDU], hashes[RNC_LINK_ATTEMPTS][32];
+    uint8_t data[RNC_LINK_MAX_MDU], hashes[RNC_LINK_ATTEMPTS][32];
 } rnc_tx_message;
 typedef struct rnc_rx_message {
     int used;
     uint16_t sequence, type;
     size_t size;
-    uint8_t data[RNC_CHANNEL_MDU];
+    uint8_t data[RNC_CHANNEL_MAX_MDU];
 } rnc_rx_message;
 struct rnc_link {
     rnc_random_fn random;
@@ -27,8 +27,11 @@ struct rnc_link {
     rnc_identity ephemeral, peer_signer, remote;
     uint8_t address[16], key[64];
     uint64_t now, started, activity, control, rtt_ms;
+    size_t local_mtu, mtu, mdu;
     uint16_t tx_next, rx_next;
-    rnc_tx_message tx[RNC_CHANNEL_TX_WINDOW];
+    size_t tx_window, tx_limit, tx_min, tx_tier, tx_good;
+    int tx_adaptive;
+    rnc_tx_message tx[RNC_CHANNEL_TX_MAX];
     rnc_rx_message rx[RNC_CHANNEL_RX_WINDOW];
     size_t head, count;
     rnc_link_event events[RNC_LINK_EVENTS];

@@ -168,7 +168,7 @@ static void packet_vectors(void) {
     CHECK(rnc_packet_decode(raw, 501, &second) == RNC_PROTOCOL);
     memset(encoded, 0x55, sizeof(encoded));
     CHECK(rnc_packet_encode(&packet, encoded, 1, &n) == RNC_NO_SPACE && n == 0 && encoded[0] == 0x55);
-    packet.data_size = sizeof(packet.data);
+    packet.data_size = RNC_MTU-19u;
     CHECK(rnc_packet_encode(&packet, raw, sizeof(raw), &n) == RNC_OK && n == 500);
     packet.data_size++;
     CHECK(rnc_packet_encode(&packet, raw, sizeof(raw), &n) == RNC_INVALID);
@@ -239,7 +239,7 @@ static void framing_vectors(void) {
     }
     CHECK(n == 500);
     CHECK(rnc_hdlc_feed(&state, 0x7e, decoded, 500, &n) == RNC_AGAIN);
-    for (i = 0; i < 500; ++i) CHECK(rnc_hdlc_feed(&state, 1, decoded, 500, &n) == RNC_AGAIN);
+    for (i = 0; i < sizeof(state.data); ++i) CHECK(rnc_hdlc_feed(&state, 1, decoded, 500, &n) == RNC_AGAIN);
     CHECK(rnc_hdlc_feed(&state, 1, decoded, 500, &n) == RNC_NO_SPACE);
     CHECK(rnc_hdlc_feed(&state, 0x7e, decoded, 500, &n) == RNC_AGAIN);
     CHECK(rnc_hdlc_feed(&state, 1, decoded, 500, &n) == RNC_AGAIN);

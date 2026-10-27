@@ -15,13 +15,7 @@ The previous integration milestone exchanged exact typed Channel payloads with
 unmodified RNS 1.5.5 at e40191b3d193b46b7f2d8a44424a594cd758839b in both roles,
 including signed receipts, dropped data/proof recovery, single delivery and
 graceful close. Native C process tests covered mutual identity proofs, pins,
-key persistence/permissions, oversized/EOF input and shutdown. The historical
-combined consumer/codec build passed 33/33 and sanitizer build 29/29.
-
-Later room integration passed encrypted in-memory tests, but the subsequent
-sandbox denied socket creation (EPERM) and LeakSanitizer process tracing. Those
-runs do not refresh live network or leak evidence. The room/bot adapters and
-application protocol remain in the separate consumer project.
+key persistence/permissions, oversized/EOF input and shutdown.
 
 ## Verified standalone SDK
 
@@ -45,19 +39,48 @@ initiator identity proofs; its handle-returning connect call is asynchronous,
 so identification waits for LINK_ESTABLISHED. Its external FFI library is built
 from unmodified source, separately from this C library and SDK.
 
-The separate Chitchatr consumer snapshot
-`7c03cb0d7e9ac0c978602e75b7c9663cb7e07ff4` passed
-[26/26 tests in normal and sanitizer/leak builds](https://github.com/mondain/chitchatr/actions/runs/40402377485).
-Those runners install a pinned SDK and remove the bundled protocol directory
-before configuring. Actual TCP room/client/bot cases include synchronization,
-full text, private replies, room isolation/moves, disconnect/reconnect, wrong
-pins and admission denial. Its application adapters remain outside this repo.
+At that extraction snapshot, Windows, multi-hop routing, IFAC, radio hardware
+and other implementations remained unexecuted. The passing matrix covers only
+the tested subset at these exact revisions. It does not establish complete
+Reticulum stack or radio compatibility.
 
-Locally, the original sandbox still denies sockets/LeakSanitizer tracing. Static
-and shared SDK socket-free tests each pass 10/10, installed-package consumer
-21/21 and source-provider consumer 30/30. Those local selections supplement,
-and do not replace, the hosted network/leak results above.
+## SDK 0.2 development branch
 
-Windows, multi-hop routing, IFAC, radio hardware and other implementations remain
-unexecuted. The passing matrix certifies only the tested subset at these exact
-revisions. It does not establish complete Reticulum stack or radio compatibility.
+The `feature/network-stack-parity` expansion has the following refreshed local
+Linux evidence (GCC 13.3, Clang 18.1.3, OpenSSL 3.0.13):
+
+| Configuration | Result | Scope |
+| --- | --- | --- |
+| Static SDK with pinned RNS oracle | 88/88 | Includes 14 actual network cases and 16 differential fixtures. |
+| Shared SDK | 62/62 | Includes POSIX host, daemon, TCP shared-instance and relocated package consumer. |
+| Compression disabled | 61/61 | Same native suite without BZip2/compression case. |
+| Clang ASAN/UBSAN/LSAN | 62/62 | Leak detection enabled, including native process/PTY/package cases. |
+| Pinned Leviculum C API | 65/65 | Native suite plus live initiator, responder and loss recovery. |
+
+RNS source remains pinned to `e40191b3d193b46b7f2d8a44424a594cd758839b`;
+Leviculum to `395edd42fbbffcdfb438fcd80afa17668459d331` (local oracle built
+with Rust 1.98.1). Both reference trees were verified unmodified by CMake.
+Direct and two-router RNS cases include exact bidirectional Channel payloads,
+signed receipts, loss recovery, close and a 1024-byte large-MTU exchange.
+A process case exercises unmodified RNS shared-instance status RPC.
+Resource/service/security/RPC fixtures embed CPython solely as a test oracle;
+they establish differential behavior after handshake, not live Resource/service
+sessions against the external node. The native routing suite additionally
+exercises encrypted in-memory multi-hop links and bounded routing state.
+
+The C harness now waits for RNS's interface-ready log before announcing: an
+earlier parallel run exposed RNS's TCP-read/IFAC-initialization startup race.
+Both direct/routed server cases subsequently passed ten consecutive executions.
+The suite also covers malformed bulk-envelope recovery, completed-advertisement
+proof replay followed by another bulk request, receive-queue backpressure,
+Resource allocation failure/reuse and distant map-hash collisions.
+
+Documentation snapshot `8a22d1f3781defb57acc1bdab25b7d0c234a95aa`, with the
+same implementation, passed all seven [hosted expansion jobs](https://github.com/mondain/reticulum-c/actions/runs/40426146410):
+Linux static/shared/compression-disabled/sanitizers, macOS, RNS and Leviculum.
+The complete RNS suite was also rerun locally at that snapshot: 88/88 passed.
+
+Socket and leak tests require execution outside the restricted local sandbox.
+Actual radio, AutoInterface multicast deployment, Windows, live external
+Resource/service sessions and additional implementations still need separate
+verification.

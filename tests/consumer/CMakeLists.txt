@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(reticulum_c_consumer LANGUAGES C)
-find_package(reticulum_c 0.1 CONFIG REQUIRED)
+find_package(reticulum_c 0.2 CONFIG REQUIRED)
 add_executable(consumer main.c)
 target_link_libraries(consumer PRIVATE reticulum_c::reticulum_c)
 enable_testing()
