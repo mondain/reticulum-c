@@ -9,6 +9,9 @@
  * directly (--rpc-key). Identity files are the raw 64-byte private key the
  * reference uses, so they are interchangeable with rnid. */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
