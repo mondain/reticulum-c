@@ -86,6 +86,19 @@ typedef enum rnc_interface_mode {
   RNC_MODE_ROAMING,
   RNC_MODE_BOUNDARY
 } rnc_interface_mode;
+/* Ingress/egress control (manual 8.18-8.20), enabled by default. Zero fields
+ * select the reference defaults: new_time 7200s, burst_hold 15s, burst_penalty
+ * 15s, held_release_interval 5s, max_held 256 (bounded by the node's shared
+ * table), announce burst 3 Hz on young / 10 Hz on older interfaces, path
+ * request burst 3 / 8 Hz, egress path request limit 5 Hz. Frequencies are
+ * in milli-hertz. */
+typedef struct rnc_ingress_policy {
+  int disabled;        /* turn off ingress and egress control */
+  uint32_t new_time_s, burst_hold_s, burst_penalty_s, held_release_interval_s;
+  uint32_t max_held;
+  uint32_t burst_freq_new_mhz, burst_freq_mhz;
+  uint32_t pr_burst_freq_new_mhz, pr_burst_freq_mhz, ec_pr_freq_mhz;
+} rnc_ingress_policy;
 typedef struct rnc_interface_policy {
   rnc_interface_mode mode;
   uint32_t announce_cap_permille;
@@ -94,6 +107,11 @@ typedef struct rnc_interface_policy {
    * More than `grace` violations block rebroadcast for target + penalty
    * seconds; paths are still learned. */
   uint32_t announce_rate_target, announce_rate_grace, announce_rate_penalty;
+  /* Answer unknown-destination path requests from this interface by searching
+   * other interfaces. GATEWAY, ACCESS_POINT and ROAMING always do; BOUNDARY
+   * searches boundary and gateway peers; FULL only when this is set. */
+  int recursive_path_requests;
+  rnc_ingress_policy ingress;
 } rnc_interface_policy;
 rnc_result rnc_node_interface_policy(rnc_node *node, uint32_t interface_id,
                                      const rnc_interface_policy *policy);

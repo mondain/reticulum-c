@@ -259,6 +259,7 @@ static void serial_pressure_test(void) {
   host = rnc_host_new(node);
   CHECK(host);
   cfg.kind = RNC_HOST_SERIAL;
+  cfg.ingress.disabled = 1; /* exercise queue backpressure, not burst holds */
   cfg.address = device;
   CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
   for (i = 0; i < 125; ++i) {

@@ -11,6 +11,7 @@
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_ipc.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -178,6 +179,52 @@ static int interface_key(interface_config *f, const char *key,
       return 0;
     f->host.announce_cap_permille = (uint32_t)(percent * 10.0 + 0.5);
     return f->host.announce_cap_permille != 0;
+  }
+  if (!strcmp(key, "ingress_control")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->host.ingress.disabled = !b;
+    return 1;
+  }
+  if (!strcmp(key, "recursive_prs")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->host.recursive_path_requests = b;
+    return 1;
+  }
+  {
+    static const struct {
+      const char *name;
+      size_t offset;
+      int hertz;
+    } ic[] = {
+        {"ic_new_time", offsetof(rnc_ingress_policy, new_time_s), 0},
+        {"ic_burst_hold", offsetof(rnc_ingress_policy, burst_hold_s), 0},
+        {"ic_burst_penalty", offsetof(rnc_ingress_policy, burst_penalty_s), 0},
+        {"ic_held_release_interval",
+         offsetof(rnc_ingress_policy, held_release_interval_s), 0},
+        {"ic_max_held_announces", offsetof(rnc_ingress_policy, max_held), 0},
+        {"ic_burst_freq_new", offsetof(rnc_ingress_policy, burst_freq_new_mhz),
+         1},
+        {"ic_burst_freq", offsetof(rnc_ingress_policy, burst_freq_mhz), 1},
+        {"ic_pr_burst_freq_new",
+         offsetof(rnc_ingress_policy, pr_burst_freq_new_mhz), 1},
+        {"ic_pr_burst_freq", offsetof(rnc_ingress_policy, pr_burst_freq_mhz), 1},
+        {"ec_pr_freq", offsetof(rnc_ingress_policy, ec_pr_freq_mhz), 1}};
+    size_t k;
+    for (k = 0; k < sizeof(ic) / sizeof(*ic); k++)
+      if (!strcmp(key, ic[k].name)) {
+        char *end;
+        double v = strtod(value, &end);
+        uint32_t out;
+        if (end == value || *end || !(v > 0.0) || v > 4000000.0)
+          return 0;
+        out = (uint32_t)(ic[k].hertz ? v * 1000.0 + 0.5 : v + 0.5);
+        if (!out)
+          return 0;
+        memcpy((char *)&f->host.ingress + ic[k].offset, &out, sizeof(out));
+        return 1;
+      }
   }
   if (!number(value, UINT32_MAX, &n))
     return 0;

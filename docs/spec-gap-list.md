@@ -167,11 +167,11 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | IMPL | Interface modes: full, gateway, access_point, roaming, boundary | `rnc_node_interface_policy`; announce propagation rules follow the reference behavior as recalled, (the manual's table is an image, so the reference source was used). Rules verified against the pinned reference `Transport.py`. Gateway/AP path-request discovery on behalf of clients is NOT yet implemented. Config keys `mode`/`interface_mode` in the daemon |
 | IMPL | Announce rate control: `announce_cap` | Per-interface via policy and daemon `announce_cap` (percent); default 2% |
 | IMPL | `announce_rate_target` / `grace` / `penalty` | Per-interface policy and daemon keys; blocks rebroadcast only, paths still learned; bounded 128-entry table |
-| MISS | New destination rate limiting (8.18) | No tracking |
-| PART | Path request burst control (8.19) | Tag dedup and pending-table expiry exist, which is not rate limiting |
-| MISS | Per-interface request counters / hold-off | |
+| IMPL | New destination rate limiting (8.18) and ingress control (8.20) | Frequency-tracked burst detection, held announces released one per interval, pending-request and known-destination exemptions. Held announces share a 32-entry node table (reference default is 256 per interface). Released announces bypass the burst gate instead of re-entering it. Config keys `ingress_control`, `ic_*` in the daemon |
+| IMPL | Path request burst control (8.19) and egress control | Per-interface request frequency; recursive requests suppressed during bursts and on interfaces over `ec_pr_freq` |
+| IMPL | Recursive path-request search by mode | Only gateway, access point, roaming and local interfaces (or `recursive_prs`) search; boundary searches boundary and gateway peers; plain FULL no longer recurses, matching the reference. This changed the default for transport nodes |
 | PART | Ingress control (8.20) | Bounded queues (node queue, 32 frames per host interface, 8 node / 24 host interface slots) are capacity limits only |
-| MISS | `ic_*` options, held-announce queue | |
+
 
 ## 5. Config and utilities (manual ch5)
 
