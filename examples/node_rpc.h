@@ -81,6 +81,10 @@ static void key_bool(rnc_rpc_writer *w, const char *key, int value) {
   (void)rnc_rpc_write_string(w, key);
   (void)rnc_rpc_write_bool(w, value);
 }
+static void key_int(rnc_rpc_writer *w, const char *key, int64_t value) {
+  (void)rnc_rpc_write_string(w, key);
+  (void)rnc_rpc_write_int(w, value);
+}
 static void key_real(rnc_rpc_writer *w, const char *key, double value) {
   (void)rnc_rpc_write_string(w, key);
   (void)rnc_rpc_write_real(w, value);
@@ -172,7 +176,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
                                "pr_burst_activated"};
   size_t i;
   (void)rnc_rpc_write_map(w, 24u + sizeof(zeros) / sizeof(*zeros) +
-                                 sizeof(nils) / sizeof(*nils) + 4u);
+                                 sizeof(nils) / sizeof(*nils) + 4u + 3u);
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
   key_string(w, "type", kind_name(s));
@@ -216,6 +220,16 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
     key_uint(w, zeros[i], 0);
   for (i = 0; i < sizeof(nils) / sizeof(*nils); ++i)
     key_nil(w, nils[i]);
+  /* RNode signal figures of the last frame, nil on other interfaces */
+  if (s->has_signal) {
+    key_int(w, "rssi", s->rssi);
+    key_real(w, "snr", (double)s->snr);
+    key_real(w, "q", (double)s->quality);
+  } else {
+    key_nil(w, "rssi");
+    key_nil(w, "snr");
+    key_nil(w, "q");
+  }
   key_bool(w, "txstalled", 0);
   key_bool(w, "burst_active", 0);
   key_bool(w, "pr_burst_active", 0);

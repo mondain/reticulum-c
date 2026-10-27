@@ -667,6 +667,21 @@ differential test: a file the unmodified reference wrote after three rotations
 loads with the same public keys in the same order, and a file written here (four
 rotations) loads in the reference with the same keys.
 
+## RNode signal statistics (`feature/rnode-signal`)
+
+An RNode reports the RSSI and SNR of a frame just before it hands the frame over.
+The host keeps the latest figures as the reference's `r_stat_rssi`, `r_stat_snr`
+and `r_stat_q`: RSSI is the byte less 157 dBm, SNR a signed byte in quarter dB,
+and the quality is `(snr - min) / (6 - min) * 100` with `min = -9 - 2 * (sf - 7)`,
+rounded to a tenth and clamped to 0 to 100. They appear in `rnc_host_status`
+(`has_signal`, `rssi`, `snr`, `quality`), on every `RNC_HOST_NODE` event from that
+interface (like `packet.rssi`, `packet.snr`, `packet.q`), and in the RPC interface
+stats as `rssi`, `snr` and `q` (nil on other interfaces), which
+`reticulum-c-ctl status` prints. Per-link tracking is not provided.
+
+Evidence: a host test with an emulated RNode that sends the statistics frames
+before an announce, at SF7, SF9, and both clamp ends; the RPC test checks the
+new keys.
 ## WiFi RNode and TCP_NODELAY (`feature/rnode-tcp`)
 
 An RNodeInterface whose `port` is `tcp://host` talks to the device over TCP

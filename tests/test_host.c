@@ -789,6 +789,89 @@ static void rnode_detect_test(void) {
   CHECK(!status.radio_ready && !status.online);
   puts("host RNode detection tests passed");
 }
+/* RSSI, SNR and link quality: an RNode reports them just before each received
+ * frame, and they travel with the host event for that packet. */
+static void rnode_signal_run(unsigned sf, uint8_t rssi_byte, uint8_t snr_byte,
+                             int want_rssi, double want_snr, double want_q) {
+  uint8_t key[64] = {0}, key2[64] = {9}, raw[RNC_MAX_MTU], wire[RNC_HOST_FRAME_MAX],
+          stats[8];
+  unsigned rng = 0, i;
+  uint64_t now = 100;
+  size_t n, m;
+  detect_tap tap;
+  rnc_identity id, other;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_host_event event;
+  rnc_packet announce;
+  int found = 0;
+  memset(&tap, 0, sizeof(tap));
+  tap.mode = 2;
+  tap.fw[0] = 1;
+  tap.fw[1] = 74;
+  tap.master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  CHECK(tap.master >= 0 && !grantpt(tap.master) && !unlockpt(tap.master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK &&
+        rnc_identity_from_private(&other, key2) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  host = node ? rnc_host_new(node) : NULL;
+  CHECK(host);
+  cfg.kind = RNC_HOST_RNODE;
+  cfg.address = ptsname(tap.master);
+  cfg.serial_baud = 115200;
+  cfg.frequency = 915000000;
+  cfg.bandwidth = 125000;
+  cfg.tx_power = 10;
+  cfg.spreading_factor = sf;
+  cfg.coding_rate = 5;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  for (i = 0; i < 1000; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 10) == RNC_OK);
+    detect_drain(&tap);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    if (status.radio_ready)
+      break;
+  }
+  CHECK(status.radio_ready && !status.has_signal);
+  /* the statistics, then an announce from another node */
+  CHECK(rnc_announce_create(&other, "signal.test", NULL, 0, 1700000000, random_bytes,
+                            &rng, &announce) == RNC_OK);
+  CHECK(rnc_packet_encode(&announce, raw, sizeof(raw), &n) == RNC_OK);
+  stats[0] = 0xc0, stats[1] = 0x23, stats[2] = rssi_byte, stats[3] = 0xc0;
+  stats[4] = 0xc0, stats[5] = 0x24, stats[6] = snr_byte, stats[7] = 0xc0;
+  CHECK(write(tap.master, stats, sizeof(stats)) == (ssize_t)sizeof(stats));
+  CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0, raw, n, wire,
+                              sizeof(wire), &m) == RNC_OK);
+  CHECK(write(tap.master, wire, m) == (ssize_t)m);
+  for (i = 0; i < 200 && !found; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 10) == RNC_OK);
+    while (rnc_host_poll(host, &event) == RNC_OK)
+      if (event.type == RNC_HOST_NODE && event.node.type == RNC_NODE_ANNOUNCE) {
+        CHECK(event.has_signal && event.rssi == want_rssi);
+        CHECK(event.snr > want_snr - 0.001f && event.snr < want_snr + 0.001f);
+        CHECK(event.quality > want_q - 0.01f && event.quality < want_q + 0.01f);
+        found = 1;
+      }
+  }
+  CHECK(found);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && status.has_signal &&
+        status.rssi == want_rssi);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(tap.master);
+}
+static void rnode_signal_test(void) {
+  /* SF7: quality spans -9 to 6 dB; RSSI is the byte less 157 */
+  rnode_signal_run(7, 100, 13, -57, 3.25, 81.7);
+  /* SF9 shifts the lower end by 4 dB to -13; negative SNR is a signed byte */
+  rnode_signal_run(9, 140, 0xf0, -17, -4.0, 47.4);
+  /* clamped at both ends */
+  rnode_signal_run(7, 157, 0x7f, 0, 31.75, 100.0);
+  rnode_signal_run(12, 20, 0x80, -137, -32.0, 0.0);
+  puts("host RNode signal tests passed");
+}
 static int tcp_listener(int family, uint16_t *port);
 static int accept_within(rnc_host *host, int listener, uint64_t *now,
                          unsigned steps);
@@ -1730,6 +1813,8 @@ int main(int argc, char **argv) {
     radio_test();
   else if (!strcmp(argv[1], "rnode_detect"))
     rnode_detect_test();
+  else if (!strcmp(argv[1], "rnode_signal"))
+    rnode_signal_test();
   else if (!strcmp(argv[1], "rnode_tcp"))
     rnode_tcp_test();
   else if (!strcmp(argv[1], "rnode_extras"))

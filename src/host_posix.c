@@ -376,6 +376,15 @@ static int emit_host(rnc_host *h, rnc_host_event_type type, uint32_t id,
   e->error_number = error;
   if (node)
     e->node = *node;
+  if (type == RNC_HOST_NODE) {
+    const host_interface *f = find_interface(h, id);
+    if (f && f->status.has_signal) {
+      e->has_signal = 1;
+      e->rssi = f->status.rssi;
+      e->snr = f->status.snr;
+      e->quality = f->status.quality;
+    }
+  }
   ++h->count;
   return 1;
 }
@@ -1714,7 +1723,18 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
                             &command, raw, sizeof(raw), &n);
     if (r == RNC_OK) {
       if (f->status.kind == RNC_HOST_RNODE && command) {
-        if (command == 0x08) {
+        if (command == 0x23 && n >= 1) { /* RSSI of the next frame */
+          f->status.rssi = (int)raw[0] - 157;
+          f->status.has_signal = 1;
+        } else if (command == 0x24 && n >= 1) { /* SNR in quarter dB */
+          int sfs = (int)f->radio.spreading_factor - 7;
+          double snr = (int8_t)raw[0] * 0.25;
+          double min = -9.0 - sfs * 2.0, q = (snr - min) / (6.0 - min) * 100.0;
+          q = (double)((long)(q * 10.0 + (q < 0 ? -0.5 : 0.5))) / 10.0;
+          f->status.snr = (float)snr;
+          f->status.quality = (float)(q > 100.0 ? 100.0 : q < 0.0 ? 0.0 : q);
+          f->status.has_signal = 1;
+        } else if (command == 0x08) {
           if (n >= 1 && raw[0] == 0x46 && !f->rnode_detected) {
             f->rnode_detected = 1;
             (void)configure_radio(f, &f->radio);

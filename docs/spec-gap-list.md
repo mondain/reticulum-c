@@ -102,7 +102,7 @@ Largest gaps, in priority order:
 | IMPL | RTT | `rnc_link_rtt` |
 | N/A | ResourceStrategy | By design the application admits each Resource with `rnc_resource_accept` (the ACCEPT_NONE / APP / ALL choice is the application's own policy before it calls it) |
 | IMPL | `get_age`, `no_inbound_for`, `no_outbound_for`, `no_data_for`, `get_mode`, `get_establishment_rate`, `get_expected_rate` | `rnc_link_age_ms`, `rnc_link_no_inbound_ms`, `rnc_link_no_outbound_ms`, `rnc_link_no_data_ms`, `rnc_link_mode`, `rnc_link_establishment_rate`, `rnc_link_last_resource_eifr` |
-| MISS | `track_phy_stats`, rssi/snr/q | Needs interface signal data the host does not collect |
+| PART | `track_phy_stats`, rssi/snr/q | The host now collects RSSI, SNR and quality from RNodes and attaches them to each received packet's host event; per-link tracking (`link.get_rssi()`) is not provided |
 | IMPL | RequestReceipt status and progress | `rnc_requester_progress` / `rnc_service_request_state`: FAILED, SENT, DELIVERED (request Resource arrived), RECEIVING (0..1 response Resource progress), READY. Callbacks are events/polling |
 
 ### Resource
@@ -158,8 +158,9 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | I2P | MISS | Entire type |
 | RNode LoRa | IMPL | Radio setup over KISS, `radio_ready` ack, flow control, serial reopen |
 | RNode LoRa | IMPL | Detection (DETECT, firmware version, platform and MCU asked first; the radio is configured when the device answers, and the interface drops after 5 s of silence) and the firmware check (at least 1.52, otherwise the interface is refused and not retried) |
+| RNode LoRa | IMPL | RSSI (dBm), SNR (dB) and link quality (percent from SNR and spreading factor) of the last frame: `rnc_host_status`, on each host event for a received packet, and the RPC interface stats (`rssi`, `snr`, `q`, shown by `reticulum-c-ctl status`) |
+| RNode LoRa | MISS | BLE RNode, battery, temperature and channel statistics |
 | RNode LoRa | IMPL | WiFi RNode over TCP: `port = tcp://host` (port 7633, or `rnc_host_config.port`); the same KISS protocol, detection and radio setup once the socket opens, a detection ping after 3.5 s of silence, reconnect after a drop |
-| RNode LoRa | MISS | BLE RNode, RSSI/SNR/battery stats |
 | RNode Multi | MISS | Sub-interfaces (only `kiss_port` in the command byte) |
 | Serial | IMPL | HDLC over termios, speed |
 | Serial | IMPL | databits, parity, stopbits (daemon `databits` / `parity` / `stopbits`) |
