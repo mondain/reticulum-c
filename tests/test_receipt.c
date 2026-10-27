@@ -52,6 +52,10 @@ static pair setup(void) {
   CHECK(rnc_node_input(p.a, 1, &e.packet, 1000, 20) == RNC_OK);
   return p;
 }
+static void release(pair *p) {
+  rnc_node_free(p->a);
+  rnc_node_free(p->b);
+}
 static rnc_packet data_to(const pair *p, const char *text) {
   rnc_packet d = {0};
   memcpy(d.destination, p->dest, 16);
@@ -78,6 +82,7 @@ static void prove_all(void) {
   CHECK(e.receipt_status == RNC_RECEIPT_DELIVERED);
   CHECK(!memcmp(e.receipt_hash, hash, 32));
   CHECK(e.rtt_ms == 60);
+  release(&p);
 }
 /* PROVE_NONE (default): no proof is generated; the receipt times out. */
 static void timeout(void) {
@@ -96,6 +101,7 @@ static void timeout(void) {
   CHECK(next(p.a, RNC_NODE_RECEIPT, &e));
   CHECK(e.receipt_status == RNC_RECEIPT_FAILED);
   CHECK(!memcmp(e.receipt_hash, hash, 32));
+  release(&p);
 }
 /* PROVE_APP: the application proves explicitly using the ingress interface. */
 static void prove_app(void) {
@@ -116,6 +122,7 @@ static void prove_app(void) {
   CHECK(rnc_node_input(p.a, 1, &proof.packet, 1000, 150) == RNC_OK);
   CHECK(next(p.a, RNC_NODE_RECEIPT, &e));
   CHECK(e.receipt_status == RNC_RECEIPT_DELIVERED);
+  release(&p);
 }
 /* A proof signed by another identity must not satisfy the receipt. */
 static void forged(void) {
@@ -137,6 +144,7 @@ static void forged(void) {
   CHECK(rnc_node_tick(p.a, 1000, 5200) == RNC_OK);
   CHECK(next(p.a, RNC_NODE_RECEIPT, &e));
   CHECK(e.receipt_status == RNC_RECEIPT_FAILED);
+  release(&p);
 }
 int main(int argc, char **argv) {
   if (argc != 2)

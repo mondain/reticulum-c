@@ -95,7 +95,7 @@ static void bounded(void) {
   rnc_node_free(n);
 }
 static void persistence(void) {
-  rnc_node *n = make(), *m = make();
+  rnc_node *n = make(), *m = make(), *bad = make();
   rnc_identity id;
   rnc_packet p = announce(&id, "recall.save", "kept", 1000);
   rnc_announce a;
@@ -108,11 +108,12 @@ static void persistence(void) {
   CHECK(rnc_node_recall(m, p.destination, &a) == RNC_OK && a.app_size == 4);
   /* Any modification is rejected as a whole. */
   blob[size / 2] ^= 1;
-  CHECK(rnc_node_known_import(make(), blob, size) == RNC_AUTH);
+  CHECK(rnc_node_known_import(bad, blob, size) == RNC_AUTH);
   blob[size / 2] ^= 1;
   CHECK(rnc_node_known_export(n, blob, 8, &size) == RNC_NO_SPACE);
   rnc_node_free(n);
   rnc_node_free(m);
+  rnc_node_free(bad);
 }
 static void aspect(void) {
   rnc_identity id;
