@@ -897,8 +897,9 @@ static void tcp_options_test(void) {
         continue;
       found = 1;
       n = sizeof(value);
+      /* BSD kernels report boolean options as their flag bit, not 1 */
       CHECK(getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &value, &n) == 0 &&
-            value == 1);
+            value != 0);
 #ifdef __linux__
       CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &value, &n) == 0 &&
             value == 5);
