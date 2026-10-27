@@ -119,7 +119,8 @@ typedef struct node_receipt {
   int used;
   uint8_t hash[32];
   rnc_identity signer;
-  uint64_t sent, expiry;
+  rnc_receipt_status state;
+  uint64_t sent, expiry, rtt, done_at;
 } node_receipt;
 typedef struct node_request {
   int used, pending;
@@ -319,13 +320,16 @@ static int receipt_complete(rnc_node *n, const rnc_packet *proof,
   for (i = 0; i < RNC_NODE_RECEIPTS; i++) {
     node_receipt *t = &n->receipts[i];
     rnc_node_event *e;
-    if (!t->used || memcmp(t->hash, proof->destination, 16))
+    if (!t->used || t->state != RNC_RECEIPT_SENT ||
+        memcmp(t->hash, proof->destination, 16))
       continue;
     e = emit(n, RNC_NODE_RECEIPT, 0, NULL);
     memcpy(e->receipt_hash, t->hash, 32);
     e->receipt_status = RNC_RECEIPT_DELIVERED;
     e->rtt_ms = now - t->sent;
-    t->used = 0;
+    t->state = RNC_RECEIPT_DELIVERED;
+    t->rtt = e->rtt_ms;
+    t->done_at = now;
     return 1;
   }
   return 0;
@@ -1684,6 +1688,39 @@ rnc_result rnc_node_prove(rnc_node *n, const uint8_t address[16],
   n->now = now;
   return RNC_OK;
 }
+rnc_result rnc_node_receipt_status(const rnc_node *n, const uint8_t hash[32],
+                                   rnc_receipt_status *status,
+                                   uint64_t *rtt_ms) {
+  size_t i;
+  if (!n || !hash || !status)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_RECEIPTS; i++)
+    if (n->receipts[i].used && !memcmp(n->receipts[i].hash, hash, 32)) {
+      *status = n->receipts[i].state;
+      if (rtt_ms)
+        *rtt_ms = n->receipts[i].rtt;
+      return RNC_OK;
+    }
+  return RNC_STATE;
+}
+/* Packet.TIMEOUT_PER_HOP and Transport.first_hop_timeout in milliseconds:
+ * 6 s per hop, plus 6 s and one MTU at the first hop interface's bitrate. */
+rnc_result rnc_node_receipt_timeout(rnc_node *n, const uint8_t destination[16],
+                                    uint64_t now, uint64_t *timeout_ms) {
+  node_route *route;
+  node_interface *iface;
+  if (!n || !destination || !timeout_ms || now < n->now)
+    return RNC_INVALID;
+  route = route_find(n, destination, now);
+  if (!route)
+    return RNC_STATE;
+  iface = interface(n, route->route.interface_id);
+  *timeout_ms = 6000u + 6000u * route->route.hops +
+                (iface && iface->bitrate
+                     ? (uint64_t)RNC_MTU * 8u * 1000u / iface->bitrate
+                     : 0u);
+  return RNC_OK;
+}
 rnc_result rnc_node_send_tracked(rnc_node *n, const rnc_packet *packet,
                                  uint64_t timeout, uint64_t unix_seconds,
                                  uint64_t now, uint8_t hash[32]) {
@@ -1692,7 +1729,7 @@ rnc_result rnc_node_send_tracked(rnc_node *n, const rnc_packet *packet,
   uint8_t digest[32];
   size_t i;
   rnc_result r;
-  if (!n || !packet || !hash || !timeout || now < n->now)
+  if (!n || !packet || !hash || now < n->now)
     return RNC_INVALID;
   if ((packet->flags & 3u) != RNC_DATA ||
       ((packet->flags >> 2) & 3u) != RNC_SINGLE)
@@ -1700,11 +1737,19 @@ rnc_result rnc_node_send_tracked(rnc_node *n, const rnc_packet *packet,
   route = route_find(n, packet->destination, now);
   if (!route)
     return RNC_STATE;
-  for (i = 0; i < RNC_NODE_RECEIPTS; i++)
-    if (!n->receipts[i].used) {
-      t = &n->receipts[i];
+  if (!timeout &&
+      rnc_node_receipt_timeout(n, packet->destination, now, &timeout) != RNC_OK)
+    return RNC_STATE;
+  /* a free slot, else the oldest finished receipt; pending ones are kept */
+  for (i = 0; i < RNC_NODE_RECEIPTS; i++) {
+    node_receipt *c = &n->receipts[i];
+    if (!c->used) {
+      t = c;
       break;
     }
+    if (c->state != RNC_RECEIPT_SENT && (!t || c->done_at < t->done_at))
+      t = c;
+  }
   if (!t)
     return RNC_AGAIN;
   r = rnc_packet_hash(packet, digest);
@@ -1715,6 +1760,7 @@ rnc_result rnc_node_send_tracked(rnc_node *n, const rnc_packet *packet,
     return r;
   memset(t, 0, sizeof(*t));
   t->used = 1;
+  t->state = RNC_RECEIPT_SENT;
   memcpy(t->hash, digest, 32);
   t->signer = route->route.announce.identity;
   t->sent = now;
@@ -1917,12 +1963,15 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
       announce_retry(n, a, now);
   }
   for (i = 0; i < RNC_NODE_RECEIPTS && room(n, 1); i++)
-    if (n->receipts[i].used && n->receipts[i].expiry <= now) {
+    if (n->receipts[i].used && n->receipts[i].state == RNC_RECEIPT_SENT &&
+        n->receipts[i].expiry <= now) {
       rnc_node_event *e = emit(n, RNC_NODE_RECEIPT, 0, NULL);
       memcpy(e->receipt_hash, n->receipts[i].hash, 32);
       e->receipt_status = RNC_RECEIPT_FAILED;
       e->rtt_ms = now - n->receipts[i].sent;
-      n->receipts[i].used = 0;
+      n->receipts[i].state = RNC_RECEIPT_FAILED;
+      n->receipts[i].rtt = e->rtt_ms;
+      n->receipts[i].done_at = now;
     }
   for (i = 0; i < RNC_NODE_INTERFACES && room(n, 1); i++) {
     node_interface *iface = &n->interfaces[i];

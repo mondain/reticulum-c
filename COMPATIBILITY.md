@@ -382,3 +382,19 @@ that had been removed dereferenced a null interface (a TCP client leaving while
 its announce was queued for retransmission crashed the daemon). Regression test
 `reticulum_announce_ingress_removed`.
 
+
+## Packet receipts (`feature/packet-receipts`)
+
+Tracked sends already reported DELIVERED or FAILED with an RTT. Receipts can now
+be queried (`rnc_node_receipt_status`: SENT while pending, DELIVERED/FAILED with
+the RTT afterwards, `RNC_STATE` for an unknown or recycled hash, the reference's
+CULLED), and `rnc_node_send_tracked` with a timeout of 0 uses the reference's
+default, `Transport.first_hop_timeout + Packet.TIMEOUT_PER_HOP * hops`: 6 s per
+hop, plus 6 s and one 500-byte MTU at the first hop interface's bitrate
+(`rnc_node_receipt_timeout` exposes it). Finished receipts stay queryable until
+their slot is recycled, oldest first; the 32 slots are never taken from pending
+receipts (`RNC_AGAIN` when all are pending). Link-proof receipts, `resend` and
+signal-quality accessors are not provided.
+
+Evidence: unit tests for pending/delivered/failed queries, slot recycling and
+the default timeout boundary (expires exactly at the computed value).
