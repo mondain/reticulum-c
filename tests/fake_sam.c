@@ -262,6 +262,7 @@ int main(int argc, char **argv) {
   int listener = socket(AF_INET, SOCK_STREAM, 0), one = 1, i;
   struct sockaddr_in a = {0};
   socklen_t n = sizeof(a);
+  pid_t parent;
   if (argc < 2)
     return 2;
   log_file = fopen(argv[1], "a");
@@ -275,6 +276,7 @@ int main(int argc, char **argv) {
       listen(listener, 16) < 0 ||
       getsockname(listener, (struct sockaddr *)&a, &n) < 0)
     return 2;
+  parent = getppid();
   printf("%u\n", ntohs(a.sin_port));
   fflush(stdout);
   for (;;) {
@@ -288,8 +290,10 @@ int main(int argc, char **argv) {
         pf[count].events = POLLIN;
         idx[count++] = i;
       }
-    if (poll(pf, (nfds_t)count, -1) < 0 && errno != EINTR)
+    if (poll(pf, (nfds_t)count, 1000) < 0 && errno != EINTR)
       return 2;
+    if (getppid() != parent) /* the test that started this is gone */
+      return 0;
     if (pf[0].revents & POLLIN) {
       int fd = accept(listener, NULL, NULL);
       for (i = 0; fd >= 0 && i < MAX_CONN; ++i)

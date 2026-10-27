@@ -13,6 +13,7 @@
 #include <openssl/crypto.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
+#include <reticulum_c/rnc_i2p.h>
 #include <reticulum_c/rnc_log.h>
 #include <signal.h>
 #include <stdio.h>
@@ -266,6 +267,29 @@ typedef struct host_frame {
 } host_frame;
 /* KISS TNCs share one setup sequence, ready-flow control and station ID. */
 #define TNC_KIND(k) ((k) == RNC_HOST_KISS || (k) == RNC_HOST_AX25)
+/* Kinds backed by a device node, as opposed to sockets. */
+#define DEVICE_KIND(k) ((k) >= RNC_HOST_SERIAL && (k) <= RNC_HOST_AX25)
+/* I2P: the SAM conversation a socket is in. Zero once the socket carries the
+ * stream (or, for the controller, never: it keeps answering PING). */
+enum { SAM_NONE = 0, SAM_SESSION, SAM_CONNECT, SAM_ACCEPT };
+enum {
+  SS_IDLE = 0,
+  SS_HELLO,
+  SS_DEST,
+  SS_SESSION,
+  SS_CONTROL,
+  SS_LOOKUP,
+  SS_CONNECT,
+  SS_ACCEPT,
+  SS_REMOTE
+};
+#define I2P_MTU 1064u
+#define I2P_RECONNECT_MS 15000u
+#define I2P_SESSION_TIMEOUT_MS 180000u
+#define I2P_STREAM_TIMEOUT_MS 120000u
+#define I2P_PROBE_AFTER_MS 10000u
+#define I2P_READ_TIMEOUT_MS 110000u
+#define I2P_PEER_MAX 704u
 #define HOST_FLAP_SLOTS 32u
 typedef struct host_flap {
   char ip[INET6_ADDRSTRLEN];
@@ -288,6 +312,17 @@ typedef struct host_interface {
   pid_t child;
   int kiss, gave_up, connect_failed, rnode_detected, rnode_tcp;
   uint64_t last_write_ms;
+  int sam_role, sam_step, i2p_ready, sam_streamed;
+  char sam_line[RNC_I2P_REPLY_MAX];
+  size_t sam_len;
+  uint64_t sam_deadline, accept_after, last_read_ms;
+  unsigned peer_index;
+  char sam_peer[I2P_PEER_MAX]; /* connect: name or destination being dialled */
+  char i2p_key_path[256], i2p_session[24];
+  char i2p_private[1024];
+  char *i2p_peers; /* connectable peers, NUL separated */
+  size_t i2p_peers_size;
+  unsigned i2p_peer_count;
   unsigned tries;
   uint64_t connect_deadline;
   char ax_call[7];
@@ -458,6 +493,7 @@ static void flap_record(host_interface *l, const char *ip, uint64_t now) {
   l->flaps[slot].count = 1;
   l->flaps[slot].last = now;
 }
+static void i2p_session_lost(rnc_host *h, host_interface *controller);
 static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
   int was_connecting = f->connecting || f->connect_failed;
   if (f->flap_pending) {
@@ -487,6 +523,10 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
       rnc_logf(RNC_LOG_INFO, "host", "interface %s is down", f->status.name);
   }
   f->status.online = 0;
+  f->sam_step = 0;
+  f->sam_len = 0;
+  if (f->status.kind == RNC_HOST_I2P)
+    i2p_session_lost(h, f);
   if (f->status.kind == RNC_HOST_RNODE) {
     f->status.radio_ready = 0;
     f->radio_ack_mask = 0;
@@ -498,7 +538,8 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
   f->connecting = 0;
   f->connect_failed = 0;
   f->queue_count = 0;
-  if (f->status.kind == RNC_HOST_TCP_CONNECT && !f->accepted) {
+  if ((f->status.kind == RNC_HOST_TCP_CONNECT && !f->accepted) ||
+      f->status.kind == RNC_HOST_I2P) {
     if (was_connecting && f->radio.max_reconnect_tries &&
         ++f->tries >= f->radio.max_reconnect_tries)
       f->gave_up = 1;
@@ -583,27 +624,36 @@ static int socket_bound(struct sockaddr_storage *a, socklen_t size, int type) {
 }
 /* Dead-peer detection as the reference sets it: probe after 5 s idle, every
  * 2 s, 12 times; unacknowledged data aborts after 24 s. */
-static void tcp_tune(int fd) {
+static void tcp_tune_with(int fd, int idle, int interval, int probes,
+                          int user_timeout_ms) {
   int on = 1;
   /* small frames go out at once instead of waiting for the previous ACK */
   (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
   (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
 #ifdef TCP_KEEPIDLE
   {
-    int idle = 5, interval = 2, probes = 12;
     (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
     (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval,
                      sizeof(interval));
     (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof(probes));
   }
+#else
+  (void)idle;
+  (void)interval;
+  (void)probes;
 #endif
 #ifdef TCP_USER_TIMEOUT
-  {
-    int ms = 24000;
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &ms, sizeof(ms));
-  }
+  (void)setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms,
+                   sizeof(user_timeout_ms));
+#else
+  (void)user_timeout_ms;
 #endif
 }
+static void tcp_tune(int fd) { tcp_tune_with(fd, 5, 2, 12, 24000); }
+/* The reference's I2P peers probe after 10 s idle, every 9 s, 5 times, and
+ * abort unacknowledged data after 45 s. */
+static void i2p_tune(int fd) { tcp_tune_with(fd, 10, 9, 5, 45000); }
+static rnc_result sam_start(rnc_host *h, host_interface *f);
 static int connect_interface(rnc_host *h, host_interface *f) {
   int fd = socket(f->peer.ss_family, SOCK_STREAM, 0), rc;
   if (fd < 0)
@@ -612,7 +662,10 @@ static int connect_interface(rnc_host *h, host_interface *f) {
     close(fd);
     return -1;
   }
-  tcp_tune(fd);
+  if (f->sam_role)
+    i2p_tune(fd);
+  else
+    tcp_tune(fd);
   rc = connect(fd, (struct sockaddr *)&f->peer, f->peer_size);
   if (rc < 0 && errno != EINPROGRESS) {
     int e = errno;
@@ -625,7 +678,8 @@ static int connect_interface(rnc_host *h, host_interface *f) {
   /* rnc_host_add has no clock, so h->now may still be stale; the deadline is
    * set from the first step that sees the connection pending. */
   f->connect_deadline = 0;
-  if (!f->connecting && activate(h, f) != RNC_OK) {
+  if (!f->connecting &&
+      (f->sam_role ? sam_start(h, f) : activate(h, f)) != RNC_OK) {
     close(fd);
     f->fd = -1;
     errno = ENOSPC;
@@ -1047,6 +1101,7 @@ rnc_result rnc_host_remove(rnc_host *h, uint32_t id) {
     if (h->interfaces[i].used && h->interfaces[i].status.parent_id == id)
       (void)rnc_host_remove(h, h->interfaces[i].status.interface_id);
   disconnect_interface(h, f, 0);
+  free(f->i2p_peers);
   if (f->discovery_fd >= 0)
     close(f->discovery_fd);
   if (f->unicast_fd >= 0)
@@ -1070,7 +1125,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   socklen_t bind_size;
   rnc_result r = RNC_STATE;
   if (!h || !c || !id || id >= 0x80000000u || c->kind < RNC_HOST_TCP_LISTEN ||
-      c->kind > RNC_HOST_AX25 || c->kiss_port > 15 || find_interface(h, id))
+      c->kind > RNC_HOST_I2P || c->kiss_port > 15 || find_interface(h, id))
     return RNC_INVALID;
   if (c->kind == RNC_HOST_RNODE &&
       (!c->frequency || !c->bandwidth || c->spreading_factor < 5 ||
@@ -1093,6 +1148,17 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     return RNC_INVALID;
   if (c->kiss_framing && c->kind != RNC_HOST_TCP_CONNECT)
     return RNC_INVALID;
+  if (c->kind == RNC_HOST_I2P) {
+    size_t k;
+    if (!c->i2p_key_path || !*c->i2p_key_path ||
+        strlen(c->i2p_key_path) >= sizeof(((host_interface *)0)->i2p_key_path) ||
+        (c->i2p_peer_count && !c->i2p_peers) || c->i2p_peer_count > 8u)
+      return RNC_INVALID;
+    for (k = 0; k < c->i2p_peer_count; ++k)
+      if (!c->i2p_peers[k] || !*c->i2p_peers[k] ||
+          strlen(c->i2p_peers[k]) >= I2P_PEER_MAX)
+        return RNC_INVALID;
+  }
   if (c->kind == RNC_HOST_AX25) {
     size_t k, len = c->callsign ? strlen(c->callsign) : 0;
     if (len < 3 || len > 6 || c->ssid > 15)
@@ -1104,7 +1170,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
         return RNC_INVALID;
   }
   if (c->mtu && (c->mtu < RNC_MTU || c->mtu > RNC_MAX_MTU ||
-                 (c->kind >= RNC_HOST_SERIAL && c->mtu > RNC_MTU) ||
+                 (DEVICE_KIND(c->kind) && c->mtu > RNC_MTU) ||
                  (c->kind == RNC_HOST_AUTO && c->mtu > 1196)))
     return RNC_INVALID;
   if (c->ifac && (!c->ifac->size || c->ifac->size > RNC_IFAC_MAX_SIZE))
@@ -1120,7 +1186,10 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->status.interface_id = id;
   f->status.kind = c->kind;
   f->status.radio_ready = c->kind != RNC_HOST_RNODE;
-  f->status.mtu = c->mtu ? c->mtu : c->kind == RNC_HOST_AUTO ? 1196 : RNC_MTU;
+  f->status.mtu = c->mtu                       ? c->mtu
+                  : c->kind == RNC_HOST_AUTO ? 1196
+                  : c->kind == RNC_HOST_I2P  ? I2P_MTU
+                                             : RNC_MTU;
   f->status.mode = c->mode;
   f->status.announce_cap_permille = c->announce_cap_permille;
   f->policy.mode = c->mode;
@@ -1165,6 +1234,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       f->bitrate = 1u;
   } else
     f->bitrate = c->kind == RNC_HOST_PIPE  ? 1000000u
+                 : c->kind == RNC_HOST_I2P  ? 256000u
                  : c->kind == RNC_HOST_AX25 ? 1200u
                                             : 10000000u;
   f->status.bitrate = f->bitrate;
@@ -1188,6 +1258,31 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->radio.name = NULL;
   f->radio.id_callsign = NULL;
   f->radio.callsign = NULL;
+  f->radio.i2p_key_path = NULL;
+  f->radio.i2p_peers = NULL;
+  if (c->kind == RNC_HOST_I2P) {
+    size_t k, used = 0;
+    if (!f->radio.reconnect_wait_ms)
+      f->radio.reconnect_wait_ms = I2P_RECONNECT_MS;
+    (void)copy_text(f->i2p_key_path, sizeof(f->i2p_key_path), c->i2p_key_path);
+    (void)snprintf(f->i2p_session, sizeof(f->i2p_session), "rnc%08x", id);
+    f->i2p_peer_count = (unsigned)c->i2p_peer_count;
+    for (k = 0; k < c->i2p_peer_count; ++k)
+      used += strlen(c->i2p_peers[k]) + 1u;
+    if (used) {
+      f->i2p_peers = malloc(used);
+      if (!f->i2p_peers) {
+        r = RNC_NO_SPACE;
+        goto fail;
+      }
+      f->i2p_peers_size = used;
+      for (used = k = 0; k < c->i2p_peer_count; ++k) {
+        size_t n = strlen(c->i2p_peers[k]) + 1u;
+        memcpy(f->i2p_peers + used, c->i2p_peers[k], n);
+        used += n;
+      }
+    }
+  }
   if (c->kind == RNC_HOST_AX25) {
     size_t k;
     for (k = 0; c->callsign[k]; ++k)
@@ -1228,6 +1323,18 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       r = RNC_INVALID;
       goto fail;
     }
+    if (connect_interface(h, f) < 0) {
+      f->status.last_errno = errno;
+      note_connect_failure(h, f);
+    }
+  } else if (c->kind == RNC_HOST_I2P) {
+    if (resolve(*f->address ? f->address : "127.0.0.1",
+                c->port ? c->port : 7656, SOCK_STREAM, 0, AF_UNSPEC,
+                c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
+      r = RNC_INVALID;
+      goto fail;
+    }
+    f->sam_role = SAM_SESSION;
     if (connect_interface(h, f) < 0) {
       f->status.last_errno = errno;
       note_connect_failure(h, f);
@@ -1324,8 +1431,10 @@ rnc_result rnc_host_status_at(const rnc_host *h, size_t index,
                               rnc_host_status *out) {
   if (!h || !out)
     return RNC_INVALID;
-  if (index >= RNC_HOST_SLOTS || !h->interfaces[index].used)
-    return RNC_AGAIN;
+  if (index >= RNC_HOST_SLOTS || !h->interfaces[index].used ||
+      (h->interfaces[index].sam_role == SAM_ACCEPT &&
+       !h->interfaces[index].sam_streamed))
+    return RNC_AGAIN; /* an I2P acceptor still waiting is not yet a peer */
   *out = h->interfaces[index].status;
   out->queued_frames = h->interfaces[index].queue_count;
   out->blocked_ips = blocked_count(h, &h->interfaces[index]);
@@ -1555,6 +1664,383 @@ static void accept_tcp(rnc_host *h, host_interface *parent) {
     ++parent->status.dropped_packets;
   }
 }
+/* ---- I2P through a router's SAM v3 bridge ----
+ * The controller interface keeps one SAM socket open for the session (the
+ * session ends with it). Every stream is a further socket to the bridge: it
+ * says HELLO, then either STREAM CONNECT (after a NAMING LOOKUP when the peer
+ * is a name) or STREAM ACCEPT, and once the router answers the same socket
+ * carries HDLC frames like a TCP connection. Replies are read line by line
+ * through the interface's input buffer, so bytes that follow the last reply
+ * flow into the framer unchanged. */
+static int sam_send(host_interface *f, const char *text) {
+  size_t n = strlen(text);
+#ifdef MSG_NOSIGNAL
+  ssize_t w = send(f->fd, text, n, MSG_NOSIGNAL);
+#else
+  ssize_t w = send(f->fd, text, n, 0);
+#endif
+  return w == (ssize_t)n ? 0 : -1;
+}
+static void sam_fail(rnc_host *h, host_interface *f, const char *what) {
+  rnc_logf(RNC_LOG_ERROR, "host", "%s: %s", f->status.name, what);
+  disconnect_interface(h, f, EPROTO);
+}
+static rnc_result sam_start(rnc_host *h, host_interface *f) {
+  (void)h;
+  f->sam_step = SS_HELLO;
+  f->sam_len = 0;
+  f->sam_deadline = 0;
+  f->last_read_ms = 0;
+  return sam_send(f, "HELLO VERSION MIN=3.1 MAX=3.1\n") == 0 ? RNC_OK
+                                                           : RNC_STATE;
+}
+/* 1 = key loaded, 0 = no key file yet, -1 = unusable file (never overwritten) */
+static int i2p_load_key(host_interface *f) {
+  char text[sizeof(f->i2p_private)], pub[700];
+  size_t n;
+  FILE *file = fopen(f->i2p_key_path, "r");
+  if (!file)
+    return errno == ENOENT ? 0 : -1;
+  n = fread(text, 1, sizeof(text) - 1u, file);
+  fclose(file);
+  while (n && (text[n - 1] == '\n' || text[n - 1] == '\r' ||
+               text[n - 1] == ' '))
+    --n;
+  text[n] = 0;
+  if (!n || rnc_i2p_private_to_public(text, pub, sizeof(pub)) != RNC_OK) {
+    OPENSSL_cleanse(text, sizeof(text));
+    return -1;
+  }
+  memcpy(f->i2p_private, text, n + 1u);
+  OPENSSL_cleanse(text, sizeof(text));
+  return 1;
+}
+static int i2p_save_key(host_interface *f) {
+  char tmp[sizeof(f->i2p_key_path) + 8u];
+  size_t n = strlen(f->i2p_private);
+  int fd, ok;
+  (void)snprintf(tmp, sizeof(tmp), "%s.tmp", f->i2p_key_path);
+  fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0)
+    return -1;
+  ok = write(fd, f->i2p_private, n) == (ssize_t)n && fsync(fd) == 0;
+  ok = close(fd) == 0 && ok;
+  if (!ok || rename(tmp, f->i2p_key_path) != 0) {
+    (void)unlink(tmp);
+    return -1;
+  }
+  return 0;
+}
+static int sam_session_create(host_interface *f) {
+  char cmd[sizeof(f->i2p_private) + 96u];
+  int r;
+  (void)snprintf(cmd, sizeof(cmd),
+                 "SESSION CREATE STYLE=STREAM ID=%s DESTINATION=%s\n",
+                 f->i2p_session, f->i2p_private);
+  r = sam_send(f, cmd);
+  OPENSSL_cleanse(cmd, sizeof(cmd));
+  f->sam_step = SS_SESSION;
+  return r;
+}
+static int sam_stream_connect(host_interface *f, const char *destination) {
+  char cmd[I2P_PEER_MAX + 96u];
+  (void)snprintf(cmd, sizeof(cmd),
+                 "STREAM CONNECT ID=%s DESTINATION=%s SILENT=false\n",
+                 f->i2p_session, destination);
+  f->sam_step = SS_CONNECT;
+  return sam_send(f, cmd);
+}
+/* A peer written as a b32 name, as 52 bare characters or as a destination. */
+static int sam_dial(host_interface *f) {
+  size_t n = strlen(f->sam_peer);
+  char cmd[I2P_PEER_MAX + 64u];
+  if (n >= 400u)
+    return sam_stream_connect(f, f->sam_peer);
+  if (n == 52u && !strchr(f->sam_peer, '.'))
+    (void)snprintf(cmd, sizeof(cmd), "NAMING LOOKUP NAME=%s.b32.i2p\n",
+                   f->sam_peer);
+  else
+    (void)snprintf(cmd, sizeof(cmd), "NAMING LOOKUP NAME=%s\n", f->sam_peer);
+  f->sam_step = SS_LOOKUP;
+  return sam_send(f, cmd);
+}
+static void sam_stream_up(rnc_host *h, host_interface *f) {
+  f->sam_step = SS_IDLE;
+  f->sam_deadline = 0;
+  f->sam_streamed = 1;
+  f->last_read_ms = h->now;
+  f->last_write_ms = h->now;
+  if (activate(h, f) != RNC_OK)
+    disconnect_interface(h, f, ENOSPC);
+}
+static void sam_line_in(rnc_host *h, host_interface *f) {
+  rnc_i2p_reply r;
+  char value[1100], reason[96];
+  if (f->sam_step == SS_CONTROL) {
+    /* routers may ping the session socket and expect the text back */
+    if (!strncmp(f->sam_line, "PING", 4)) {
+      char pong[RNC_I2P_REPLY_MAX + 8u];
+      (void)snprintf(pong, sizeof(pong), "PONG%s\n", f->sam_line + 4);
+      (void)sam_send(f, pong);
+    }
+    return;
+  }
+  if (f->sam_step == SS_REMOTE) {
+    uint8_t bin[700];
+    size_t n, size;
+    char b32[RNC_I2P_B32_SIZE];
+    if (rnc_i2p_b64_decode(f->sam_line, bin, sizeof(bin), &n) != RNC_OK ||
+        rnc_i2p_destination_size(bin, n, &size) != RNC_OK ||
+        rnc_i2p_b32(bin, size, b32) != RNC_OK) {
+      sam_fail(h, f, "the router sent an invalid remote destination");
+      return;
+    }
+    rnc_logf(RNC_LOG_INFO, "host", "accepted I2P connection from %s.b32.i2p",
+             b32);
+    sam_stream_up(h, f);
+    return;
+  }
+  if (rnc_i2p_reply_parse(f->sam_line, &r) != RNC_OK) {
+    sam_fail(h, f, "unreadable reply from the SAM bridge");
+    return;
+  }
+  if (f->sam_step != SS_DEST && !r.ok) {
+    if (rnc_i2p_reply_value(&r, "RESULT", value, sizeof(value)) != RNC_OK)
+      (void)snprintf(value, sizeof(value), "no result");
+    (void)snprintf(reason, sizeof(reason), "the SAM bridge refused: %.40s",
+                   value);
+    sam_fail(h, f, reason);
+    return;
+  }
+  switch (f->sam_step) {
+  case SS_HELLO:
+    if (strcmp(r.topic, "HELLO")) {
+      sam_fail(h, f, "unexpected reply to HELLO");
+      return;
+    }
+    if (f->sam_role == SAM_SESSION) {
+      int loaded = i2p_load_key(f);
+      if (loaded < 0) {
+        sam_fail(h, f, "the key file is unreadable or not an I2P key");
+        return;
+      }
+      if (loaded) {
+        if (sam_session_create(f))
+          disconnect_interface(h, f, EPIPE);
+      } else {
+        f->sam_step = SS_DEST;
+        if (sam_send(f, "DEST GENERATE SIGNATURE_TYPE=7\n"))
+          disconnect_interface(h, f, EPIPE);
+      }
+    } else if (f->sam_role == SAM_CONNECT) {
+      if (sam_dial(f))
+        disconnect_interface(h, f, EPIPE);
+    } else {
+      char cmd[96];
+      (void)snprintf(cmd, sizeof(cmd), "STREAM ACCEPT ID=%s SILENT=false\n",
+                     f->i2p_session);
+      f->sam_step = SS_ACCEPT;
+      if (sam_send(f, cmd))
+        disconnect_interface(h, f, EPIPE);
+    }
+    break;
+  case SS_DEST: {
+    host_interface *c = f;
+    if (strcmp(r.topic, "DEST") ||
+        rnc_i2p_reply_value(&r, "PRIV", c->i2p_private,
+                            sizeof(c->i2p_private)) != RNC_OK ||
+        rnc_i2p_private_to_public(c->i2p_private, value, sizeof(value)) !=
+            RNC_OK) {
+      sam_fail(h, f, "the router did not generate a destination");
+      return;
+    }
+    if (i2p_save_key(c) != 0) {
+      sam_fail(h, f, "cannot write the key file");
+      return;
+    }
+    if (sam_session_create(f))
+      disconnect_interface(h, f, EPIPE);
+    break;
+  }
+  case SS_SESSION: {
+    uint8_t bin[700];
+    size_t n, size;
+    if (strcmp(r.topic, "SESSION") ||
+        rnc_i2p_private_to_public(f->i2p_private, value, sizeof(value)) !=
+            RNC_OK ||
+        rnc_i2p_b64_decode(value, bin, sizeof(bin), &n) != RNC_OK ||
+        rnc_i2p_destination_size(bin, n, &size) != RNC_OK ||
+        rnc_i2p_b32(bin, size, f->status.i2p_b32) != RNC_OK) {
+      sam_fail(h, f, "unexpected reply to SESSION CREATE");
+      return;
+    }
+    f->i2p_ready = 1;
+    f->status.online = 1;
+    f->status.last_errno = 0;
+    f->tries = 0;
+    f->sam_step = SS_CONTROL;
+    f->sam_deadline = 0;
+    rnc_logf(RNC_LOG_INFO, "host", "%s is reachable at %s.b32.i2p",
+             f->status.name, f->status.i2p_b32);
+    break;
+  }
+  case SS_LOOKUP:
+    if (strcmp(r.topic, "NAMING") ||
+        rnc_i2p_reply_value(&r, "VALUE", f->sam_peer, sizeof(f->sam_peer)) !=
+            RNC_OK) {
+      sam_fail(h, f, "unexpected reply to NAMING LOOKUP");
+      return;
+    }
+    if (sam_stream_connect(f, f->sam_peer))
+      disconnect_interface(h, f, EPIPE);
+    break;
+  case SS_CONNECT:
+    if (strcmp(r.topic, "STREAM")) {
+      sam_fail(h, f, "unexpected reply to STREAM CONNECT");
+      return;
+    }
+    sam_stream_up(h, f);
+    break;
+  case SS_ACCEPT:
+    if (strcmp(r.topic, "STREAM")) {
+      sam_fail(h, f, "unexpected reply to STREAM ACCEPT");
+      return;
+    }
+    /* now waiting, without limit, for someone to dial in */
+    f->sam_step = SS_REMOTE;
+    f->sam_deadline = 0;
+    break;
+  default:
+    break;
+  }
+}
+static void sam_feed(rnc_host *h, host_interface *f) {
+  while (f->sam_step && f->fd >= 0 && f->input_offset < f->input_size) {
+    uint8_t b = f->input[f->input_offset++];
+    if (b == '\n') {
+      if (f->sam_len && f->sam_line[f->sam_len - 1u] == '\r')
+        --f->sam_len;
+      f->sam_line[f->sam_len] = 0;
+      f->sam_len = 0;
+      sam_line_in(h, f);
+    } else if (f->sam_len + 1u < sizeof(f->sam_line))
+      f->sam_line[f->sam_len++] = (char)b;
+    else
+      sam_fail(h, f, "line from the SAM bridge is too long");
+  }
+}
+static host_interface *i2p_child_of(rnc_host *h, const host_interface *c,
+                                    int role, unsigned index) {
+  size_t i;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    host_interface *f = &h->interfaces[i];
+    if (f->used && f->status.parent_id == c->status.interface_id &&
+        f->sam_role == role &&
+        (role != SAM_CONNECT || f->peer_index == index) &&
+        (role != SAM_ACCEPT || !f->sam_streamed))
+      return f;
+  }
+  return NULL;
+}
+static void i2p_spawn(rnc_host *h, host_interface *c, int role,
+                      unsigned index) {
+  host_interface *f = empty_interface(h);
+  if (!f || h->next_id < 0x80000000u) {
+    ++c->status.dropped_packets;
+    return;
+  }
+  memset(f, 0, sizeof(*f));
+  f->used = 1;
+  f->fd = f->discovery_fd = f->unicast_fd = -1;
+  f->sam_role = role;
+  f->peer_index = index;
+  f->accepted = role == SAM_ACCEPT;
+  f->no_output = c->no_output;
+  f->status.kind = RNC_HOST_TCP_CONNECT;
+  f->status.interface_id = h->next_id++;
+  f->status.parent_id = c->status.interface_id;
+  f->status.mtu = c->status.mtu;
+  f->status.mode = c->status.mode;
+  f->status.announce_cap_permille = c->status.announce_cap_permille;
+  f->policy = c->policy;
+  f->bitrate = c->bitrate;
+  f->status.bitrate = c->status.bitrate;
+  f->status.ifac_size = c->status.ifac_size;
+  memcpy(f->status.ifac_signature, c->status.ifac_signature, 64);
+  f->has_ifac = c->has_ifac;
+  if (f->has_ifac)
+    f->ifac = c->ifac;
+  f->radio = c->radio;
+  f->peer = c->peer;
+  f->peer_size = c->peer_size;
+  (void)snprintf(f->i2p_session, sizeof(f->i2p_session), "%s", c->i2p_session);
+  if (role == SAM_CONNECT) {
+    const char *p = c->i2p_peers;
+    unsigned k;
+    for (k = 0; k < index; ++k)
+      p += strlen(p) + 1u;
+    (void)snprintf(f->sam_peer, sizeof(f->sam_peer), "%s", p);
+    (void)snprintf(f->status.name, sizeof(f->status.name),
+                   "I2PInterfacePeer[%.100s]", f->sam_peer);
+  } else
+    (void)snprintf(f->status.name, sizeof(f->status.name),
+                   "I2PInterfacePeer[Connected peer on %.80s]",
+                   c->status.name);
+  (void)rnc_hash(f->status.name, strlen(f->status.name), f->status.hash);
+  if (connect_interface(h, f) < 0) {
+    f->status.last_errno = errno;
+    if (role == SAM_ACCEPT) {
+      c->accept_after = h->now + 5000u;
+      OPENSSL_cleanse(f, sizeof(*f));
+    } else
+      note_connect_failure(h, f);
+  }
+}
+/* The controller keeps a dialler per configured peer and, when connectable,
+ * exactly one acceptor waiting on the router. */
+static void i2p_maintain(rnc_host *h, host_interface *c) {
+  unsigned k;
+  if (!c->i2p_ready)
+    return;
+  for (k = 0; k < c->i2p_peer_count; ++k)
+    if (!i2p_child_of(h, c, SAM_CONNECT, k))
+      i2p_spawn(h, c, SAM_CONNECT, k);
+  if (c->radio.i2p_connectable && h->now >= c->accept_after &&
+      !i2p_child_of(h, c, SAM_ACCEPT, 0))
+    i2p_spawn(h, c, SAM_ACCEPT, 0);
+}
+/* With the session gone every stream it carried is gone too. */
+static void i2p_session_lost(rnc_host *h, host_interface *c) {
+  size_t i;
+  c->i2p_ready = 0;
+  c->status.i2p_b32[0] = 0;
+  OPENSSL_cleanse(c->i2p_private, sizeof(c->i2p_private));
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    host_interface *f = &h->interfaces[i];
+    if (f->used && f->status.parent_id == c->status.interface_id &&
+        f->fd >= 0)
+      disconnect_interface(h, f, ECONNRESET);
+  }
+}
+/* Idle streams are kept alive with an empty HDLC frame, and one that has gone
+ * silent for the reference's whole probe window is dropped. */
+static void i2p_watchdog(rnc_host *h, host_interface *f, uint64_t now) {
+  if (now - f->last_read_ms > I2P_READ_TIMEOUT_MS) {
+    rnc_logf(RNC_LOG_WARNING, "host", "%s is unresponsive", f->status.name);
+    disconnect_interface(h, f, ETIMEDOUT);
+  } else if (!f->queue_count && now - f->last_write_ms > I2P_PROBE_AFTER_MS) {
+    static const char flags[2] = {0x7e, 0x7e};
+#ifdef MSG_NOSIGNAL
+    ssize_t w = send(f->fd, flags, sizeof(flags), MSG_NOSIGNAL);
+#else
+    ssize_t w = send(f->fd, flags, sizeof(flags), 0);
+#endif
+    if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+      disconnect_interface(h, f, errno);
+    else
+      f->last_write_ms = now;
+  }
+}
 static host_interface *auto_peer(rnc_host *h, host_interface *parent,
                                  const struct sockaddr_in6 *source) {
   size_t i;
@@ -1690,7 +2176,7 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
   }
   if (f->input_offset == f->input_size) {
     f->input_offset = f->input_size = 0;
-    if (f->status.kind == RNC_HOST_TCP_CONNECT)
+    if (f->status.kind == RNC_HOST_TCP_CONNECT || f->status.kind == RNC_HOST_I2P)
       got = recv(f->fd, f->input, sizeof(f->input), 0);
     else
       got = read(f->fd, f->input, sizeof(f->input));
@@ -1703,11 +2189,18 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
       /* VMIN=VTIME=0 serial reads can return zero while idle. Only TCP zero
        * is EOF; actual serial hangup is handled from POLLHUP in the pump. */
       if (f->status.kind == RNC_HOST_TCP_CONNECT ||
-          f->status.kind == RNC_HOST_PIPE || f->rnode_tcp)
+          f->status.kind == RNC_HOST_I2P || f->status.kind == RNC_HOST_PIPE ||
+          f->rnode_tcp)
         disconnect_interface(h, f, 0);
       return RNC_OK;
     }
     f->input_size = (size_t)got;
+    f->last_read_ms = h->now;
+  }
+  if (f->sam_step) {
+    sam_feed(h, f);
+    if (f->sam_step || f->fd < 0)
+      return RNC_OK;
   }
   while (f->input_offset < f->input_size) {
     r = rnc_host_frame_feed(&f->framer, mode, f->input[f->input_offset++],
@@ -1947,6 +2440,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
   size_t i, count = 0;
   rnc_result r;
   int rc;
+  host_interface *parent;
   if (!h || timeout < 0 || timeout > 1000 || (h->has_time && now < h->now))
     return RNC_INVALID;
   h->now = now;
@@ -1974,8 +2468,14 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         (void)rnc_host_remove(h, f->status.interface_id);
       continue;
     }
-    if (f->fd < 0 && !f->accepted && !f->gave_up && now >= f->retry_at) {
-      if (f->status.kind == RNC_HOST_TCP_CONNECT) {
+    if (f->status.kind == RNC_HOST_I2P)
+      i2p_maintain(h, f);
+    if (f->fd < 0 && !f->accepted && !f->gave_up && now >= f->retry_at &&
+        !(f->sam_role == SAM_CONNECT &&
+          !((parent = find_interface(h, f->status.parent_id)) &&
+            parent->i2p_ready))) {
+      if (f->status.kind == RNC_HOST_TCP_CONNECT ||
+          f->status.kind == RNC_HOST_I2P) {
         if (connect_interface(h, f) < 0) {
           f->status.last_errno = errno;
           note_connect_failure(h, f);
@@ -1989,7 +2489,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
           f->status.last_errno = errno;
           note_connect_failure(h, f);
         }
-      } else if (f->status.kind >= RNC_HOST_SERIAL) {
+      } else if (DEVICE_KIND(f->status.kind)) {
         f->fd = device_open(f);
         if (f->fd >= 0 && activate(h, f) == RNC_OK) {
           ++f->status.reconnects;
@@ -2040,6 +2540,24 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         !f->queue_count && now >= f->last_write_ms + 3500u) {
       (void)queue_detect(f);
       f->last_write_ms = now;
+    }
+    if (f->sam_step && f->fd >= 0 && !f->connecting &&
+        f->sam_step != SS_CONTROL && f->sam_step != SS_REMOTE) {
+      if (!f->sam_deadline)
+        f->sam_deadline = now + (f->sam_role == SAM_SESSION
+                                     ? I2P_SESSION_TIMEOUT_MS
+                                     : I2P_STREAM_TIMEOUT_MS);
+      else if (now >= f->sam_deadline) {
+        rnc_logf(RNC_LOG_WARNING, "host", "%s: the SAM bridge did not answer",
+                 f->status.name);
+        disconnect_interface(h, f, ETIMEDOUT);
+        continue;
+      }
+    }
+    if (f->sam_streamed && f->node_added && f->fd >= 0) {
+      i2p_watchdog(h, f, now);
+      if (f->fd < 0)
+        continue;
     }
     if (f->connecting && !f->connect_deadline)
       f->connect_deadline =
@@ -2093,7 +2611,8 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
       if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &n) < 0)
         error = errno;
       f->connecting = 0;
-      if (error || activate(h, f) != RNC_OK) {
+      if (error ||
+          (f->sam_role ? sam_start(h, f) : activate(h, f)) != RNC_OK) {
         f->connect_failed = 1;
         disconnect_interface(h, f, error ? error : ENOSPC);
         continue;
@@ -2147,7 +2666,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
           return r;
       }
     }
-    if ((pf[i].revents & POLLHUP) && f->status.kind >= RNC_HOST_SERIAL &&
+    if ((pf[i].revents & POLLHUP) && DEVICE_KIND(f->status.kind) &&
         !f->pending && f->input_offset == f->input_size)
       disconnect_interface(h, f, 0);
   }
@@ -2156,6 +2675,11 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
     if (!f->used)
       continue;
     if (f->accepted && f->fd < 0) {
+      if (f->sam_role == SAM_ACCEPT && !f->sam_streamed) {
+        host_interface *owner = find_interface(h, f->status.parent_id);
+        if (owner)
+          owner->accept_after = now + 5000u;
+      }
       (void)rnc_host_remove(h, f->status.interface_id);
       continue;
     }
