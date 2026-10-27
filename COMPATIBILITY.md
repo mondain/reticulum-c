@@ -666,3 +666,23 @@ single byte flipped, wrong owner, too little room, store too small) and a
 differential test: a file the unmodified reference wrote after three rotations
 loads with the same public keys in the same order, and a file written here (four
 rotations) loads in the reference with the same keys.
+
+## WiFi RNode and TCP_NODELAY (`feature/rnode-tcp`)
+
+An RNodeInterface whose `port` is `tcp://host` talks to the device over TCP
+(port 7633; `rnc_host_config.port` overrides it). The connection is started
+without blocking, the radio is detected and configured when it opens, a
+detection request goes out after 3.5 s without anything written (as the
+reference's keepalive does) so a dead connection shows up, and a dropped
+connection is retried like any serial device. Bluetooth LE RNodes are not
+supported.
+
+Also fixed for every TCP interface (clients, servers and their accepted
+connections): `TCP_NODELAY` was never set, so a small frame sent right after
+another waited for the peer's delayed ACK (tens of milliseconds on a LAN). The
+reference sets it on all of them.
+
+Evidence: a host test with a TCP listener acting as the device (detection,
+configuration and acknowledgement, the ping after silence, reconnect and a second
+detection) and the `TCP_NODELAY` option checked on the host's connected socket.
+Not tested against a real WiFi RNode.

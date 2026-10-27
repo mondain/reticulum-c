@@ -76,6 +76,11 @@ static void cli(const char *exe) {
               "[reticulum]\nshare_instance = No\nlink_mtu_discovery = No\n"
               "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 0\n");
   CHECK(run_check(exe, path) == 0);
+  config_file(path,
+              "[reticulum]\nshare_instance = No\n[interfaces]\n[[WiFi RNode]]\n"
+              "type = RNodeInterface\nport = tcp://rnode.local\nfrequency = 868000000\n"
+              "bandwidth = 125000\ntxpower = 7\nspreadingfactor = 8\ncodingrate = 5\n");
+  CHECK(run_check(exe, path) == 0);
   config_file(path, "[reticulum]\nlink_mtu_discovery = maybe\n");
   CHECK(run_check(exe, path) != 0);
   config_file(path, "[reticulum]\nuse_implicit_proof = maybe\n");

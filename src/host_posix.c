@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -285,7 +286,8 @@ typedef struct host_interface {
   unsigned radio_ack_mask;
   uint64_t radio_deadline;
   pid_t child;
-  int kiss, gave_up, connect_failed, rnode_detected;
+  int kiss, gave_up, connect_failed, rnode_detected, rnode_tcp;
+  uint64_t last_write_ms;
   unsigned tries;
   uint64_t connect_deadline;
   char ax_call[7];
@@ -583,6 +585,8 @@ static int socket_bound(struct sockaddr_storage *a, socklen_t size, int type) {
  * 2 s, 12 times; unacknowledged data aborts after 24 s. */
 static void tcp_tune(int fd) {
   int on = 1;
+  /* small frames go out at once instead of waiting for the previous ACK */
+  (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
   (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
 #ifdef TCP_KEEPIDLE
   {
@@ -728,7 +732,32 @@ static int pipe_open(const char *command, pid_t *child) {
   return sv[0];
 }
 static int serial_open(const host_interface *f);
+/* A WiFi RNode listens on TCP port 7633 and speaks the KISS protocol there. The
+ * connection is started here and finished in the poll loop like a TCP client's;
+ * the radio is set up once it is open. */
+static int rnode_tcp_open(host_interface *f) {
+  int fd = socket(f->peer.ss_family, SOCK_STREAM, 0);
+  if (fd < 0)
+    return -1;
+  if (nonblock(fd) < 0) {
+    close(fd);
+    return -1;
+  }
+  tcp_tune(fd);
+  if (connect(fd, (struct sockaddr *)&f->peer, f->peer_size) < 0 &&
+      errno != EINPROGRESS) {
+    int e = errno;
+    close(fd);
+    errno = e;
+    return -1;
+  }
+  f->connecting = 1;
+  f->connect_deadline = 0;
+  return fd;
+}
 static int device_open(host_interface *f) {
+  if (f->rnode_tcp)
+    return rnode_tcp_open(f);
   if (f->status.kind == RNC_HOST_PIPE)
     return pipe_open(f->address, &f->child);
   return serial_open(f);
@@ -823,15 +852,9 @@ static uint8_t tnc_units(unsigned ms) {
 /* The reference detects the RNode and checks its firmware before it configures
  * the radio: DETECT, then the firmware version, platform and MCU are asked
  * for, and configure_radio() runs when the device answers the detection. */
-static rnc_result begin_rnode(host_interface *f) {
+static rnc_result queue_detect(host_interface *f) {
   static const uint8_t detect = 0x73, zero = 0;
-  rnc_result r;
-  f->radio_ack_mask = 0;
-  f->status.radio_ready = 0;
-  f->radio_deadline = 0;
-  f->ready = 0;
-  f->rnode_detected = 0;
-  r = queue_command(f, 0x08, &detect, 1);
+  rnc_result r = queue_command(f, 0x08, &detect, 1);
   if (r == RNC_OK)
     r = queue_command(f, 0x50, &zero, 1);
   if (r == RNC_OK)
@@ -839,6 +862,14 @@ static rnc_result begin_rnode(host_interface *f) {
   if (r == RNC_OK)
     r = queue_command(f, 0x49, &zero, 1);
   return r;
+}
+static rnc_result begin_rnode(host_interface *f) {
+  f->radio_ack_mask = 0;
+  f->status.radio_ready = 0;
+  f->radio_deadline = 0;
+  f->ready = 0;
+  f->rnode_detected = 0;
+  return queue_detect(f);
 }
 static rnc_result configure_ax25(host_interface *f, const rnc_host_config *c) {
   uint8_t b[1];
@@ -1226,20 +1257,35 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       r = RNC_INVALID;
       goto fail;
     }
-    f->fd = device_open(f);
-    if (f->fd < 0)
-      goto fail;
-    r = activate(h, f);
-    if (r != RNC_OK)
-      goto fail;
-    if (c->kind == RNC_HOST_RNODE) {
-      r = begin_rnode(f);
+    if (c->kind == RNC_HOST_RNODE && !strncasecmp(f->address, "tcp://", 6)) {
+      /* a WiFi RNode: connect now, set the radio up when the socket opens */
+      f->rnode_tcp = 1;
+      if (resolve(f->address + 6, c->port ? c->port : 7633u, SOCK_STREAM, 0,
+                  AF_UNSPEC, c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
+        r = RNC_INVALID;
+        goto fail;
+      }
+      f->fd = device_open(f);
+      if (f->fd < 0) {
+        f->status.last_errno = errno;
+        note_connect_failure(h, f);
+      }
+    } else {
+      f->fd = device_open(f);
+      if (f->fd < 0)
+        goto fail;
+      r = activate(h, f);
       if (r != RNC_OK)
         goto fail;
-    } else if (TNC_KIND(c->kind)) {
-      r = configure_ax25(f, c);
-      if (r != RNC_OK)
-        goto fail;
+      if (c->kind == RNC_HOST_RNODE) {
+        r = begin_rnode(f);
+        if (r != RNC_OK)
+          goto fail;
+      } else if (TNC_KIND(c->kind)) {
+        r = configure_ax25(f, c);
+        if (r != RNC_OK)
+          goto fail;
+      }
     }
   }
   return RNC_OK;
@@ -1657,7 +1703,7 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
       /* VMIN=VTIME=0 serial reads can return zero while idle. Only TCP zero
        * is EOF; actual serial hangup is handled from POLLHUP in the pump. */
       if (f->status.kind == RNC_HOST_TCP_CONNECT ||
-          f->status.kind == RNC_HOST_PIPE)
+          f->status.kind == RNC_HOST_PIPE || f->rnode_tcp)
         disconnect_interface(h, f, 0);
       return RNC_OK;
     }
@@ -1826,7 +1872,7 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
       sent = sendto(fd, q->data, q->size, 0, (struct sockaddr *)&f->peer,
                     f->peer_size);
   } else if (f->status.kind == RNC_HOST_TCP_CONNECT ||
-             f->status.kind == RNC_HOST_PIPE) {
+             f->status.kind == RNC_HOST_PIPE || f->rnode_tcp) {
 #ifdef MSG_NOSIGNAL
     sent = send(fd, q->data + q->offset, q->size - q->offset, MSG_NOSIGNAL);
 #else
@@ -1847,6 +1893,7 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
       return RNC_OK;
     }
   }
+  f->last_write_ms = h->now;
   if ((f->status.kind == RNC_HOST_UDP || f->status.kind == RNC_HOST_AUTO) &&
       sent != (ssize_t)q->size) {
     ++f->status.dropped_packets;
@@ -1934,6 +1981,14 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
           note_connect_failure(h, f);
         } else
           ++f->status.reconnects;
+      } else if (f->rnode_tcp) {
+        f->fd = device_open(f);
+        if (f->fd >= 0)
+          ++f->status.reconnects;
+        else {
+          f->status.last_errno = errno;
+          note_connect_failure(h, f);
+        }
       } else if (f->status.kind >= RNC_HOST_SERIAL) {
         f->fd = device_open(f);
         if (f->fd >= 0 && activate(h, f) == RNC_OK) {
@@ -1970,7 +2025,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
           ++f->status.dropped_packets;
       }
     }
-    if (f->status.kind == RNC_HOST_RNODE && f->fd >= 0 &&
+    if (f->status.kind == RNC_HOST_RNODE && f->fd >= 0 && !f->connecting &&
         !f->status.radio_ready) {
       if (!f->radio_deadline)
         f->radio_deadline = now + 5000u;
@@ -1978,6 +2033,13 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         disconnect_interface(h, f, ETIMEDOUT);
         continue;
       }
+    }
+    /* like the reference, a WiFi RNode that has been quiet is asked to
+     * identify itself again, so a dead connection shows up */
+    if (f->rnode_tcp && f->fd >= 0 && !f->connecting && f->status.radio_ready &&
+        !f->queue_count && now >= f->last_write_ms + 3500u) {
+      (void)queue_detect(f);
+      f->last_write_ms = now;
     }
     if (f->connecting && !f->connect_deadline)
       f->connect_deadline =
@@ -2035,6 +2097,10 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         f->connect_failed = 1;
         disconnect_interface(h, f, error ? error : ENOSPC);
         continue;
+      }
+      if (f->rnode_tcp) {
+        f->last_write_ms = h->now;
+        (void)begin_rnode(f);
       }
     }
     if (f->status.kind == RNC_HOST_TCP_LISTEN) {
