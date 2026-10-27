@@ -127,3 +127,18 @@ is skipped on hosts whose `localhost` is not dual-stack.
 
 Behavior changes: TCP client reconnect now waits 5 s by default (was 1 s), as
 the reference does; KISS interfaces now send the TNC setup commands on open.
+
+## Management plane: blackholing (`feature/management-plane`)
+
+Local Linux evidence: 137/137 with the pinned RNS oracle, 113/113 under
+sanitizers (differential cases excluded as before).
+
+Differential: the unmodified reference `rnpath` adds (`-B` with `--duration` and
+`--reason`), lists (`-b`) and lifts (`-U`) blackholed identities on the daemon's
+shared instance over RPC. RPC decoding of `is_blackholed`, `blackhole_identity`
+and `unblackhole_identity` uses bytes produced by the reference `umsgpack`, and
+the persisted list round-trips the reference file layout (including a float
+`until`).
+
+Native only: announce dropping, path removal, expiry and table bounds. Blackhole
+sources and publishing the list over a link are not implemented.

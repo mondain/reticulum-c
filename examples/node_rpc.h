@@ -260,6 +260,26 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
   size_t i, count = 0;
   uint32_t bitrate = 0;
   rnc_rpc_writer_init(&w, out, capacity);
+  {
+    /* blackhole_identity / unblackhole_identity return True, None (no change)
+     * or False, like Transport does */
+    rnc_rpc_command command;
+    if (rnc_rpc_decode_command(query, query_size, &command) == RNC_OK) {
+      rnc_result r =
+          command.type == RNC_RPC_BLACKHOLE_IDENTITY
+              ? rnc_node_blackhole(node, command.identity, command.until,
+                                   command.reason, (uint64_t)time(NULL))
+              : rnc_node_unblackhole(node, command.identity);
+      if (r == RNC_OK) {
+        (void)blackhole_save(node);
+        (void)rnc_rpc_write_bool(&w, 1);
+      } else if (r == RNC_STATE)
+        (void)rnc_rpc_write_nil(&w);
+      else
+        (void)rnc_rpc_write_bool(&w, 0);
+      return rnc_rpc_writer_finish(&w, written) == RNC_OK;
+    }
+  }
   if (rnc_rpc_decode_query(query, query_size, &q) != RNC_OK) {
     (void)rnc_rpc_write_nil(&w);
     return rnc_rpc_writer_finish(&w, written) == RNC_OK;
@@ -324,8 +344,35 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
     (void)rnc_rpc_write_real(&w, bitrate ? 6.0 + 8000.0 / bitrate : 0);
     break;
   case RNC_RPC_RATE_TABLE:
-  case RNC_RPC_BLACKHOLED_IDENTITIES:
     (void)rnc_rpc_write_array(&w, 0);
+    break;
+  case RNC_RPC_BLACKHOLED_IDENTITIES: {
+    rnc_blackhole_entry e;
+    uint64_t unix_now = (uint64_t)time(NULL);
+    for (i = 0; rnc_node_blackhole_at(node, i, unix_now, &e) == RNC_OK; ++i) {
+    }
+    (void)rnc_rpc_write_map(&w, i);
+    for (i = 0; rnc_node_blackhole_at(node, i, unix_now, &e) == RNC_OK; ++i) {
+      (void)rnc_rpc_write_bin(&w, e.identity, 16);
+      (void)rnc_rpc_write_map(&w, 3);
+      (void)rnc_rpc_write_string(&w, "source");
+      (void)rnc_rpc_write_bin(&w, e.source, 16);
+      (void)rnc_rpc_write_string(&w, "until");
+      if (e.until)
+        (void)rnc_rpc_write_uint(&w, e.until);
+      else
+        (void)rnc_rpc_write_nil(&w);
+      (void)rnc_rpc_write_string(&w, "reason");
+      if (e.reason[0])
+        (void)rnc_rpc_write_string(&w, e.reason);
+      else
+        (void)rnc_rpc_write_nil(&w);
+    }
+    break;
+  }
+  case RNC_RPC_IS_BLACKHOLED:
+    (void)rnc_rpc_write_bool(
+        &w, rnc_node_is_blackholed(node, q.identity_hash, (uint64_t)time(NULL)));
     break;
   default:
     (void)rnc_rpc_write_nil(&w);

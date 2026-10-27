@@ -398,6 +398,171 @@ static void rns_status(const char *python, const char *reference,
     CHECK(0);
   }
 }
+static pid_t start_with_state(const char *exe, const char *cfg,
+                              const char *key, const char *admin,
+                              const char *state, int *out) {
+  int fds[2];
+  pid_t p;
+  CHECK(!pipe(fds));
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0);
+    close(fds[1]);
+    execl(exe, exe, "--config", cfg, "--identity", key, "--admin", admin,
+          "--state", state, (char *)NULL);
+    _exit(127);
+  }
+  close(fds[1]);
+  *out = fds[0];
+  return p;
+}
+static void admin_command(const char *path, const char *command, char *reply,
+                          size_t size) {
+  struct sockaddr_un addr;
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  char line[256];
+  ssize_t n;
+  CHECK(fd >= 0 && size > 1);
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strcpy(addr.sun_path, path);
+  CHECK(!connect(fd, (struct sockaddr *)&addr, sizeof(addr)));
+  CHECK(snprintf(line, sizeof(line), "%s\n", command) > 0);
+  CHECK(write(fd, line, strlen(line)) == (ssize_t)strlen(line));
+  n = read(fd, reply, size - 1);
+  CHECK(n > 0);
+  reply[n] = 0;
+  close(fd);
+}
+/* Blackhole entries are managed from the admin socket and survive a restart. */
+static void blackhole(const char *exe) {
+  char dir[] = "/tmp/rnc-node-bh-XXXXXX", cfg[256], key[256], admin[256],
+       state[256], file[300], reply[1024], id[33];
+  const char *hash = "11111111111111111111111111111111";
+  int fd;
+  pid_t p;
+  struct stat st;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(state, sizeof(state), "%s/state", dir) > 0);
+  CHECK(snprintf(file, sizeof(file), "%s.blackhole", state) > 0);
+  config_file(cfg, valid);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "EMPTY", 5));
+  admin_command(admin, "BLACKHOLE 11111111111111111111111111111111 0 spam run",
+                reply, sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  admin_command(admin, "BLACKHOLE 11111111111111111111111111111111", reply,
+                sizeof(reply));
+  CHECK(strstr(reply, "EXISTS"));
+  admin_command(admin, "BLACKHOLE not-hex", reply, sizeof(reply));
+  CHECK(strstr(reply, "ERROR"));
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, hash) && strstr(reply, "reason=spam run"));
+  CHECK(!stat(file, &st) && (st.st_mode & 0777) == 0600);
+  stop(p, fd);
+  /* restart: the entry is loaded back */
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, hash) && strstr(reply, "reason=spam run"));
+  admin_command(admin, "UNBLACKHOLE 11111111111111111111111111111111", reply,
+                sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  admin_command(admin, "UNBLACKHOLE 11111111111111111111111111111111", reply,
+                sizeof(reply));
+  CHECK(strstr(reply, "NOT_FOUND"));
+  stop(p, fd);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "EMPTY", 5));
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node blackhole tests passed");
+}
+/* Runs a reference utility against the shared instance and returns its
+ * output; fails the test if it exits non-zero. */
+static void reference_tool(const char *python, const char *reference,
+                           const char *module, char *const args[], char *out,
+                           size_t size) {
+  int fds[2], status;
+  pid_t child;
+  size_t used = 0;
+  unsigned tries;
+  char *argv[16];
+  size_t k = 0, a;
+  CHECK(!pipe(fds));
+  argv[k++] = (char *)python;
+  argv[k++] = "-m";
+  argv[k++] = (char *)module;
+  for (a = 0; args[a] && k < 14; ++a)
+    argv[k++] = args[a];
+  argv[k] = NULL;
+  child = fork();
+  CHECK(child >= 0);
+  if (!child) {
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+    close(fds[1]);
+    CHECK(!setenv("PYTHONPATH", reference, 1));
+    execv(python, argv);
+    _exit(127);
+  }
+  close(fds[1]);
+  for (tries = 0; tries < 300; ++tries) {
+    struct pollfd p = {fds[0], POLLIN, 0};
+    CHECK(poll(&p, 1, 50) >= 0);
+    if (p.revents & (POLLIN | POLLHUP)) {
+      ssize_t n = read(fds[0], out + used, size - 1 - used);
+      CHECK(n >= 0);
+      if (!n)
+        break;
+      used += (size_t)n;
+      CHECK(used < size - 1);
+    }
+  }
+  CHECK(tries < 300);
+  out[used] = 0;
+  close(fds[0]);
+  CHECK(waitpid(child, &status, 0) == child);
+  if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+    fprintf(stderr, "%s failed:\n%s\n", module, out);
+    CHECK(0);
+  }
+}
+/* The reference's rnpath manages the blackhole list over the shared-instance
+ * RPC: add with duration and reason, list, then lift. */
+static void rns_blackhole(const char *python, const char *reference,
+                          const char *dir, const char *admin) {
+  const char *hash = "22222222222222222222222222222222";
+  char out[8192], reply[1024];
+  char *add[] = {"--config", (char *)dir, "-B", (char *)hash, "--duration",
+                 "1",        "--reason", "oracle", NULL};
+  char *list[] = {"--config", (char *)dir, "-b", NULL};
+  char *lift[] = {"--config", (char *)dir, "-U", (char *)hash, NULL};
+  reference_tool(python, reference, "RNS.Utilities.rnpath", add, out,
+                 sizeof(out));
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, hash) && strstr(reply, "reason=oracle") &&
+        !strstr(reply, "until=0"));
+  reference_tool(python, reference, "RNS.Utilities.rnpath", list, out,
+                 sizeof(out));
+  if (!strstr(out, "22222222") || !strstr(out, "oracle")) {
+    fprintf(stderr, "rnpath -b output:\n%s\n", out);
+    CHECK(0);
+  }
+  reference_tool(python, reference, "RNS.Utilities.rnpath", lift, out,
+                 sizeof(out));
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "EMPTY", 5));
+}
 static void shared(const char *exe, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-node-shared-XXXXXX", cfg[256], keypath[256],
        admin[256], storage[256], text[2048], identity[33];
@@ -434,8 +599,10 @@ static void shared(const char *exe, const char *reference, const char *python) {
   key[0] ^= 1;
   rpc_client_test(control, key, 0);
   shared_data_test(port, world);
-  if (reference)
+  if (reference) {
     rns_status(python, reference, dir);
+    rns_blackhole(python, reference, dir, admin);
+  }
   stop(process, fd);
   remove_tree(dir);
   puts(reference ? "unmodified RNS shared-instance test passed"
@@ -606,6 +773,8 @@ int main(int argc, char **argv) {
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+  else if (!strcmp(argv[2], "blackhole") && argc == 3)
+    blackhole(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
   else if (!strcmp(argv[2], "backbone") && argc == 5)

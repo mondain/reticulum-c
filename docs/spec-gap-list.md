@@ -125,7 +125,8 @@ Largest gaps, in priority order:
 | PART | `has_path` / `hops_to` / `next_hop` | Via `rnc_node_lookup`; `request_path` exists |
 | PART | `register_announce_handler` with aspect filter | Event-based; `rnc_announce_matches_aspect` provides the filter |
 | MISS | `await_path`; `request_path` on_interface/recursive options | |
-| MISS | `blackhole_identity` / `unblackhole_identity` / sources / publish | |
+| IMPL | `blackhole_identity` / `unblackhole_identity` / `is_blackholed`, expiry, reference file format | Node API, daemon admin (`BLACKHOLE` / `UNBLACKHOLE` / `BLACKHOLES`), RPC get/set, persisted beside `--state`; verified with the reference `rnpath -B/-b/-U` |
+| MISS | Blackhole sources (federation) and publishing (`/list` over a link) | Needs a link-terminating destination in the daemon |
 | MISS | `remote_management_enabled`, `discovered_interfaces`, discovery sources | |
 
 ## 4. Interfaces (manual ch7, ch8)

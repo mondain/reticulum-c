@@ -164,6 +164,39 @@ rnc_result rnc_node_tick(rnc_node *node, uint64_t unix_seconds,
                          uint64_t now_ms);
 rnc_result rnc_node_lookup(const rnc_node *node, const uint8_t destination[16],
                            uint64_t now_ms, rnc_route *route);
+/* Identity blackholing (Transport.blackhole_identity). Announces from a
+ * blackholed identity are dropped after signature verification, their
+ * destinations' paths are removed, and path requests for them are not answered.
+ * `until` is a unix time (0 = until lifted); entries expire lazily and in
+ * rnc_node_tick. The table holds RNC_NODE_BLACKHOLE entries. */
+#define RNC_NODE_BLACKHOLE 256
+#define RNC_BLACKHOLE_REASON 64
+typedef struct rnc_blackhole_entry {
+  uint8_t identity[16], source[16]; /* source: who listed it (local = node id) */
+  uint64_t until;
+  char reason[RNC_BLACKHOLE_REASON]; /* empty = none */
+} rnc_blackhole_entry;
+/* RNC_OK added; RNC_STATE already listed; RNC_AGAIN table full. */
+rnc_result rnc_node_blackhole(rnc_node *node, const uint8_t identity[16],
+                              uint64_t until, const char *reason,
+                              uint64_t unix_seconds);
+/* RNC_OK lifted; RNC_STATE not listed. */
+rnc_result rnc_node_unblackhole(rnc_node *node, const uint8_t identity[16]);
+int rnc_node_is_blackholed(const rnc_node *node, const uint8_t identity[16],
+                           uint64_t unix_seconds);
+/* Enumerates live entries; RNC_AGAIN past the end. */
+rnc_result rnc_node_blackhole_at(const rnc_node *node, size_t index,
+                                 uint64_t unix_seconds,
+                                 rnc_blackhole_entry *entry);
+/* Reference file format: MessagePack map of identity hash to
+ * {source, until, reason}. Export writes only locally listed entries; import
+ * attributes entries to `source` (NULL = local), skips expired ones and never
+ * overrides a local entry. */
+rnc_result rnc_node_blackhole_export(const rnc_node *node, void *output,
+                                     size_t capacity, size_t *written);
+rnc_result rnc_node_blackhole_import(rnc_node *node, const void *input,
+                                     size_t size, const uint8_t source[16],
+                                     uint64_t unix_seconds);
 /* Known-destination store (Identity.recall). Every valid, fresh announce for
  * a non-local destination is remembered independently of path lifetime, in a
  * table bounded to RNC_NODE_KNOWN entries (least recently heard is evicted).
