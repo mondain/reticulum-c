@@ -1003,7 +1003,10 @@ static void tcp_options_test(void) {
       rnc_host_free(host);
     }
   }
-  /* a connect that never completes is abandoned after connect_timeout_ms */
+  /* a connect that never completes is abandoned after connect_timeout_ms. The
+   * saturated accept queue that stalls the handshake is Linux behaviour; other
+   * kernels complete or refuse the connection instead. */
+#ifdef __linux__
   {
     uint16_t stuck_port = 0;
     int stuck = tcp_listener(AF_INET, &stuck_port), fillers[8], k;
@@ -1014,7 +1017,8 @@ static void tcp_options_test(void) {
     a.sin_port = htons(stuck_port);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     for (k = 0; k < 8; ++k) { /* saturate the accept queue so SYNs are dropped */
-      fillers[k] = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+      fillers[k] = socket(AF_INET, SOCK_STREAM, 0);
+      CHECK(fcntl(fillers[k], F_SETFL, O_NONBLOCK) == 0);
       (void)connect(fillers[k], (struct sockaddr *)&a, sizeof(a));
     }
     host = rnc_host_new(node);
@@ -1035,6 +1039,7 @@ static void tcp_options_test(void) {
       close(fillers[k]);
     close(stuck);
   }
+#endif
   rnc_node_free(node);
   puts("host TCP option tests passed");
 }
