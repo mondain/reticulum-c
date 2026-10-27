@@ -20,7 +20,7 @@ Largest gaps, in priority order:
 4. Missing interface types: I2P, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits and callsign beacon done; remaining): detection/firmware check.
 6. Management plane: blackhole management, remote management destination, probe responder, network identities and interface discovery are done (see sections 3 and 4).
-7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
+7. Persistent known-destination store (`Identity.recall`) and tunnels are done. The transport packet cache is deliberately not built: see section 3.
 8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
 9. Resource window growth and rate-based timeouts: done (see section 5).
 10. CLI tools and examples. (Logging hook and the `loglevel` / `instance_name` options are done.)
@@ -51,8 +51,8 @@ Largest gaps, in priority order:
 | IMPL | Delivery proofs | Endpoint proof creation (implicit 64B / explicit 96B) via `rnc_node_prove` and PROVE_ALL; validation by signer in `rnc_node_send_tracked` receipts (closed in `feature/spec-gap-closure`) |
 | PART | Packet prioritisation | Only the announce queue is ordered |
 | IMPL | `PacketReceipt` equivalent: `rnc_node_send_tracked` + `RNC_NODE_RECEIPT` event (delivered/failed, RTT, timeout); `rnc_node_set_proof_strategy` (NONE/APP/ALL) | PROVE_APP is signalled by the LOCAL event; no callback API by design |
-| MISS | Tunnels and tunnel table | |
-| MISS | Transport packet cache and cache-request serving | Context 8 is parsed only inside Resource |
+| IMPL | Tunnels and tunnel table | Synthesis packet on TCP client connect (not kiss-framed), validation, tunnel table with 8 h expiry, path association and restoration when a tunnel reappears, signed persistence beside the state file (`<state>.tunnels`); verified against the reference's TCP client |
+| N/A | Transport packet cache and cache-request serving | In the reference `Transport.should_cache()` returns False unconditionally ("disabling it for now, until redesigned"), so nothing is ever put in the general cache and a cache request is never served. The announce cache it also keeps is what this node's route table and state checkpoint already do. Context 8 is still sent by Resource, as the reference does |
 | IMPL | Persistent known-destinations table | See `rnc_node_known_export/import` |
 | PART | Network identities (6.5) | `network_identity` file (created 0600 if absent, reference file format), reported as `network_id` and over the admin `NETWORK` command, with the `rnstransport.network` and `rnstransport.network.instance.<hash>` destinations registered; used for encrypted discovery announces |
 | N/A | AES-128 link modes, Python pickle | By design; MessagePack RPC only |
@@ -242,4 +242,4 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 2. Remote management destination and ACL; mutating admin calls.
 3. (done)
 
-**Phase D:** transport packet cache, tunnels, Resource window growth, examples, CLI tools.
+**Phase D:** examples, CLI tools.

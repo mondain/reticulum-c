@@ -372,6 +372,11 @@ static rnc_result activate(rnc_host *h, host_interface *f) {
   f->status.bound_port = f->fd >= 0 ? bound_port(f->fd) : 0;
   (void)emit_host(h, RNC_HOST_UP, f->status.interface_id, 0, NULL);
   rnc_logf(RNC_LOG_INFO, "host", "interface %s is up", f->status.name);
+  /* A client that may return from another address names its tunnel to the peer,
+   * as the reference's TCP client does after connecting. */
+  if (f->status.kind == RNC_HOST_TCP_CONNECT && !f->accepted && !f->kiss)
+    (void)rnc_node_synthesize_tunnel(h->node, f->status.interface_id,
+                                     f->status.hash, h->now);
   return RNC_OK;
 }
 static int flap_expired(const host_interface *l, const host_flap *e,

@@ -39,6 +39,8 @@ typedef struct node_interface {
   unsigned pr_cooldown;
   uint64_t ic_activated, ic_sustained, ic_held_release, pr_activated,
       pr_sustained;
+  int has_tunnel;
+  uint8_t tunnel_id[32];
 } node_interface;
 typedef struct node_known {
   int used;
@@ -74,6 +76,18 @@ typedef struct node_route {
   rnc_route route;
   rnc_packet packet;
 } node_route;
+typedef struct node_tunnel_path {
+  int used;
+  uint64_t stored; /* when this path was last confirmed through the tunnel */
+  node_route entry;
+} node_tunnel_path;
+typedef struct node_tunnel {
+  int used;
+  uint8_t id[32];
+  uint32_t interface_id; /* 0 while the interface is away */
+  uint64_t expires;
+  node_tunnel_path paths[RNC_NODE_TUNNEL_PATHS];
+} node_tunnel;
 typedef struct node_destination {
   int used, type, has_ratchet, proof;
   uint8_t ratchet[32];
@@ -122,6 +136,9 @@ typedef struct node_queued {
 } node_queued;
 struct rnc_node {
   uint8_t id[16];
+  rnc_identity identity; /* kept for tunnel synthesis when it has a key */
+  int has_identity;
+  node_tunnel tunnels[RNC_NODE_TUNNELS];
   int transport;
   rnc_random_fn random;
   void *random_context;
@@ -351,6 +368,10 @@ rnc_node *rnc_node_new(const rnc_identity *identity, int transport,
   n = calloc(1, sizeof(*n));
   if (n) {
     memcpy(n->id, identity->hash, 16);
+    if (identity->has_private) {
+      n->identity = *identity;
+      n->has_identity = 1;
+    }
     n->transport = !!transport;
     n->random = random;
     n->random_context = context;
@@ -447,6 +468,9 @@ rnc_result rnc_node_remove_interface(rnc_node *n, uint32_t id) {
   if (!iface)
     return RNC_STATE;
   memset(iface, 0, sizeof(*iface));
+  for (i = 0; i < RNC_NODE_TUNNELS; i++)
+    if (n->tunnels[i].used && n->tunnels[i].interface_id == id)
+      n->tunnels[i].interface_id = 0; /* its paths stay for when it returns */
   for (i = 0; i < RNC_NODE_ROUTES; i++)
     if (n->routes[i].route.interface_id == id)
       n->routes[i].used = 0;
@@ -1026,17 +1050,224 @@ static void schedule_retry(rnc_node *n, const rnc_packet *relay,
 /* The single retransmission; skipped if the path or ingress is gone, or the
  * queue is full (retried on the next tick). */
 static void announce_retry(rnc_node *n, node_announce *a, uint64_t now) {
-  size_t k, targets = relay_count(n, a->ingress);
+  size_t k, targets;
   if (!interface(n, a->ingress) || !route_find(n, a->destination, now)) {
     a->used = 0;
     return;
   }
+  targets = relay_count(n, a->ingress);
   if (queue_free(n) < targets)
     return;
   for (k = 0; k < RNC_NODE_INTERFACES; k++)
     if (n->interfaces[k].id && relay_target(n, a->ingress, n->interfaces[k].id))
       queue(n, n->interfaces[k].id, &a->packet, now);
   a->used = 0;
+}
+/* ---- tunnels ---- */
+static rnc_result tunnel_address(uint8_t out[16]) {
+  return rnc_plain_destination_hash("rnstransport.tunnel.synthesize", out);
+}
+static node_tunnel *tunnel_find(rnc_node *n, const uint8_t id[32]) {
+  size_t i;
+  for (i = 0; i < RNC_NODE_TUNNELS; i++)
+    if (n->tunnels[i].used && !memcmp(n->tunnels[i].id, id, 32))
+      return &n->tunnels[i];
+  return NULL;
+}
+/* Keeps a path learned on a tunnel interface so it can be restored later. */
+static void tunnel_remember(rnc_node *n, uint32_t ingress, const node_route *entry,
+                            uint64_t now) {
+  node_interface *in = interface(n, ingress);
+  node_tunnel *t;
+  node_tunnel_path *slot = NULL;
+  size_t i;
+  if (!in || !in->has_tunnel)
+    return;
+  t = tunnel_find(n, in->tunnel_id);
+  if (!t)
+    return;
+  for (i = 0; i < RNC_NODE_TUNNEL_PATHS; i++) {
+    node_tunnel_path *p = &t->paths[i];
+    if (p->used && same(p->entry.route.destination, entry->route.destination)) {
+      slot = p;
+      break;
+    }
+    if (!p->used && !slot)
+      slot = p;
+    else if (!slot && i + 1u == RNC_NODE_TUNNEL_PATHS)
+      slot = &t->paths[0];
+  }
+  if (!slot)
+    return;
+  slot->used = 1;
+  slot->stored = now;
+  slot->entry = *entry;
+  t->expires = after(now, RNC_TUNNEL_TIMEOUT_MS);
+}
+static void tunnel_restore(rnc_node *n, node_tunnel *t, uint32_t ingress,
+                           uint64_t now) {
+  size_t i;
+  for (i = 0; i < RNC_NODE_TUNNEL_PATHS; i++) {
+    node_tunnel_path *p = &t->paths[i];
+    node_route *existing, *slot = NULL;
+    size_t k;
+    int add = 0;
+    if (!p->used)
+      continue;
+    existing = route_find(n, p->entry.route.destination, now);
+    if (existing) {
+      if (p->entry.route.hops <= existing->route.hops ||
+          existing->route.expires_ms <= now)
+        add = p->entry.route.announced_at >= existing->route.announced_at;
+    } else
+      add = p->entry.route.expires_ms > now;
+    if (add) {
+      if (existing)
+        slot = existing;
+      else
+        for (k = 0; k < RNC_NODE_ROUTES; k++)
+          if (!n->routes[k].used || n->routes[k].route.expires_ms <= now) {
+            slot = &n->routes[k];
+            break;
+          }
+    }
+    if (!add || !slot) {
+      if (!add)
+        p->used = 0; /* superseded or expired: forget it */
+      continue;
+    }
+    *slot = p->entry;
+    slot->used = 1;
+    slot->route.interface_id = ingress;
+    p->stored = now;
+  }
+}
+static rnc_result tunnel_handle(rnc_node *n, const uint8_t id[32],
+                                uint32_t ingress, uint64_t now) {
+  node_interface *in = interface(n, ingress);
+  node_tunnel *t = tunnel_find(n, id);
+  size_t i;
+  if (!in)
+    return RNC_STATE;
+  if (!t) {
+    node_tunnel *oldest = &n->tunnels[0];
+    for (i = 0; i < RNC_NODE_TUNNELS; i++) {
+      if (!n->tunnels[i].used) {
+        oldest = &n->tunnels[i];
+        break;
+      }
+      if (n->tunnels[i].expires < oldest->expires)
+        oldest = &n->tunnels[i];
+    }
+    t = oldest;
+    memset(t, 0, sizeof(*t));
+    t->used = 1;
+    memcpy(t->id, id, 32);
+  } else
+    tunnel_restore(n, t, ingress, now);
+  t->interface_id = ingress;
+  t->expires = after(now, RNC_TUNNEL_TIMEOUT_MS);
+  in->has_tunnel = 1;
+  memcpy(in->tunnel_id, id, 32);
+  return RNC_OK;
+}
+static rnc_result tunnel_synthesized(rnc_node *n, uint32_t ingress,
+                                     const rnc_packet *p, uint64_t now) {
+  rnc_identity remote;
+  uint8_t id[32], material[96];
+  if ((p->flags & 3u) != RNC_DATA || p->data_size != 176)
+    return RNC_PROTOCOL;
+  if (rnc_identity_from_public(&remote, p->data) != RNC_OK ||
+      rnc_identity_verify(&remote, p->data, 112, p->data + 112) != RNC_OK)
+    return RNC_PROTOCOL;
+  memcpy(material, p->data, 96); /* public key and interface hash */
+  if (rnc_hash(material, sizeof(material), id) != RNC_OK)
+    return RNC_CRYPTO;
+  return tunnel_handle(n, id, ingress, now);
+}
+static void tunnels_cull(rnc_node *n, uint64_t now) {
+  size_t i, k;
+  for (i = 0; i < RNC_NODE_TUNNELS; i++) {
+    node_tunnel *t = &n->tunnels[i];
+    if (!t->used)
+      continue;
+    if (t->expires <= now) {
+      memset(t, 0, sizeof(*t));
+      continue;
+    }
+    for (k = 0; k < RNC_NODE_TUNNEL_PATHS; k++) {
+      node_tunnel_path *p = &t->paths[k];
+      const node_route *active;
+      if (!p->used)
+        continue;
+      if (now - p->stored >= RNC_TUNNEL_TIMEOUT_MS) {
+        p->used = 0;
+        continue;
+      }
+      /* an active path that is more recent makes the stored one pointless */
+      active = route_find(n, p->entry.route.destination, now);
+      if (active && active->route.interface_id != t->interface_id &&
+          active->route.announced_at > p->entry.route.announced_at)
+        p->used = 0;
+    }
+  }
+}
+rnc_result rnc_node_synthesize_tunnel(rnc_node *n, uint32_t interface_id,
+                                      const uint8_t interface_hash[32],
+                                      uint64_t now) {
+  rnc_packet p;
+  uint8_t signature[64];
+  rnc_result r;
+  if (!n || !interface_hash)
+    return RNC_INVALID;
+  if (!n->has_identity || !interface(n, interface_id))
+    return RNC_STATE;
+  memset(&p, 0, sizeof(p));
+  p.flags = (uint8_t)(RNC_PLAIN << 2); /* PLAIN DATA, header 1, broadcast */
+  r = tunnel_address(p.destination);
+  if (r != RNC_OK)
+    return r;
+  memcpy(p.data, n->identity.public_key, 64);
+  memcpy(p.data + 64, interface_hash, 32);
+  r = n->random(n->random_context, p.data + 96, 16);
+  if (r != RNC_OK)
+    return r;
+  r = rnc_identity_sign(&n->identity, p.data, 112, signature);
+  if (r != RNC_OK)
+    return r;
+  memcpy(p.data + 112, signature, 64);
+  p.data_size = 176;
+  if (!room(n, 1))
+    return RNC_AGAIN;
+  emit(n, RNC_NODE_SEND, interface_id, &p); /* this interface only */
+  (void)now;
+  return RNC_OK;
+}
+size_t rnc_node_tunnel_count(const rnc_node *n) {
+  size_t i, c = 0;
+  if (!n)
+    return 0;
+  for (i = 0; i < RNC_NODE_TUNNELS; i++)
+    c += n->tunnels[i].used;
+  return c;
+}
+rnc_result rnc_node_tunnel_at(const rnc_node *n, size_t index,
+                              rnc_tunnel_info *info) {
+  size_t i, k;
+  if (!n || !info)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_TUNNELS; i++)
+    if (n->tunnels[i].used && !index--) {
+      size_t paths = 0;
+      for (k = 0; k < RNC_NODE_TUNNEL_PATHS; k++)
+        paths += n->tunnels[i].paths[k].used;
+      memcpy(info->id, n->tunnels[i].id, 32);
+      info->interface_id = n->tunnels[i].interface_id;
+      info->expires_ms = n->tunnels[i].expires;
+      info->paths = paths;
+      return RNC_OK;
+    }
+  return RNC_AGAIN;
 }
 static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
                             uint64_t unix_seconds, uint64_t now) {
@@ -1119,6 +1350,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
     memcpy(fresh.route.next_hop,
            (p->flags & 0x40) ? p->transport_id : p->destination, 16);
     n->routes[slot] = fresh;
+    tunnel_remember(n, ingress, &fresh, now);
     {
       char label[33];
       rnc_logf(RNC_LOG_DEBUG, "node", "learned path to %s via interface %u, %u hop(s)",
@@ -1525,6 +1757,8 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
       return r;
     if (same(address, p.destination))
       r = requested(n, ingress, &p, unix_seconds, now);
+    else if (tunnel_address(address) == RNC_OK && same(address, p.destination))
+      r = tunnel_synthesized(n, ingress, &p, now);
     else {
       for (i = 0; i < RNC_NODE_INTERFACES; i++)
         if (n->interfaces[i].id && n->interfaces[i].id != ingress &&
@@ -1632,6 +1866,7 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
   size_t i, j;
   if (!n || now < n->now)
     return RNC_INVALID;
+  tunnels_cull(n, now);
   for (i = 0; i < RNC_NODE_BLACKHOLE; i++)
     if (n->blackhole[i].used && n->blackhole[i].entry.until &&
         unix_seconds >= n->blackhole[i].entry.until)
@@ -2202,4 +2437,199 @@ rnc_result rnc_node_set_destination_data(rnc_node *n, const uint8_t destination[
     memcpy(d->app, app_data, size);
   d->size = size;
   return RNC_OK;
+}
+
+/* Tunnel checkpoint: "RNCT", version, owner hash, export time, tunnel count,
+ * then per tunnel its id, expiry (unix), path count and per path the announce
+ * packet, route expiry and last confirmation (both unix); owner signature. */
+rnc_result rnc_node_tunnels_export(const rnc_node *n, const rnc_identity *owner,
+                                   uint64_t unix_seconds, uint64_t now,
+                                   void *output, size_t capacity,
+                                   size_t *written) {
+  uint8_t *state, raw[RNC_MAX_MTU];
+  size_t i, k, at = 32, count = 0, need = 32 + 64, size;
+  rnc_result r;
+  if (written)
+    *written = 0;
+  if (!n || !owner || !owner->has_private || !same(n->id, owner->hash) ||
+      now < n->now || unix_seconds > UINT64_C(0xffffffffff) || !output ||
+      !written)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_TUNNELS; i++) {
+    if (!n->tunnels[i].used || n->tunnels[i].expires <= now)
+      continue;
+    count++;
+    need += 41;
+    for (k = 0; k < RNC_NODE_TUNNEL_PATHS; k++)
+      if (n->tunnels[i].paths[k].used) {
+        r = rnc_packet_encode(&n->tunnels[i].paths[k].entry.packet, raw,
+                              sizeof(raw), &size);
+        if (r != RNC_OK)
+          return r;
+        need += 18 + size;
+      }
+  }
+  if (capacity < need)
+    return RNC_NO_SPACE;
+  state = calloc(1, need);
+  if (!state)
+    return RNC_NO_SPACE;
+  memcpy(state, "RNCT", 4);
+  state[4] = 1;
+  memcpy(state + 6, n->id, 16);
+  state_u64(state + 22, unix_seconds);
+  state[30] = (uint8_t)(count >> 8);
+  state[31] = (uint8_t)count;
+  for (i = 0; i < RNC_NODE_TUNNELS; i++) {
+    const node_tunnel *t = &n->tunnels[i];
+    size_t path_count = 0, count_at;
+    if (!t->used || t->expires <= now)
+      continue;
+    memcpy(state + at, t->id, 32);
+    state_u64(state + at + 32, after(unix_seconds, (t->expires - now + 999u) / 1000u));
+    count_at = at + 40;
+    at += 41;
+    for (k = 0; k < RNC_NODE_TUNNEL_PATHS; k++) {
+      const node_tunnel_path *p = &t->paths[k];
+      uint64_t path_seconds;
+      if (!p->used)
+        continue;
+      r = rnc_packet_encode(&p->entry.packet, raw, sizeof(raw), &size);
+      if (r != RNC_OK) {
+        free(state);
+        return r;
+      }
+      state[at] = (uint8_t)(size >> 8);
+      state[at + 1] = (uint8_t)size;
+      path_seconds = p->entry.route.expires_ms > now
+                         ? (p->entry.route.expires_ms - now + 999u) / 1000u
+                         : 0;
+      state_u64(state + at + 2, after(unix_seconds, path_seconds));
+      state_u64(state + at + 10,
+                unix_seconds > (now - p->stored) / 1000u
+                    ? unix_seconds - (now - p->stored) / 1000u
+                    : 0);
+      memcpy(state + at + 18, raw, size);
+      at += 18 + size;
+      path_count++;
+    }
+    state[count_at] = (uint8_t)path_count;
+  }
+  r = rnc_identity_sign(owner, state, at, state + at);
+  if (r == RNC_OK) {
+    memcpy(output, state, at + 64);
+    *written = at + 64;
+  }
+  free(state);
+  return r;
+}
+rnc_result rnc_node_tunnels_import(rnc_node *n, const rnc_identity *owner,
+                                   uint64_t unix_seconds, uint64_t now,
+                                   const void *input, size_t size) {
+  const uint8_t *state = input;
+  node_tunnel *loaded;
+  size_t i, k, count, at = 32, used = 0;
+  uint64_t exported;
+  rnc_result r;
+  if (!n || !owner || !same(n->id, owner->hash) || now < n->now ||
+      unix_seconds > UINT64_C(0xffffffffff) || !input)
+    return RNC_INVALID;
+  if (size < 96 || size > RNC_NODE_TUNNEL_STATE_MAX || memcmp(state, "RNCT", 4) ||
+      state[4] != 1 || state[5] || !same(state + 6, n->id))
+    return RNC_PROTOCOL;
+  r = rnc_identity_verify(owner, state, size - 64, state + size - 64);
+  if (r != RNC_OK)
+    return r;
+  exported = state_read64(state + 22);
+  if (exported > unix_seconds)
+    return RNC_INVALID;
+  count = (size_t)state[30] * 256 + state[31];
+  if (count > RNC_NODE_TUNNELS)
+    return RNC_PROTOCOL;
+  for (i = 0; i < RNC_NODE_TUNNELS; i++)
+    if (n->tunnels[i].used)
+      return RNC_STATE;
+  loaded = calloc(RNC_NODE_TUNNELS, sizeof(*loaded));
+  if (!loaded)
+    return RNC_NO_SPACE;
+  for (i = 0; i < count; i++) {
+    node_tunnel t = {0};
+    size_t path_count;
+    uint64_t expires;
+    if (size - 64 - at < 41) {
+      r = RNC_PROTOCOL;
+      goto done;
+    }
+    memcpy(t.id, state + at, 32);
+    expires = state_read64(state + at + 32);
+    path_count = state[at + 40];
+    at += 41;
+    if (path_count > RNC_NODE_TUNNEL_PATHS) {
+      r = RNC_PROTOCOL;
+      goto done;
+    }
+    for (k = 0; k < path_count; k++) {
+      node_tunnel_path *p = &t.paths[k];
+      uint64_t route_expires, confirmed, remaining;
+      size_t wire;
+      if (size - 64 - at < 18) {
+        r = RNC_PROTOCOL;
+        goto done;
+      }
+      wire = (size_t)state[at] * 256 + state[at + 1];
+      route_expires = state_read64(state + at + 2);
+      confirmed = state_read64(state + at + 10);
+      at += 18;
+      if (wire > size - 64 - at || wire > RNC_MTU) {
+        r = RNC_PROTOCOL;
+        goto done;
+      }
+      r = rnc_packet_decode(state + at, wire, &p->entry.packet);
+      if (r == RNC_OK)
+        r = rnc_announce_verify(&p->entry.packet, &p->entry.route.announce);
+      if (r != RNC_OK || p->entry.packet.hops >= 128) {
+        r = r == RNC_OK ? RNC_PROTOCOL : r;
+        goto done;
+      }
+      at += wire;
+      p->used = 1;
+      p->entry.used = 1;
+      p->entry.route.hops = p->entry.packet.hops;
+      p->entry.route.announced_at = announce_time(&p->entry.route.announce);
+      memcpy(p->entry.route.destination, p->entry.packet.destination, 16);
+      memcpy(p->entry.route.next_hop,
+             (p->entry.packet.flags & 0x40u) ? p->entry.packet.transport_id
+                                             : p->entry.packet.destination,
+             16);
+      remaining = route_expires > unix_seconds ? route_expires - unix_seconds : 0;
+      if (remaining > PATH_LIFETIME / 1000u)
+        remaining = PATH_LIFETIME / 1000u;
+      p->entry.route.expires_ms = after(now, remaining * 1000u);
+      p->stored = unix_seconds > confirmed
+                      ? (now > (unix_seconds - confirmed) * 1000u
+                             ? now - (unix_seconds - confirmed) * 1000u
+                             : 0)
+                      : now;
+    }
+    if (expires > unix_seconds) {
+      t.used = 1;
+      t.expires = after(now, (expires - unix_seconds) * 1000u);
+      /* paths that timed out while we were away are dropped */
+      for (k = 0; k < RNC_NODE_TUNNEL_PATHS; k++)
+        if (t.paths[k].used && now - t.paths[k].stored >= RNC_TUNNEL_TIMEOUT_MS)
+          t.paths[k].used = 0;
+      loaded[used++] = t;
+    }
+  }
+  if (at != size - 64) {
+    r = RNC_PROTOCOL;
+    goto done;
+  }
+  for (i = 0; i < used; i++)
+    n->tunnels[i] = loaded[i];
+  r = RNC_OK;
+done:
+  OPENSSL_cleanse(loaded, RNC_NODE_TUNNELS * sizeof(*loaded));
+  free(loaded);
+  return r;
 }

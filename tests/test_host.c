@@ -1185,6 +1185,52 @@ static void log_test(void) {
   rnc_node_free(node);
   puts("host log tests passed");
 }
+/* A TCP client announces a tunnel when it connects; the server's node learns it. */
+static void tunnel_test(void) {
+  uint8_t key_a[64] = {1}, key_b[64] = {2};
+  unsigned ra = 0, rb = 0, i;
+  rnc_identity ia, ib;
+  rnc_node *a, *b;
+  rnc_host *ah, *bh;
+  rnc_host_config cfg = {0};
+  rnc_host_status st;
+  rnc_tunnel_info t;
+  uint8_t material[96], expected[32];
+  CHECK(rnc_identity_from_private(&ia, key_a) == RNC_OK);
+  CHECK(rnc_identity_from_private(&ib, key_b) == RNC_OK);
+  a = rnc_node_new(&ia, 1, random_bytes, &ra);
+  b = rnc_node_new(&ib, 0, random_bytes, &rb);
+  ah = rnc_host_new(a);
+  bh = rnc_host_new(b);
+  CHECK(a && b && ah && bh);
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.address = "127.0.0.1";
+  CHECK(rnc_host_add(ah, 1, &cfg) == RNC_OK);
+  CHECK(rnc_host_get_status(ah, 1, &st) == RNC_OK && st.bound_port);
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  cfg.port = st.bound_port;
+  CHECK(rnc_host_add(bh, 2, &cfg) == RNC_OK);
+  CHECK(rnc_host_get_status(bh, 2, &st) == RNC_OK);
+  memcpy(material, ib.public_key, 64);
+  memcpy(material + 64, st.hash, 32); /* the interface hash is its name hash */
+  CHECK(rnc_hash(material, 96, expected) == RNC_OK);
+  for (i = 0; i < 500 && !rnc_node_tunnel_count(a); ++i) {
+    rnc_host_event e;
+    CHECK(rnc_host_step(ah, 0, 1700000000, 100 + i) == RNC_OK);
+    CHECK(rnc_host_step(bh, 1, 1700000000, 100 + i) == RNC_OK);
+    while (rnc_host_poll(ah, &e) == RNC_OK) {
+    }
+    while (rnc_host_poll(bh, &e) == RNC_OK) {
+    }
+  }
+  CHECK(rnc_node_tunnel_count(a) == 1);
+  CHECK(rnc_node_tunnel_at(a, 0, &t) == RNC_OK && !memcmp(t.id, expected, 32));
+  rnc_host_free(ah);
+  rnc_host_free(bh);
+  rnc_node_free(a);
+  rnc_node_free(b);
+  puts("host tunnel tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -1213,6 +1259,8 @@ int main(int argc, char **argv) {
     kiss_test();
   else if (!strcmp(argv[1], "log"))
     log_test();
+  else if (!strcmp(argv[1], "tunnel"))
+    tunnel_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))
