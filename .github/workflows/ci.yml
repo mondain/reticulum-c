@@ -45,6 +45,8 @@ jobs:
           git -C "$RUNNER_TEMP/rns" checkout e40191b3d193b46b7f2d8a44424a594cd758839b
           python3 -m venv "$RUNNER_TEMP/rns-env"
           "$RUNNER_TEMP/rns-env/bin/pip" install 'cryptography>=3.4.7' 'pyserial==3.5'
+          # LXMF supplies the stamp functions RNS uses for interface discovery
+          "$RUNNER_TEMP/rns-env/bin/pip" install --no-deps 'lxmf==1.2.1'
       - run: >-
           cmake -S . -B build -G Ninja -DRNC_INTEROP_TESTS=ON
           -DRNC_REFERENCE_DIR="$RUNNER_TEMP/rns"

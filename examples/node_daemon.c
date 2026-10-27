@@ -63,6 +63,14 @@ typedef struct interface_config {
   uint32_t interface_id;
   int enabled, has_type, backbone;
   rnc_ifac ifac;
+  /* interface discovery (announcing); see node_discovery.h */
+  char type_name[32], disc_name[64], reachable_on[128], location_cmd[256],
+      disc_modulation[32];
+  int discoverable, disc_encrypt, publish_ifac, has_lat, has_lon, has_height,
+      has_lxmf, bootstrap_only;
+  unsigned announce_interval_s, stamp_value, disc_frequency, disc_bandwidth;
+  double lat, lon, height;
+  uint8_t lxmf[16];
 } interface_config;
 typedef struct config {
   int transport, share, share_tcp, remote_management, publish_blackhole,
@@ -70,6 +78,15 @@ typedef struct config {
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
   char network_identity[512]; /* identity file path, empty = none */
+  /* interface discovery: listening, authorised sources, auto-connect */
+  int discover_interfaces, autoconnect_unverified, has_autoconnect_mode;
+  unsigned required_discovery_value, autoconnect_max, discovery_job_interval,
+      autoconnect_monitor_seconds, autoconnect_detach_seconds;
+  int autoconnect_allow_local;
+  rnc_interface_mode autoconnect_mode;
+  uint8_t disc_sources[RNC_SERVICE_ALLOWLIST][16];
+  size_t disc_source_count;
+  char discovery_storage[512];
   /* blackhole subscriptions: sources, update interval and first-run delay */
   uint8_t bh_sources[RNC_SERVICE_ALLOWLIST][16];
   size_t bh_source_count;
@@ -160,6 +177,7 @@ static int set_type(interface_config *f, const char *value) {
     if (!strcmp(value, types[i].name)) {
       f->host.kind = types[i].kind;
       f->has_type = 1;
+      (void)snprintf(f->type_name, sizeof(f->type_name), "%s", value);
       f->backbone = !strncmp(value, "Backbone", 8);
       /* wire-compatible with TCP (HDLC); reference defaults differ */
       if (f->backbone && types[i].kind == RNC_HOST_TCP_LISTEN)
@@ -168,12 +186,100 @@ static int set_type(interface_config *f, const char *value) {
     }
   return 0;
 }
+/* Discovery announce options of an interface; -1 when `key` is not one. */
+static int discovery_key(interface_config *f, const char *key,
+                         const char *value) {
+  char *end;
+  double d;
+  unsigned long n;
+  int b;
+  if (!strcmp(key, "discoverable")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->discoverable = b;
+    return 1;
+  }
+  if (!strcmp(key, "discovery_encrypt") || !strcmp(key, "publish_ifac") ||
+      !strcmp(key, "bootstrap_only")) {
+    if (!boolean(value, &b))
+      return 0;
+    if (key[0] == 'd')
+      f->disc_encrypt = b;
+    else if (key[0] == 'p')
+      f->publish_ifac = b;
+    else
+      f->bootstrap_only = b;
+    return 1;
+  }
+  if (!strcmp(key, "discovery_name"))
+    return text_copy(f->disc_name, sizeof(f->disc_name), value);
+  if (!strcmp(key, "reachable_on"))
+    return text_copy(f->reachable_on, sizeof(f->reachable_on), value);
+  if (!strcmp(key, "location_cmd"))
+    return text_copy(f->location_cmd, sizeof(f->location_cmd), value);
+  if (!strcmp(key, "discovery_modulation"))
+    return text_copy(f->disc_modulation, sizeof(f->disc_modulation), value);
+  if (!strcmp(key, "announce_interval") ||
+      !strcmp(key, "announce_interval_seconds")) {
+    if (!number(value, 100000000ul, &n) || !n)
+      return 0;
+    /* minutes in the reference, never below five; the seconds form exists so
+     * tests need not wait */
+    f->announce_interval_s =
+        key[17] == '_' ? (unsigned)n : (unsigned)(n < 5 ? 5 : n) * 60u;
+    return 1;
+  }
+  if (!strcmp(key, "discovery_stamp_value") ||
+      !strcmp(key, "discovery_frequency") ||
+      !strcmp(key, "discovery_bandwidth")) {
+    if (!number(value, UINT32_MAX, &n))
+      return 0;
+    if (key[10] == 's') {
+      if (n > 64)
+        return 0;
+      f->stamp_value = (unsigned)n;
+    } else if (key[10] == 'f')
+      f->disc_frequency = (unsigned)n;
+    else
+      f->disc_bandwidth = (unsigned)n;
+    return 1;
+  }
+  if (!strcmp(key, "latitude") || !strcmp(key, "longitude") ||
+      !strcmp(key, "height")) {
+    d = strtod(value, &end);
+    if (end == value || *end || d != d)
+      return 0;
+    if (key[1] == 'a' && (d < -90 || d > 90))
+      return 0;
+    if (key[1] == 'o' && (d < -180 || d > 180))
+      return 0;
+    if (key[0] == 'l' && key[1] == 'a')
+      f->lat = d, f->has_lat = 1;
+    else if (key[0] == 'l')
+      f->lon = d, f->has_lon = 1;
+    else
+      f->height = d, f->has_height = 1;
+    return 1;
+  }
+  if (!strcmp(key, "discovery_lxmf_address")) {
+    if (strlen(value) != 32 || !decode_hex(value, f->lxmf))
+      return 0;
+    f->has_lxmf = 1;
+    return 1;
+  }
+  return -1;
+}
 static int interface_key(interface_config *f, const char *key,
                          const char *value) {
   unsigned long n;
   int b;
   if (!strcmp(key, "type"))
     return set_type(f, value);
+  {
+    int d = discovery_key(f, key, value);
+    if (d >= 0)
+      return d;
+  }
   if (!strcmp(key, "enabled")) {
     if (!boolean(value, &b))
       return 0;
@@ -538,23 +644,30 @@ static int interface_id(interface_config *f) {
   OPENSSL_cleanse(digest, sizeof(digest));
   return f->interface_id != 0x7fff0001u;
 }
+/* Points the host config's strings at the interface's own buffers (also needed
+ * for copies of the config, whose pointers still reference the original). */
+static void interface_bind(interface_config *f) {
+  f->host.name = f->name;
+  f->host.address = f->address[0] ? f->address
+                                  : (f->host.kind == RNC_HOST_TCP_LISTEN ||
+                                             f->host.kind == RNC_HOST_UDP
+                                         ? "127.0.0.1"
+                                         : NULL);
+  f->host.target = f->target[0] ? f->target : NULL;
+  f->host.device = f->device[0] ? f->device : NULL;
+  f->host.group = f->group[0] ? f->group : NULL;
+  f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
+  f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
+  if (f->host.ifac)
+    f->host.ifac = &f->ifac;
+}
 static int finish_config(config *c) {
   size_t i, enabled = 0;
   for (i = 0; i < c->count; ++i) {
     interface_config *f = &c->interfaces[i];
     if (!f->has_type)
       return 0;
-    f->host.name = f->name;
-    f->host.address = f->address[0] ? f->address
-                                    : (f->host.kind == RNC_HOST_TCP_LISTEN ||
-                                               f->host.kind == RNC_HOST_UDP
-                                           ? "127.0.0.1"
-                                           : NULL);
-    f->host.target = f->target[0] ? f->target : NULL;
-    f->host.device = f->device[0] ? f->device : NULL;
-    f->host.group = f->group[0] ? f->group : NULL;
-    f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
-    f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
+    interface_bind(f);
     if (f->backbone && !f->host.bitrate)
       f->host.bitrate = 100000000u; /* reference BITRATE_GUESS */
     if (!f->enabled)
@@ -704,6 +817,71 @@ static int read_config(const char *path, config *c) {
           valid = 0;
           break;
         }
+      } else if (!strcmp(s, "interface_discovery_sources")) {
+        if (!parse_hash_list(value, c->disc_sources, &c->disc_source_count)) {
+          valid = 0;
+          break;
+        }
+      } else if (!strcmp(s, "discovery_storage")) {
+        if (!text_copy(c->discovery_storage, sizeof(c->discovery_storage),
+                       value)) {
+          valid = 0;
+          break;
+        }
+      } else if (!strcmp(s, "autoconnect_monitor_seconds") ||
+                 !strcmp(s, "autoconnect_detach_seconds")) {
+        if (!number(value, 3600, &n) || !n) {
+          valid = 0;
+          break;
+        }
+        if (s[12] == 'm')
+          c->autoconnect_monitor_seconds = (unsigned)n;
+        else
+          c->autoconnect_detach_seconds = (unsigned)n;
+      } else if (!strcmp(s, "autoconnect_interface_gravity") ||
+                 !strcmp(s, "autoconnect_announces_to_internal")) {
+        /* accepted for compatibility; path gravity is not implemented */
+        char *end;
+        (void)strtod(value, &end);
+        if (end == value || *end) {
+          valid = 0;
+          break;
+        }
+      } else if (!strcmp(s, "required_discovery_value") ||
+                 !strcmp(s, "autoconnect_discovered_interfaces") ||
+                 !strcmp(s, "discovery_job_interval")) {
+        if (!number(value, 100000, &n)) {
+          valid = 0;
+          break;
+        }
+        if (s[0] == 'r')
+          c->required_discovery_value = (unsigned)n;
+        else if (s[0] == 'a')
+          c->autoconnect_max = (unsigned)n;
+        else
+          c->discovery_job_interval = (unsigned)n;
+      } else if (!strcmp(s, "autoconnect_interface_mode")) {
+        static const struct {
+          const char *name;
+          rnc_interface_mode mode;
+        } modes[] = {{"full", RNC_MODE_FULL},
+                     {"gateway", RNC_MODE_GATEWAY},
+                     {"gw", RNC_MODE_GATEWAY},
+                     {"access_point", RNC_MODE_ACCESS_POINT},
+                     {"ap", RNC_MODE_ACCESS_POINT},
+                     {"roaming", RNC_MODE_ROAMING},
+                     {"boundary", RNC_MODE_BOUNDARY}};
+        size_t k;
+        int found = 0;
+        for (k = 0; k < sizeof(modes) / sizeof(*modes); k++)
+          if (!strcasecmp(value, modes[k].name)) {
+            c->autoconnect_mode = modes[k].mode;
+            c->has_autoconnect_mode = found = 1;
+          }
+        if (!found) {
+          valid = 0;
+          break;
+        }
       } else if (!strcmp(s, "network_identity")) {
         const char *home = getenv("HOME");
         int n;
@@ -766,6 +944,12 @@ static int read_config(const char *path, config *c) {
           c->publish_blackhole = b;
         else if (!strcmp(s, "respond_to_probes"))
           c->respond_to_probes = b;
+        else if (!strcmp(s, "discover_interfaces"))
+          c->discover_interfaces = b;
+        else if (!strcmp(s, "autoconnect_unverified_implementations"))
+          c->autoconnect_unverified = b;
+        else if (!strcmp(s, "autoconnect_allow_local"))
+          c->autoconnect_allow_local = b;
         else {
           valid = 0;
           break;
@@ -1124,6 +1308,7 @@ static void route_reply(admin_client *c, const rnc_route *r) {
   append(c, " interface=%u hops=%u expires=%llu\n", r->interface_id,
          (unsigned)r->hops, (unsigned long long)r->expires_ms);
 }
+static void discovery_list(admin_client *c, uint64_t unix_seconds);
 static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
                         const rnc_identity *id, const char *state,
                         uint64_t now) {
@@ -1208,6 +1393,8 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
       append(c, " until=%llu reason=%s\n", (unsigned long long)e.until,
              e.reason);
     }
+  } else if (!strcmp(request, "DISCOVERED")) {
+    discovery_list(c, (uint64_t)time(NULL));
   } else if (!strcmp(request, "NETWORK")) {
     if (network_identity_hash()) {
       append(c, "network identity=");
@@ -1222,7 +1409,7 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
                ? "OK"
                : "ERROR no state path or write failed");
   } else
-    append(c, "ERROR commands: STATUS ROUTES PATH <32hex> BLACKHOLE UNBLACKHOLE BLACKHOLES NETWORK SAVE\n");
+    append(c, "ERROR commands: STATUS ROUTES PATH <32hex> BLACKHOLE UNBLACKHOLE BLACKHOLES NETWORK DISCOVERED SAVE\n");
   if (!c->output_size)
     append(c, "EMPTY\n");
 }
@@ -1332,6 +1519,7 @@ static void admin_step(int listener, admin_client clients[4], rnc_host *host,
 }
 #include "node_rpc.h"
 #include "node_mgmt.h"
+#include "node_discovery.h"
 
 int main(int argc, char **argv) {
   const char *config_path = NULL, *key_path = NULL, *admin_path = NULL,
@@ -1366,6 +1554,9 @@ int main(int argc, char **argv) {
       if (snprintf(blackhole_path, sizeof(blackhole_path), "%s.blackhole",
                    state_path) >= (int)sizeof(blackhole_path))
         blackhole_path[0] = 0;
+      if (snprintf(discovery_dir, sizeof(discovery_dir), "%s.discovery",
+                   state_path) >= (int)sizeof(discovery_dir))
+        discovery_dir[0] = 0;
     }
     else if (!strcmp(argv[i], "--version")) {
       puts("reticulum-c-node 0.2 (experimental C router; own admin protocol)");
@@ -1428,6 +1619,7 @@ int main(int argc, char **argv) {
                (mgmt.responder || mgmt.requester)) {
         mgmt_local_event(&event.node, (uint64_t)time(NULL), monotonic_ms());
       } else if (event.node.type == RNC_NODE_ANNOUNCE) {
+        discovery_heard(&event.node, (uint64_t)time(NULL));
         printf("announce destination=");
         print_hex(event.node.route.destination, 16);
         printf(" interface=%u hops=%u\n", event.interface_id,

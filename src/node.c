@@ -2178,3 +2178,17 @@ rnc_result rnc_node_blackhole_merge(rnc_node *n, const void *input,
     return r;
   return blackhole_parse(n, input, size, source, unix_seconds, 1, 1, added);
 }
+
+rnc_result rnc_node_set_destination_data(rnc_node *n, const uint8_t destination[16],
+                                         const void *app_data, size_t size) {
+  node_destination *d;
+  if (!n || !destination || (!app_data && size) || size > sizeof(d->app))
+    return RNC_INVALID;
+  d = destination_find(n, destination);
+  if (!d || d->type != RNC_SINGLE)
+    return RNC_STATE;
+  if (size)
+    memcpy(d->app, app_data, size);
+  d->size = size;
+  return RNC_OK;
+}

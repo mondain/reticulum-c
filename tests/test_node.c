@@ -499,6 +499,32 @@ static void destinations(void) {
   rnc_node_free(n);
   rnc_identity_clear(&id);
 }
+static void destination_data(void) {
+  rnc_identity id = identity();
+  rnc_node *n = rnc_node_new(&id, 0, rng, NULL);
+  uint8_t single[16], plain[16], big[317] = {0};
+  rnc_packet p;
+  rnc_announce a;
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_add_destination(n, &id, "node.data", "first", 5, single) ==
+        RNC_OK);
+  CHECK(rnc_node_set_destination_data(n, single, "second payload", 14) ==
+        RNC_OK);
+  CHECK(rnc_node_announce(n, single, 1000, 1) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1000, 1) == RNC_OK);
+  p = sent(n, 1);
+  CHECK(rnc_announce_verify(&p, &a) == RNC_OK && a.app_size == 14 &&
+        !memcmp(a.app_data, "second payload", 14));
+  CHECK(rnc_node_set_destination_data(n, single, NULL, 0) == RNC_OK);
+  CHECK(rnc_node_set_destination_data(n, single, big, sizeof(big)) ==
+        RNC_INVALID);
+  CHECK(rnc_node_set_destination_data(n, single, NULL, 3) == RNC_INVALID);
+  memset(plain, 7, 16);
+  CHECK(rnc_node_set_destination_data(n, plain, "x", 1) == RNC_STATE);
+  CHECK(rnc_node_set_destination_data(NULL, single, "x", 1) == RNC_INVALID);
+  rnc_node_free(n);
+  rnc_identity_clear(&id);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "paths"))
@@ -517,6 +543,8 @@ int main(int argc, char **argv) {
     mesh();
   else if (!strcmp(argv[1], "discovery"))
     discovery();
+  else if (!strcmp(argv[1], "destination_data"))
+    destination_data();
   else
     CHECK(0);
   return 0;

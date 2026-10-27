@@ -19,7 +19,7 @@ if(RNC_COMPRESSION)
 endif()
 add_library(reticulum_c src/crypto.c src/packet.c src/framing.c src/announce.c
     src/link.c src/channel.c src/node.c src/ifac.c src/ratchet.c src/group.c
-    src/stream.c src/resource.c src/service.c src/ipc.c src/responder.c src/requester.c)
+    src/stream.c src/resource.c src/service.c src/ipc.c src/responder.c src/requester.c src/stamp.c src/discovery.c)
 if(RNC_COMPRESSION)
     target_compile_definitions(reticulum_c PRIVATE RNC_HAVE_BZIP2=1)
     target_link_libraries(reticulum_c PRIVATE BZip2::BZip2)
@@ -58,7 +58,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/reticulum_cConfig.cmake
 if(BUILD_TESTING)
     add_executable(test_node tests/test_node.c)
     target_link_libraries(test_node PRIVATE reticulum_c)
-    foreach(case paths routing mesh discovery guards state local destinations)
+    foreach(case paths routing mesh discovery guards state local destinations destination_data)
         add_test(NAME reticulum_node_${case} COMMAND test_node ${case})
     endforeach()
     add_executable(test_receipt tests/test_receipt.c)
@@ -100,6 +100,16 @@ if(BUILD_TESTING)
     target_link_libraries(test_requester PRIVATE reticulum_c)
     foreach(case echo no_route silent identify busy arguments)
         add_test(NAME reticulum_requester_${case} COMMAND test_requester ${case})
+    endforeach()
+    add_executable(test_stamp tests/test_stamp.c)
+    target_link_libraries(test_stamp PRIVATE reticulum_c)
+    foreach(case workblock value generate find)
+        add_test(NAME reticulum_stamp_${case} COMMAND test_stamp ${case})
+    endforeach()
+    add_executable(test_discovery tests/test_discovery.c)
+    target_link_libraries(test_discovery PRIVATE reticulum_c)
+    foreach(case packing parsing encryption helpers seal record_pack record_unpack record_status config_entries)
+        add_test(NAME reticulum_discovery_${case} COMMAND test_discovery ${case})
     endforeach()
     add_executable(test_security tests/test_security.c)
     target_link_libraries(test_security PRIVATE reticulum_c OpenSSL::Crypto)
@@ -227,13 +237,13 @@ if(UNIX AND RNC_BUILD_HOST)
         if(RNC_BUILD_EXAMPLES)
             add_executable(test_node_process tests/test_node_process.c)
             target_link_libraries(test_node_process PRIVATE reticulum_c_host OpenSSL::Crypto)
-            foreach(case cli network shared blackhole management sources probe netid)
+            foreach(case cli network shared blackhole management sources probe netid disc_announce disc_listen disc_autoconnect)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
             set_tests_properties(reticulum_node_process_cli PROPERTIES TIMEOUT 20)
             set_tests_properties(reticulum_node_process_network reticulum_node_process_shared reticulum_node_process_management
-                reticulum_node_process_sources reticulum_node_process_probe reticulum_node_process_netid
+                reticulum_node_process_sources reticulum_node_process_probe reticulum_node_process_netid reticulum_node_process_disc_announce reticulum_node_process_disc_listen reticulum_node_process_disc_autoconnect
                 PROPERTIES LABELS network TIMEOUT 60)
             if(RNC_INTEROP_TESTS)
                 add_test(NAME reticulum_node_process_rns COMMAND ${CMAKE_COMMAND} -E env
@@ -268,6 +278,18 @@ if(UNIX AND RNC_BUILD_HOST)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_netid_ref
                     PROPERTIES LABELS "reticulum_interop" TIMEOUT 60)
+                add_test(NAME reticulum_node_process_disc_ref COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> disc_ref
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_disc_ref
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_disc_listen_ref COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> disc_listen_ref
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_disc_listen_ref
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
                 set_tests_properties(reticulum_node_process_remote
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 set_tests_properties(reticulum_node_process_backbone

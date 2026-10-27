@@ -9,10 +9,12 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
+#include <reticulum_c/rnc_discovery.h>
 #include <reticulum_c/rnc_ipc.h>
 #include <reticulum_c/rnc_link.h>
 #include <reticulum_c/rnc_service.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -950,6 +952,352 @@ static void network_identity(const char *exe) {
   remove_tree(dir);
   puts("node network identity tests passed");
 }
+/* Interface discovery announces: a daemon with a discoverable interface
+ * announces rnstransport.discovery.interface; a C client over TCP receives and
+ * validates it. */
+static int collect_announce(unsigned port, const uint8_t destination[16],
+                            rnc_announce *out, unsigned seconds) {
+  mgmt_client c = {0};
+  rnc_host_config tcp = {0};
+  uint64_t now = 1000, deadline;
+  int found = 0;
+  c.seed = 11;
+  CHECK(rnc_identity_generate(&c.id, mgmt_rng, &c.seed) == RNC_OK);
+  c.node = rnc_node_new(&c.id, 0, mgmt_rng, &c.seed);
+  c.host = c.node ? rnc_host_new(c.node) : NULL;
+  CHECK(c.host);
+  tcp.kind = RNC_HOST_TCP_CONNECT;
+  tcp.address = "127.0.0.1";
+  tcp.port = (uint16_t)port;
+  CHECK(rnc_host_add(c.host, 1, &tcp) == RNC_OK);
+  deadline = now + seconds * 1000u;
+  while (!found && now < deadline) {
+    rnc_host_event he;
+    now += 10;
+    CHECK(rnc_host_step(c.host, 5, (uint64_t)time(NULL), now) == RNC_OK);
+    while (rnc_host_poll(c.host, &he) == RNC_OK)
+      if (he.type == RNC_HOST_NODE && he.node.type == RNC_NODE_ANNOUNCE &&
+          !memcmp(he.node.route.destination, destination, 16)) {
+        *out = he.node.route.announce;
+        found = 1;
+      }
+  }
+  rnc_host_free(c.host);
+  rnc_node_free(c.node);
+  return found;
+}
+static void discovery_announce(const char *exe) {
+  char dir[] = "/tmp/rnc-node-disc-XXXXXX", cfg[256], key[256], admin[256],
+       netid[256], text[2048], id[33];
+  unsigned port = unused_port();
+  uint8_t private_key[64], network_key[64], destination[16], name_hash[10],
+      stamp[32];
+  rnc_identity daemon = {0}, network = {0};
+  rnc_announce announce;
+  rnc_discovery_info info;
+  unsigned value;
+  size_t k;
+  int fd, keyfd;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(netid, sizeof(netid), "%s/network", dir) > 0);
+  /* plain announce on the transport identity */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "discovery_job_interval = 1\n[interfaces]\n[[Public]]\n"
+                 "type = BackboneInterface\nlisten_ip = 127.0.0.1\n"
+                 "port = %u\ndiscoverable = yes\ndiscovery_name = "
+                 "Test  Node  (EU)\ndiscovery_stamp_value = 8\nreachable_on = "
+                 "127.0.0.1\nannounce_interval_seconds = 3600\nlatitude = "
+                 "48.8584\nlongitude = 2.2945\nheight = 35\n",
+                 port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  keyfd = open(key, O_RDONLY);
+  CHECK(keyfd >= 0 && read(keyfd, private_key, 64) == 64);
+  close(keyfd);
+  CHECK(rnc_identity_from_private(&daemon, private_key) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.discovery.interface", &daemon,
+                             name_hash, destination) == RNC_OK);
+  CHECK(collect_announce(port, destination, &announce, 20));
+  CHECK(!memcmp(announce.identity.hash, daemon.hash, 16));
+  CHECK(rnc_discovery_parse(announce.app_data, announce.app_size, 8, NULL,
+                            &info, stamp, &value) == RNC_OK);
+  CHECK(!strcmp(info.type, "BackboneInterface") && info.transport &&
+        !memcmp(info.transport_id, daemon.hash, 16) &&
+        !strcmp(info.name, "Test Node (EU)") &&
+        !strcmp(info.reachable_on, "127.0.0.1") && info.has_port &&
+        info.port == port && info.has_latitude && info.latitude == 48.8584 &&
+        info.longitude == 2.2945 && info.height == 35.0 && value >= 8);
+  stop(p, fd);
+  /* encrypted to a network identity, which also owns the destination */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "network_identity = %s\ndiscovery_job_interval = 1\n"
+                 "[interfaces]\n[[Public]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\ndiscoverable = "
+                 "yes\ndiscovery_name = Secret Node\ndiscovery_stamp_value = "
+                 "8\ndiscovery_encrypt = yes\nreachable_on = example.org\n",
+                 netid, port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  keyfd = open(netid, O_RDONLY);
+  CHECK(keyfd >= 0 && read(keyfd, network_key, 64) == 64);
+  close(keyfd);
+  CHECK(rnc_identity_from_private(&network, network_key) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.discovery.interface", &network,
+                             name_hash, destination) == RNC_OK);
+  CHECK(collect_announce(port, destination, &announce, 20));
+  CHECK(!memcmp(announce.identity.hash, network.hash, 16));
+  CHECK(announce.app_data[0] == RNC_DISCOVERY_FLAG_ENCRYPTED);
+  CHECK(rnc_discovery_parse(announce.app_data, announce.app_size, 8, NULL,
+                            &info, stamp, &value) == RNC_STATE);
+  CHECK(rnc_discovery_parse(announce.app_data, announce.app_size, 8, &network,
+                            &info, stamp, &value) == RNC_OK);
+  CHECK(!strcmp(info.type, "TCPServerInterface") && info.port == port &&
+        !strcmp(info.reachable_on, "example.org") && !info.transport);
+  for (k = 0; k < 1; ++k)
+    CHECK(info.name[0]);
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node discovery announce tests passed");
+}
+/* Discovery listening: B hears A's announce, stores it, and applies source,
+ * stamp and encryption rules. */
+static void write_config(const char *path, const char *fmt, ...) {
+  char text[2048];
+  va_list args;
+  va_start(args, fmt);
+  CHECK(vsnprintf(text, sizeof(text), fmt, args) < (int)sizeof(text));
+  va_end(args);
+  config_file(path, text);
+}
+static int listed_within(const char *admin, const char *needle, unsigned seconds) {
+  unsigned waited;
+  char reply[4096];
+  for (waited = 0; waited < seconds * 10; ++waited) {
+    struct timespec t = {0, 100000000};
+    admin_command(admin, "DISCOVERED", reply, sizeof(reply));
+    if (strstr(reply, needle))
+      return 1;
+    nanosleep(&t, NULL);
+  }
+  return 0;
+}
+static void discovery_listen(const char *exe) {
+  char dir[] = "/tmp/rnc-node-dl-XXXXXX", acfg[256], akey[256], aadmin[256],
+       bcfg[256], bkey[256], badmin[256], bstate[256], netid[256], netcopy[256],
+       aid[33], bid[33], reply[4096], store[300];
+  unsigned port = unused_port();
+  int afd, bfd, k;
+  pid_t a, b;
+  struct stat st;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(acfg, sizeof(acfg), "%s/a.config", dir) > 0);
+  CHECK(snprintf(akey, sizeof(akey), "%s/a.identity", dir) > 0);
+  CHECK(snprintf(aadmin, sizeof(aadmin), "%s/a.admin", dir) > 0);
+  CHECK(snprintf(bcfg, sizeof(bcfg), "%s/b.config", dir) > 0);
+  CHECK(snprintf(bkey, sizeof(bkey), "%s/b.identity", dir) > 0);
+  CHECK(snprintf(badmin, sizeof(badmin), "%s/b.admin", dir) > 0);
+  CHECK(snprintf(bstate, sizeof(bstate), "%s/b.state", dir) > 0);
+  CHECK(snprintf(netid, sizeof(netid), "%s/network", dir) > 0);
+  CHECK(snprintf(netcopy, sizeof(netcopy), "%s/network-copy", dir) > 0);
+  CHECK(snprintf(store, sizeof(store), "%s.discovery", bstate) > 0);
+  write_config(acfg,
+               "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+               "discovery_job_interval = 1\nnetwork_identity = %s\n"
+               "[interfaces]\n[[Public]]\ntype = BackboneInterface\n"
+               "listen_ip = 127.0.0.1\nport = %u\ndiscoverable = yes\n"
+               "discovery_name = Alpha Relay\ndiscovery_stamp_value = 8\n"
+               "reachable_on = 198.51.100.4\nannounce_interval_seconds = "
+               "2\nlatitude = 10.5\nlongitude = 20.25\nheight = 3\n",
+               netid, port);
+  a = start(exe, acfg, akey, aadmin, &afd);
+  ready_line(afd, aid);
+  /* give B the same network identity, so only B-with-key could decrypt */
+  {
+    uint8_t material[64];
+    int in = open(netid, O_RDONLY), out;
+    CHECK(in >= 0 && read(in, material, 64) == 64);
+    close(in);
+    out = open(netcopy, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    CHECK(out >= 0 && write(out, material, 64) == 64);
+    close(out);
+  }
+  /* 1. defaults: heard, stored, attributed to the announcing identity */
+  write_config(bcfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+               "discover_interfaces = yes\nrequired_discovery_value = 8\n"
+               "network_identity = %s\n[interfaces]\n[[Up]]\n"
+               "type = TCPClientInterface\ntarget_host = 127.0.0.1\n"
+               "target_port = %u\nreconnect_wait = 1\n",
+               netcopy, port);
+  b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+  ready_line(bfd, bid);
+  CHECK(listed_within(badmin, "Alpha Relay", 30));
+  admin_command(badmin, "DISCOVERED", reply, sizeof(reply));
+  CHECK(strstr(reply, "type=BackboneInterface") &&
+        strstr(reply, "reachable_on=198.51.100.4") && strstr(reply, "status=available") &&
+        strstr(reply, "transport_id=") && strstr(reply, aid));
+  CHECK(!stat(store, &st) && S_ISDIR(st.st_mode));
+  stop(b, bfd);
+  /* a restart still knows it (A need not be running) */
+  stop(a, afd);
+  b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+  ready_line(bfd, bid);
+  admin_command(badmin, "DISCOVERED", reply, sizeof(reply));
+  CHECK(strstr(reply, "Alpha Relay"));
+  stop(b, bfd);
+  /* 2. rules that must keep it out, each on a fresh store */
+  for (k = 0; k < 4; ++k) {
+    char rm[400];
+    CHECK(snprintf(rm, sizeof(rm), "rm -rf '%s'", store) > 0);
+    CHECK(system(rm) == 0);
+    if (k >= 2) /* A now encrypts its announces to the network identity */
+      write_config(acfg,
+                   "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                   "discovery_job_interval = 1\nnetwork_identity = %s\n"
+                   "[interfaces]\n[[Public]]\ntype = BackboneInterface\n"
+                   "listen_ip = 127.0.0.1\nport = %u\ndiscoverable = yes\n"
+                   "discovery_name = Alpha Relay\ndiscovery_stamp_value = 8\n"
+                   "discovery_encrypt = yes\nreachable_on = 198.51.100.4\n"
+                   "announce_interval_seconds = 2\n",
+                   netid, port);
+    a = start(exe, acfg, akey, aadmin, &afd);
+    ready_line(afd, aid);
+    if (k != 2)
+      write_config(bcfg,
+                   "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                   "discover_interfaces = yes\nrequired_discovery_value = %u\n"
+                   "%snetwork_identity = %s\n[interfaces]\n[[Up]]\ntype = "
+                   "TCPClientInterface\ntarget_host = 127.0.0.1\ntarget_port "
+                   "= %u\nreconnect_wait = 1\n",
+                   k == 0 ? 30u : 8u,
+                   k == 1 ? "interface_discovery_sources = "
+                            "00000000000000000000000000000001\n"
+                          : "",
+                   netcopy, port);
+    else
+      write_config(bcfg,
+                   "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                   "discover_interfaces = yes\nrequired_discovery_value = 8\n"
+                   "[interfaces]\n[[Up]]\ntype = TCPClientInterface\n"
+                   "target_host = 127.0.0.1\ntarget_port = %u\nreconnect_wait "
+                   "= 1\n",
+                   port);
+    b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+    ready_line(bfd, bid);
+    if (k == 3) /* with the key it decrypts and is listed */
+      CHECK(listed_within(badmin, "Alpha Relay", 30));
+    else
+      CHECK(!listed_within(badmin, "Alpha Relay", 8));
+    stop(b, bfd);
+    stop(a, afd);
+  }
+  remove_tree(dir);
+  puts("node discovery listening tests passed");
+}
+/* Auto-connect: a bootstrap link brings the announce of a Backbone interface;
+ * the daemon connects to it, drops the bootstrap link once enough auto-connected
+ * interfaces are up, and falls back to bootstrap when they all go away. */
+static unsigned status_count(const char *admin, const char *needle) {
+  char reply[8192];
+  const char *at;
+  unsigned n = 0;
+  admin_command(admin, "STATUS", reply, sizeof(reply));
+  for (at = reply; (at = strstr(at, needle)) != NULL; at += strlen(needle))
+    n++;
+  return n;
+}
+/* Interfaces listed with an id below `limit`: the configured ones, as opposed
+ * to those auto-connected (ids at and above AUTOCONNECT_ID_BASE) or accepted. */
+static unsigned status_ids_below(const char *admin, unsigned long limit) {
+  char reply[8192];
+  const char *at;
+  unsigned n = 0;
+  admin_command(admin, "STATUS", reply, sizeof(reply));
+  for (at = reply; (at = strstr(at, "interface id=")) != NULL; at += 13) {
+    unsigned long id = strtoul(at + 13, NULL, 10);
+    if (id < limit)
+      n++;
+  }
+  return n;
+}
+static int configured_wait(const char *admin, unsigned long limit, unsigned want,
+                           unsigned seconds) {
+  unsigned waited;
+  for (waited = 0; waited < seconds * 10; ++waited) {
+    struct timespec t = {0, 100000000};
+    if (status_ids_below(admin, limit) == want)
+      return 1;
+    nanosleep(&t, NULL);
+  }
+  return 0;
+}
+static int status_wait(const char *admin, const char *needle, unsigned want,
+                       unsigned seconds) {
+  unsigned waited;
+  for (waited = 0; waited < seconds * 10; ++waited) {
+    struct timespec t = {0, 100000000};
+    if (status_count(admin, needle) == want)
+      return 1;
+    nanosleep(&t, NULL);
+  }
+  return 0;
+}
+static void discovery_autoconnect(const char *exe) {
+  char dir[] = "/tmp/rnc-node-ac-XXXXXX", acfg[256], akey[256], aadmin[256],
+       bcfg[256], bkey[256], badmin[256], aid[33], bid[33];
+  unsigned bootstrap_port = unused_port(), public_port = unused_port();
+  int afd, bfd;
+  pid_t a, b;
+  CHECK(bootstrap_port != public_port && mkdtemp(dir));
+  CHECK(snprintf(acfg, sizeof(acfg), "%s/a.config", dir) > 0);
+  CHECK(snprintf(akey, sizeof(akey), "%s/a.identity", dir) > 0);
+  CHECK(snprintf(aadmin, sizeof(aadmin), "%s/a.admin", dir) > 0);
+  CHECK(snprintf(bcfg, sizeof(bcfg), "%s/b.config", dir) > 0);
+  CHECK(snprintf(bkey, sizeof(bkey), "%s/b.identity", dir) > 0);
+  CHECK(snprintf(badmin, sizeof(badmin), "%s/b.admin", dir) > 0);
+  write_config(acfg,
+               "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+               "discovery_job_interval = 1\n[interfaces]\n[[Plain]]\ntype = "
+               "TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n"
+               "[[Public]]\ntype = BackboneInterface\nlisten_ip = 127.0.0.1\n"
+               "port = %u\ndiscoverable = yes\ndiscovery_name = Beta "
+               "Backbone\ndiscovery_stamp_value = 8\nreachable_on = "
+               "127.0.0.1\nannounce_interval_seconds = 2\n",
+               bootstrap_port, public_port);
+  a = start(exe, acfg, akey, aadmin, &afd);
+  ready_line(afd, aid);
+  write_config(bcfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+               "discover_interfaces = yes\nrequired_discovery_value = 8\n"
+               "autoconnect_discovered_interfaces = 1\n"
+               "autoconnect_unverified_implementations = yes\n"
+               "autoconnect_allow_local = yes\n"
+               "autoconnect_monitor_seconds = 1\nautoconnect_detach_seconds = "
+               "2\n[interfaces]\n[[Bootstrap]]\ntype = TCPClientInterface\n"
+               "target_host = 127.0.0.1\ntarget_port = %u\nbootstrap_only = "
+               "yes\nreconnect_wait = 1\n",
+               bootstrap_port);
+  b = start(exe, bcfg, bkey, badmin, &bfd);
+  ready_line(bfd, bid);
+  /* auto-connected interface appears, bootstrap link goes: one TCP client */
+  CHECK(status_wait(badmin, "id=2147287040 parent=0 kind=2 online=1", 1, 40));
+  CHECK(configured_wait(badmin, 2147287040ul, 0, 10)); /* bootstrap link gone */
+  /* the source disappears: the interface is detached, bootstrap returns */
+  stop(a, afd);
+  CHECK(status_wait(badmin, "id=2147287040", 0, 30));
+  CHECK(configured_wait(badmin, 2147287040ul, 1, 30));
+  stop(b, bfd);
+  remove_tree(dir);
+  puts("node discovery auto-connect tests passed");
+}
 static void shared(const char *exe, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-node-shared-XXXXXX", cfg[256], keypath[256],
        admin[256], storage[256], text[2048], identity[33];
@@ -1482,12 +1830,152 @@ static void network_identity_reference(const char *exe, const char *reference,
   remove_tree(dir);
   puts("network identity files interchange with the reference");
 }
+/* A reference instance with discover_interfaces receives and stores this
+ * daemon's discovery announce; its own rnstatus lists it. */
+static pid_t start_rnsd(const char *python, const char *reference,
+                        const char *config_dir) {
+  pid_t p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      (void)dup2(devnull, STDOUT_FILENO);
+      (void)dup2(devnull, STDERR_FILENO);
+    }
+    CHECK(!setenv("PYTHONPATH", reference, 1));
+    execl(python, python, "-m", "RNS.Utilities.rnsd", "--config", config_dir,
+          (char *)NULL);
+    _exit(127);
+  }
+  return p;
+}
+static void discovery_announce_reference(const char *exe, const char *reference,
+                                         const char *python) {
+  char dir[] = "/tmp/rnc-disc-ref-XXXXXX", rdir[256], rcfg[256], store[300],
+       cfg[256], key[256], admin[256], text[1536], id[33], out[16384];
+  unsigned port = unused_port(), waited;
+  int fd, found = 0;
+  pid_t daemon, rnsd;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(store, sizeof(store), "%s/storage/discovery/interfaces", rdir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "discover_interfaces = yes\nrequired_discovery_value = 8\n"
+                 "[interfaces]\n[[Daemon]]\ntype = TCPClientInterface\n"
+                 "enabled = yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+                 port) > 0);
+  config_file(rcfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "discovery_job_interval = 1\n[interfaces]\n[[Public]]\n"
+                 "type = BackboneInterface\nlisten_ip = 127.0.0.1\n"
+                 "port = %u\ndiscoverable = yes\ndiscovery_name = Oracle "
+                 "Listener\ndiscovery_stamp_value = 8\nreachable_on = "
+                 "192.0.2.7\nannounce_interval_seconds = 2\nlatitude = "
+                 "51.5\nlongitude = -0.12\nheight = 11\n",
+                 port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  rnsd = start_rnsd(python, reference, rdir);
+  for (waited = 0; waited < 300 && !found; ++waited) {
+    DIR *d = opendir(store);
+    struct dirent *e;
+    struct timespec t = {0, 100000000};
+    while (d && (e = readdir(d)))
+      found |= e->d_name[0] != '.';
+    if (d)
+      closedir(d);
+    if (!found)
+      nanosleep(&t, NULL);
+  }
+  (void)kill(rnsd, SIGTERM);
+  CHECK(waitpid(rnsd, NULL, 0) == rnsd);
+  stop(daemon, fd);
+  CHECK(found);
+  {
+    char *list[] = {"--config", rdir, "-d", "-D", NULL};
+    int ok;
+    reference_tool(python, reference, "RNS.Utilities.rnstatus", list, out,
+                   sizeof(out));
+    ok = strstr(out, "Oracle Listener") && strstr(out, "BackboneInterface") &&
+         strstr(out, "192.0.2.7") && strstr(out, "reticulum-c 0.2") &&
+         strstr(out, "Enabled");
+    if (!ok)
+      fprintf(stderr, "rnstatus -d -D output:\n%s\n", out);
+    CHECK(ok);
+  }
+  remove_tree(dir);
+  puts("unmodified RNS discovered and listed this daemon's interface");
+}
+/* The reference as the announcing end: its discoverable interface is heard,
+ * validated and listed by this daemon. The reference sends its first discovery
+ * announce one job interval (60 s) after start. */
+static void discovery_listen_reference(const char *exe, const char *reference,
+                                       const char *python) {
+  char dir[] = "/tmp/rnc-disc-rl-XXXXXX", rdir[256], rcfg[256], cfg[256],
+       key[256], admin[256], text[1536], id[33], reply[4096];
+  unsigned port = unused_port();
+  int fd, found;
+  pid_t daemon, rnsd;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[Public]]\ntype = BackboneInterface\n"
+                 "enabled = yes\nlisten_ip = 127.0.0.1\nport = %u\n"
+                 "discoverable = yes\ndiscovery_name = Reference Relay\n"
+                 "discovery_stamp_value = 8\nreachable_on = 192.0.2.9\n"
+                 "latitude = 52.5\nlongitude = 13.4\nheight = 34\n",
+                 port) > 0);
+  config_file(rcfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "discover_interfaces = yes\nrequired_discovery_value = 8\n"
+                 "[interfaces]\n[[Up]]\ntype = TCPClientInterface\n"
+                 "target_host = 127.0.0.1\ntarget_port = %u\nreconnect_wait = "
+                 "1\n",
+                 port) > 0);
+  config_file(cfg, text);
+  rnsd = start_rnsd(python, reference, rdir);
+  daemon = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  found = listed_within(admin, "Reference Relay", 110);
+  admin_command(admin, "DISCOVERED", reply, sizeof(reply));
+  (void)kill(rnsd, SIGTERM);
+  CHECK(waitpid(rnsd, NULL, 0) == rnsd);
+  stop(daemon, fd);
+  if (!found)
+    fprintf(stderr, "daemon never listed the reference's interface:\n%s\n", reply);
+  CHECK(found);
+  CHECK(strstr(reply, "type=BackboneInterface") &&
+        strstr(reply, "reachable_on=192.0.2.9") && strstr(reply, "value="));
+  remove_tree(dir);
+  puts("this daemon discovered an unmodified RNS interface announce");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 5);
   if (!strcmp(argv[2], "cli"))
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+  else if (!strcmp(argv[2], "disc_autoconnect") && argc == 3)
+    discovery_autoconnect(argv[1]);
+  else if (!strcmp(argv[2], "disc_listen") && argc == 3)
+    discovery_listen(argv[1]);
+  else if (!strcmp(argv[2], "disc_announce") && argc == 3)
+    discovery_announce(argv[1]);
   else if (!strcmp(argv[2], "netid") && argc == 3)
     network_identity(argv[1]);
   else if (!strcmp(argv[2], "probe") && argc == 3)
@@ -1502,6 +1990,10 @@ int main(int argc, char **argv) {
     shared(argv[1], NULL, NULL);
   else if (!strcmp(argv[2], "netid_ref") && argc == 5)
     network_identity_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "disc_listen_ref") && argc == 5)
+    discovery_listen_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "disc_ref") && argc == 5)
+    discovery_announce_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "probe_ref") && argc == 5)
     probe_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "source_ref") && argc == 5)

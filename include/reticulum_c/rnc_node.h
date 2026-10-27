@@ -151,6 +151,11 @@ rnc_result rnc_node_prove(rnc_node *node, const uint8_t destination[16],
 rnc_result rnc_node_send_tracked(rnc_node *node, const rnc_packet *packet,
                                  uint64_t timeout_ms, uint64_t unix_seconds,
                                  uint64_t now_ms, uint8_t hash[32]);
+/* Replaces the app data a SINGLE destination announces (up to 316 bytes), for
+ * payloads that change between announces such as interface discovery. */
+rnc_result rnc_node_set_destination_data(rnc_node *node,
+                                         const uint8_t destination[16],
+                                         const void *app_data, size_t size);
 rnc_result rnc_node_announce(rnc_node *node, const uint8_t destination[16],
                              uint64_t unix_seconds, uint64_t now_ms);
 rnc_result rnc_node_request_path(rnc_node *node, const uint8_t destination[16],
