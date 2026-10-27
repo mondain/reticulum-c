@@ -55,6 +55,7 @@ rnc_link_event *rnc_emit(rnc_link *link, rnc_link_event_type type) {
     return event;
 }
 void rnc_emit_packet(rnc_link *link, const rnc_packet *packet) {
+    link->outbound = link->now;
     rnc_emit(link, RNC_LINK_SEND)->packet = *packet;
 }
 rnc_result rnc_link_poll(rnc_link *link, rnc_link_event *event) {
@@ -276,6 +277,11 @@ static void begin(rnc_link *link, int state, int initiator, uint64_t now) {
     link->state = state;
     link->initiator = initiator;
     link->started = link->now = link->activity = link->control = now;
+    link->outbound = now;
+    link->activated = 0;
+    if (!link->est_set)
+        link->est_timeout = 30000u;
+    link->stale = link->teardown = 0;
     link->rtt_ms = 1;
 }
 rnc_result rnc_link_open(rnc_link *link, const rnc_announce *peer, uint64_t now) {
@@ -445,6 +451,7 @@ static rnc_result accept_proof(rnc_link *link, const rnc_packet *packet, uint64_
     link->mdu = mdu_for_mtu(mtu);
     link->remote_set = 1;
     link->state = RNC_LINK_RUNNING;
+    link->activated = now;
     link->rtt_ms = now - link->started ? now - link->started : 1u;
     rnc_emit_packet(link, &reply);
     rnc_emit(link, RNC_LINK_ACTIVE);
@@ -521,6 +528,7 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
                 }
                 /* Canonical keepalives establish liveness, not peer authentication. */
                 link->now = link->activity = now;
+                link->stale = 0;
                 return RNC_OK;
             }
             return RNC_PROTOCOL;
@@ -544,6 +552,7 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
                 if (!link->rtt_ms)
                     link->rtt_ms = 1;
                 link->state = RNC_LINK_RUNNING;
+                link->activated = now;
                 rnc_emit(link, RNC_LINK_ACTIVE);
                 result = RNC_OK;
             }
@@ -571,6 +580,8 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
             if (size != 16 || CRYPTO_memcmp(plain, link->address, 16))
                 result = RNC_AUTH;
             else {
+                link->teardown = link->initiator ? RNC_TEARDOWN_DESTINATION_CLOSED
+                                                 : RNC_TEARDOWN_INITIATOR_CLOSED;
                 rnc_link_end(link, RNC_OK, NULL);
                 result = RNC_OK;
             }
@@ -588,8 +599,10 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
     } else
         result = RNC_PROTOCOL;
     OPENSSL_cleanse(plain, sizeof(plain));
-    if (result == RNC_OK)
+    if (result == RNC_OK) {
         link->now = link->activity = now;
+        link->stale = 0;
+    }
     return result;
 }
 rnc_result rnc_link_identify(rnc_link *link, const rnc_identity *identity, uint64_t now) {
@@ -615,14 +628,22 @@ rnc_result rnc_link_identify(rnc_link *link, const rnc_identity *identity, uint6
     OPENSSL_cleanse(plain, sizeof(plain));
     return result;
 }
+uint64_t rnc_link_keepalive_ms(const rnc_link *link) {
+    uint64_t keepalive;
+    if (!link || link->state != RNC_LINK_RUNNING)
+        return 360000u;
+    keepalive = link->rtt_ms > 360000u ? 360000u : link->rtt_ms * 360000u / 1750u;
+    return keepalive < 5000u ? 5000u : keepalive > 360000u ? 360000u : keepalive;
+}
 rnc_result rnc_link_tick(rnc_link *link, uint64_t now) {
     rnc_result result;
+    uint64_t keepalive;
     if (!link || now < link->now)
         return RNC_INVALID;
     if (link->state == RNC_LINK_IDLE || link->state == RNC_LINK_DEAD)
         return RNC_OK;
-    if ((link->state != RNC_LINK_RUNNING && now - link->started >= 30000u) ||
-        (link->state == RNC_LINK_RUNNING && now - link->activity >= 180000u)) {
+    if (link->state != RNC_LINK_RUNNING && now - link->started >= link->est_timeout) {
+        link->teardown = RNC_TEARDOWN_TIMEOUT;
         rnc_link_end(link, RNC_TIMEOUT, NULL);
         link->now = now;
         return RNC_OK;
@@ -636,18 +657,82 @@ rnc_result rnc_link_tick(rnc_link *link, uint64_t now) {
     result = rnc_channel_tick(link, now);
     if (result != RNC_OK)
         return result;
-    if (link->state == RNC_LINK_RUNNING && link->initiator && now - link->control >= 30000u) {
-        rnc_packet packet = {0};
-        packet.flags = 12;
-        packet.context = 250;
-        packet.data_size = 1;
-        packet.data[0] = 0xff;
-        memcpy(packet.destination, link->address, 16);
-        rnc_emit_packet(link, &packet);
-        link->control = now;
+    if (link->state != RNC_LINK_RUNNING)
+        return RNC_OK;
+    keepalive = rnc_link_keepalive_ms(link);
+    if (link->stale) {
+        if (now - link->stale_since >= link->rtt_ms * 4u + 5000u) {
+            rnc_packet packet;
+            link->now = now;
+            if (rnc_link_seal(link, 252, link->address, 16, &packet) != RNC_OK)
+                packet.data_size = 0;
+            link->teardown = RNC_TEARDOWN_TIMEOUT;
+            rnc_link_end(link, RNC_TIMEOUT, packet.data_size ? &packet : NULL);
+            return RNC_OK;
+        }
+    } else if (now - link->activity >= keepalive || now - link->outbound >= keepalive) {
+        if (link->initiator && now - link->control >= keepalive) {
+            rnc_packet packet = {0};
+            packet.flags = 12;
+            packet.context = 250;
+            packet.data_size = 1;
+            packet.data[0] = 0xff;
+            memcpy(packet.destination, link->address, 16);
+            link->now = now;
+            rnc_emit_packet(link, &packet);
+            link->control = now;
+        }
+        if (now - link->activity >= 2u * keepalive) {
+            link->stale = 1;
+            link->stale_since = now;
+        }
     }
     link->now = now;
     return RNC_OK;
+}
+rnc_link_status rnc_link_status_of(const rnc_link *link) {
+    if (!link)
+        return RNC_LINK_STATUS_CLOSED;
+    switch (link->state) {
+    case RNC_LINK_WAIT_RTT: return RNC_LINK_STATUS_HANDSHAKE;
+    case RNC_LINK_RUNNING: return link->stale ? RNC_LINK_STATUS_STALE : RNC_LINK_STATUS_ACTIVE;
+    case RNC_LINK_DEAD: return RNC_LINK_STATUS_CLOSED;
+    default: return RNC_LINK_STATUS_PENDING;
+    }
+}
+rnc_link_teardown rnc_link_teardown_reason(const rnc_link *link) {
+    return link ? (rnc_link_teardown)link->teardown : RNC_TEARDOWN_NONE;
+}
+rnc_result rnc_link_configure_establishment(rnc_link *link, unsigned hops,
+                                            uint64_t first_hop_timeout_ms) {
+    if (!link || link->state != RNC_LINK_IDLE || hops > 128u ||
+        first_hop_timeout_ms > 600000u)
+        return RNC_INVALID;
+    link->est_timeout = first_hop_timeout_ms + 6000u * (hops ? hops : 1u);
+    link->est_set = 1;
+    return RNC_OK;
+}
+rnc_result rnc_link_rtt(const rnc_link *link, uint64_t *rtt_ms) {
+    if (!link || !rtt_ms)
+        return RNC_INVALID;
+    if (link->state != RNC_LINK_RUNNING)
+        return RNC_STATE;
+    *rtt_ms = link->rtt_ms;
+    return RNC_OK;
+}
+rnc_result rnc_link_age_ms(const rnc_link *link, uint64_t now, uint64_t *age) {
+    if (!link || !age)
+        return RNC_INVALID;
+    if (link->state != RNC_LINK_RUNNING || now < link->activated)
+        return RNC_STATE;
+    *age = now - link->activated;
+    return RNC_OK;
+}
+uint64_t rnc_link_no_inbound_ms(const rnc_link *link, uint64_t now) {
+    return link && now >= link->activity ? now - link->activity : 0;
+}
+uint64_t rnc_link_no_outbound_ms(const rnc_link *link, uint64_t now) {
+    return link && now >= link->outbound ? now - link->outbound : 0;
 }
 rnc_result rnc_link_close(rnc_link *link, uint64_t now) {
     rnc_packet packet;
@@ -656,6 +741,8 @@ rnc_result rnc_link_close(rnc_link *link, uint64_t now) {
         return RNC_INVALID;
     if (link->state == RNC_LINK_DEAD)
         return RNC_OK;
+    link->teardown = link->initiator ? RNC_TEARDOWN_INITIATOR_CLOSED
+                                     : RNC_TEARDOWN_DESTINATION_CLOSED;
     if (link->state == RNC_LINK_RUNNING || link->state == RNC_LINK_WAIT_RTT) {
         result = rnc_link_seal(link, 252, link->address, 16, &packet);
         if (result != RNC_OK)

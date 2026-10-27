@@ -95,11 +95,11 @@ Largest gaps, in priority order:
 | Status | Feature | Notes |
 | --- | --- | --- |
 | IMPL | Request/proof, LRRTT, LINKIDENTIFY, LINKCLOSE, keepalive, MTU, remote identity, request/response (contexts 9/10), teardown | `src/link.c` |
-| PART | Keepalive and timeouts | Fixed 30s keepalive, 180s timeout, 30s establishment; no RTT-scaled interval, STALE state, or first-hop-derived timeout |
-| PART | Teardown reason | Only an `rnc_result`; no initiator/destination/timeout enum |
-| PART | RTT | Stored internally, no public accessor in `rnc_link.h` |
+| IMPL | Keepalive and timeouts | RTT-scaled keepalive (5..360 s), STALE after 2x keepalive, teardown after RTT*4+5 s, configurable establishment timeout (first hop + 6 s per hop); previously fixed 30 s / 180 s. The default establishment timeout without configuration remains 30 s |
+| IMPL | Teardown reason | `rnc_link_teardown_reason`: timeout, initiator closed, destination closed |
+| IMPL | RTT | `rnc_link_rtt` |
 | PART | ResourceStrategy | Explicit `rnc_resource_accept` only, no strategy enum |
-| MISS | `get_age`, `inactive_for`, `no_*_for`, establishment/expected rate, `track_phy_stats`, rssi/snr/q, `get_mode` | |
+| PART | `get_age`, `no_inbound_for`, `no_outbound_for` | Implemented. Missing: `inactive_for` (data-only idle), establishment/expected rate, `track_phy_stats`, rssi/snr/q, `get_mode` |
 | MISS | RequestReceipt progress | |
 
 ### Resource

@@ -218,6 +218,7 @@ rnc_result rnc_channel_tick(rnc_link *link, uint64_t now) {
         if (!message->used || now < message->deadline)
             continue;
         if (message->attempts == RNC_LINK_ATTEMPTS) {
+            link->teardown = RNC_TEARDOWN_TIMEOUT;
             rnc_link_end(link, RNC_TIMEOUT, NULL);
             return RNC_OK;
         }
