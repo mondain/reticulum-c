@@ -235,6 +235,29 @@ static void default_timeout(void) {
         e.receipt_status == RNC_RECEIPT_FAILED);
   release(&p);
 }
+/* use_implicit_proof = No: the destination answers with the 96 byte explicit
+ * proof (hash plus signature), and the sender still accepts it. */
+static void explicit_proof(void) {
+  pair p = setup();
+  rnc_packet d = data_to(&p, "explicit");
+  rnc_node_event e, proof;
+  uint8_t hash[32];
+  CHECK(rnc_node_implicit_proofs(p.b) == 1);
+  CHECK(rnc_node_set_implicit_proofs(p.b, 0) == RNC_OK &&
+        rnc_node_implicit_proofs(p.b) == 0);
+  CHECK(rnc_node_set_proof_strategy(p.b, p.dest, RNC_PROVE_ALL) == RNC_OK);
+  CHECK(rnc_node_send_tracked(p.a, &d, 5000, 1000, 100, hash) == RNC_OK);
+  CHECK(next(p.a, RNC_NODE_SEND, &e));
+  CHECK(rnc_node_input(p.b, 1, &e.packet, 1000, 130) == RNC_OK);
+  CHECK(next(p.b, RNC_NODE_SEND, &proof));
+  CHECK((proof.packet.flags & 3u) == RNC_PROOF && proof.packet.data_size == 96u);
+  CHECK(!memcmp(proof.packet.data, hash, 32));
+  CHECK(rnc_node_input(p.a, 1, &proof.packet, 1000, 160) == RNC_OK);
+  CHECK(next(p.a, RNC_NODE_RECEIPT, &e) &&
+        e.receipt_status == RNC_RECEIPT_DELIVERED);
+  CHECK(rnc_node_set_implicit_proofs(p.b, 2) == RNC_INVALID);
+  release(&p);
+}
 int main(int argc, char **argv) {
   if (argc != 2)
     return 2;
@@ -246,6 +269,8 @@ int main(int argc, char **argv) {
     prove_app();
   else if (!strcmp(argv[1], "forged"))
     forged();
+  else if (!strcmp(argv[1], "explicit_proof"))
+    explicit_proof();
   else if (!strcmp(argv[1], "status"))
     status();
   else if (!strcmp(argv[1], "recycle"))

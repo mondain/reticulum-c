@@ -890,6 +890,99 @@ static void connect_late_clock_test(void) {
   rnc_node_free(node);
   puts("host late clock connect test passed");
 }
+/* outgoing = No: the interface still receives, but nothing is sent on it,
+ * including on the connections a listener accepts. */
+static void no_output_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  uint64_t now = 100;
+  uint16_t port = 0;
+  int listener, accepted, client;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_packet plain = {0};
+  uint8_t bytes[64];
+  ssize_t got = -1;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  /* client interface */
+  host = rnc_host_new(node);
+  listener = tcp_listener(AF_INET, &port);
+  CHECK(host && listener >= 0);
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  cfg.address = "127.0.0.1";
+  cfg.port = port;
+  cfg.no_output = 1;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 50);
+  CHECK(accepted >= 0);
+  CHECK(rnc_node_send(node, &plain, 1700000000, now) == RNC_OK);
+  for (i = 0; i < 50; ++i) {
+    CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+    got = recv(accepted, bytes, sizeof(bytes), MSG_DONTWAIT);
+    CHECK(got <= 0 && (got == 0 || errno == EAGAIN || errno == EWOULDBLOCK));
+  }
+  close(accepted);
+  close(listener);
+  rnc_host_free(host);
+  /* the same interface with output enabled does send */
+  host = rnc_host_new(node);
+  listener = tcp_listener(AF_INET, &port);
+  CHECK(host && listener >= 0);
+  cfg.port = port;
+  cfg.no_output = 0;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 50);
+  CHECK(accepted >= 0);
+  CHECK(rnc_node_send(node, &plain, 1700000000, now) == RNC_OK);
+  got = -1;
+  for (i = 0; i < 50 && got <= 0; ++i) {
+    CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+    got = recv(accepted, bytes, sizeof(bytes), MSG_DONTWAIT);
+  }
+  CHECK(got > 0);
+  close(accepted);
+  close(listener);
+  rnc_host_free(host);
+  /* accepted connections of a listener inherit it */
+  host = rnc_host_new(node);
+  CHECK(host);
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.address = "127.0.0.1";
+  cfg.no_output = 1;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  {
+    rnc_host_status status;
+    struct sockaddr_in addr;
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && status.bound_port);
+    client = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(client >= 0);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(status.bound_port);
+    CHECK(connect(client, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+  }
+  for (i = 0; i < 20; ++i)
+    CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+  CHECK(rnc_node_send(node, &plain, 1700000000, now) == RNC_OK);
+  for (i = 0; i < 50; ++i) {
+    CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+    got = recv(client, bytes, sizeof(bytes), MSG_DONTWAIT);
+    CHECK(got <= 0 && (got == 0 || errno == EAGAIN || errno == EWOULDBLOCK));
+  }
+  close(client);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host no output test passed");
+}
 static void tcp_options_test(void) {
   uint8_t key[64] = {0};
   unsigned rng = 0, i;
@@ -1287,6 +1380,8 @@ int main(int argc, char **argv) {
     fast_flap_test();
   else if (!strcmp(argv[1], "connect_late_clock"))
     connect_late_clock_test();
+  else if (!strcmp(argv[1], "no_output"))
+    no_output_test();
   else if (!strcmp(argv[1], "tcp_options"))
     tcp_options_test();
   else if (!strcmp(argv[1], "serial_params"))
