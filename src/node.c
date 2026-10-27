@@ -14,6 +14,8 @@ typedef struct node_interface {
   uint32_t id, bitrate;
   size_t mtu;
   int local;
+  rnc_interface_mode mode;
+  uint32_t cap;
   uint64_t announce_after;
 } node_interface;
 typedef struct node_route {
@@ -314,6 +316,8 @@ rnc_result rnc_node_add_interface(rnc_node *n, uint32_t id, uint32_t bitrate) {
       n->interfaces[i].id = id;
       n->interfaces[i].bitrate = bitrate;
       n->interfaces[i].mtu = RNC_MTU;
+      n->interfaces[i].mode = RNC_MODE_FULL;
+      n->interfaces[i].cap = 0;
       return RNC_OK;
     }
   return RNC_NO_SPACE;
@@ -347,6 +351,19 @@ rnc_result rnc_node_local_interface(rnc_node *n, uint32_t id, int local) {
     if (n->links[i].used && (n->links[i].in == id || n->links[i].out == id))
       return RNC_STATE;
   iface->local = !!local;
+  return RNC_OK;
+}
+rnc_result rnc_node_interface_policy(rnc_node *n, uint32_t id,
+                                     const rnc_interface_policy *policy) {
+  node_interface *i;
+  if (!n || !policy || policy->mode > RNC_MODE_BOUNDARY ||
+      policy->announce_cap_permille > 1000u)
+    return RNC_INVALID;
+  i = interface(n, id);
+  if (!i)
+    return RNC_STATE;
+  i->mode = policy->mode;
+  i->cap = policy->announce_cap_permille;
   return RNC_OK;
 }
 rnc_result rnc_node_remove_interface(rnc_node *n, uint32_t id) {
@@ -558,9 +575,31 @@ static void relay_announce(rnc_node *n, rnc_packet *p) {
   p->flags = (uint8_t)((p->flags & 0x2fu) | 0x50u);
   memcpy(p->transport_id, n->id, 16);
 }
+static int mode_allows(rnc_interface_mode from, rnc_interface_mode to) {
+  if (to == RNC_MODE_ACCESS_POINT)
+    return 0;
+  if (to == RNC_MODE_ROAMING)
+    return from != RNC_MODE_ROAMING && from != RNC_MODE_BOUNDARY;
+  if (to == RNC_MODE_BOUNDARY)
+    return from != RNC_MODE_ROAMING;
+  return 1;
+}
+static uint64_t path_lifetime(const rnc_node *n, uint32_t iface) {
+  const node_interface *i = NULL;
+  size_t k;
+  for (k = 0; k < RNC_NODE_INTERFACES; k++)
+    if (n->interfaces[k].id == iface)
+      i = &n->interfaces[k];
+  if (i && i->mode == RNC_MODE_ACCESS_POINT)
+    return UINT64_C(86400000);
+  if (i && i->mode == RNC_MODE_ROAMING)
+    return UINT64_C(21600000);
+  return PATH_LIFETIME;
+}
 static int relay_target(rnc_node *n, uint32_t ingress, uint32_t target) {
-  return n->transport || interface(n, ingress)->local ||
-         interface(n, target)->local;
+  return (n->transport || interface(n, ingress)->local ||
+          interface(n, target)->local) &&
+         mode_allows(interface(n, ingress)->mode, interface(n, target)->mode);
 }
 static size_t relay_count(rnc_node *n, uint32_t ingress) {
   size_t i, c = 0;
@@ -625,7 +664,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
     fresh.route.interface_id = ingress;
     fresh.route.hops = p->hops;
     fresh.route.announced_at = stamp;
-    fresh.route.expires_ms = after(now, PATH_LIFETIME);
+    fresh.route.expires_ms = after(now, path_lifetime(n, ingress));
     memcpy(fresh.route.destination, p->destination, 16);
     memcpy(fresh.route.next_hop,
            (p->flags & 0x40) ? p->transport_id : p->destination, 16);
@@ -1149,8 +1188,9 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
         RNC_OK)
       return RNC_PROTOCOL;
     /* Default 2 percent announce bandwidth, rounded up in milliseconds. */
-    wait = ((uint64_t)wire * UINT64_C(400000) + iface->bitrate - 1u) /
-           iface->bitrate;
+    wait = ((uint64_t)wire * UINT64_C(8000000) +
+            (uint64_t)iface->bitrate * (iface->cap ? iface->cap : 20u) - 1u) /
+           ((uint64_t)iface->bitrate * (iface->cap ? iface->cap : 20u));
     emit(n, RNC_NODE_SEND, iface->id, &n->queued[best].packet);
     n->queued[best].used = 0;
     iface->announce_after = after(now, wait);

@@ -63,6 +63,8 @@ typedef struct rnc_host_config {
   uint32_t frequency, bandwidth; /* RNODE required Hz */
   unsigned spreading_factor, coding_rate;
   int tx_power, flow_control;
+  rnc_interface_mode mode;        /* default FULL; inherited by child ifaces */
+  uint32_t announce_cap_permille; /* 0 = 20 (2%) */
 } rnc_host_config;
 typedef struct rnc_host_status {
   uint32_t interface_id, parent_id;
@@ -82,6 +84,8 @@ typedef struct rnc_host_status {
   uint64_t ifac_violations, protocol_violations;
   size_t ifac_size;
   uint8_t ifac_signature[64];
+  rnc_interface_mode mode;
+  uint32_t announce_cap_permille;
 } rnc_host_status;
 typedef struct rnc_host rnc_host;
 typedef enum rnc_host_event_type {

@@ -434,6 +434,35 @@ static void keys(void) {
   rnc_identity_clear(&second);
   puts("host identity tests passed");
 }
+static void policy_test(void) {
+  uint8_t private_key[64] = {0};
+  unsigned rng = 0;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK);
+  node = rnc_node_new(&id, 1, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_UDP;
+  cfg.address = "127.0.0.1";
+  cfg.mode = RNC_MODE_ROAMING;
+  cfg.announce_cap_permille = 50;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+  CHECK(status.mode == RNC_MODE_ROAMING && status.announce_cap_permille == 50);
+  cfg.mode = (rnc_interface_mode)77;
+  CHECK(rnc_host_add(host, 2, &cfg) == RNC_INVALID);
+  cfg.mode = RNC_MODE_FULL;
+  cfg.announce_cap_permille = 2000;
+  CHECK(rnc_host_add(host, 3, &cfg) == RNC_INVALID);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host interface policy tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -450,6 +479,8 @@ int main(int argc, char **argv) {
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))
     udp_test();
+  else if (!strcmp(argv[1], "policy"))
+    policy_test();
   else
     CHECK(0);
   return 0;

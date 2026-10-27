@@ -73,6 +73,25 @@ rnc_result rnc_node_interface_mtu(rnc_node *node, uint32_t interface_id,
  */
 rnc_result rnc_node_local_interface(rnc_node *node, uint32_t interface_id,
                                     int local);
+/* Interface modes follow the Reticulum manual (8.16): ACCESS_POINT does not
+ * receive rebroadcast announces and keeps paths one day; ROAMING keeps paths
+ * six hours and does not carry announces from ROAMING or BOUNDARY segments;
+ * BOUNDARY does not carry announces from ROAMING. FULL (default) and GATEWAY
+ * propagate identically. announce_cap_permille is the share of the interface
+ * bitrate announces may use in thousandths (0 selects the 20 = 2% default). */
+typedef enum rnc_interface_mode {
+  RNC_MODE_FULL = 0,
+  RNC_MODE_GATEWAY,
+  RNC_MODE_ACCESS_POINT,
+  RNC_MODE_ROAMING,
+  RNC_MODE_BOUNDARY
+} rnc_interface_mode;
+typedef struct rnc_interface_policy {
+  rnc_interface_mode mode;
+  uint32_t announce_cap_permille;
+} rnc_interface_policy;
+rnc_result rnc_node_interface_policy(rnc_node *node, uint32_t interface_id,
+                                     const rnc_interface_policy *policy);
 rnc_result rnc_node_remove_interface(rnc_node *node, uint32_t interface_id);
 /* Copies private material solely for announce generation; clear/free removes
  * it. Keep name <=127 bytes and app data <=316. Outputs commit only on success.

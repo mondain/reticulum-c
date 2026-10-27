@@ -322,6 +322,15 @@ static rnc_result activate(rnc_host *h, host_interface *f) {
     (void)rnc_node_remove_interface(h->node, f->status.interface_id);
     return r;
   }
+  {
+    rnc_interface_policy policy = {f->status.mode,
+                                   f->status.announce_cap_permille};
+    r = rnc_node_interface_policy(h->node, f->status.interface_id, &policy);
+    if (r != RNC_OK) {
+      (void)rnc_node_remove_interface(h->node, f->status.interface_id);
+      return r;
+    }
+  }
   if (f->status.local) {
     r = rnc_node_local_interface(h->node, f->status.interface_id, 1);
     if (r != RNC_OK) {
@@ -686,6 +695,8 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     return RNC_INVALID;
   if (c->ifac && (!c->ifac->size || c->ifac->size > RNC_IFAC_MAX_SIZE))
     return RNC_INVALID;
+  if (c->mode > RNC_MODE_BOUNDARY || c->announce_cap_permille > 1000u)
+    return RNC_INVALID;
   f = empty_interface(h);
   if (!f)
     return RNC_NO_SPACE;
@@ -696,6 +707,8 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->status.kind = c->kind;
   f->status.radio_ready = c->kind != RNC_HOST_RNODE;
   f->status.mtu = c->mtu ? c->mtu : c->kind == RNC_HOST_AUTO ? 1196 : RNC_MTU;
+  f->status.mode = c->mode;
+  f->status.announce_cap_permille = c->announce_cap_permille;
   if (!copy_text(f->address, sizeof(f->address), c->address) ||
       !copy_text(f->target, sizeof(f->target), c->target) ||
       !copy_text(f->device, sizeof(f->device), c->device) ||
@@ -989,6 +1002,8 @@ static void accept_tcp(rnc_host *h, host_interface *parent) {
   f->status.interface_id = h->next_id++;
   f->status.parent_id = parent->status.interface_id;
   f->status.mtu = parent->status.mtu;
+  f->status.mode = parent->status.mode;
+  f->status.announce_cap_permille = parent->status.announce_cap_permille;
   f->bitrate = parent->bitrate;
   f->status.bitrate = parent->status.bitrate;
   f->status.local = parent->status.local;
@@ -1055,6 +1070,8 @@ static void discovery_input(rnc_host *h, host_interface *parent, int fd,
     f->status.interface_id = h->next_id++;
     f->status.parent_id = parent->status.interface_id;
     f->status.mtu = parent->status.mtu;
+    f->status.mode = parent->status.mode;
+    f->status.announce_cap_permille = parent->status.announce_cap_permille;
     f->peer_size = sizeof(source);
     source.sin6_port = htons(parent->data_port);
     memcpy(&f->peer, &source, sizeof(source));

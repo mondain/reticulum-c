@@ -151,6 +151,34 @@ static int interface_key(interface_config *f, const char *key,
     f->host.flow_control = b;
     return 1;
   }
+  if (!strcmp(key, "mode") || !strcmp(key, "interface_mode")) {
+    static const struct {
+      const char *name;
+      rnc_interface_mode mode;
+    } modes[] = {{"full", RNC_MODE_FULL},
+                 {"gateway", RNC_MODE_GATEWAY},
+                 {"gw", RNC_MODE_GATEWAY},
+                 {"access_point", RNC_MODE_ACCESS_POINT},
+                 {"accesspoint", RNC_MODE_ACCESS_POINT},
+                 {"ap", RNC_MODE_ACCESS_POINT},
+                 {"roaming", RNC_MODE_ROAMING},
+                 {"boundary", RNC_MODE_BOUNDARY}};
+    size_t k;
+    for (k = 0; k < sizeof(modes) / sizeof(*modes); k++)
+      if (!strcasecmp(value, modes[k].name)) {
+        f->host.mode = modes[k].mode;
+        return 1;
+      }
+    return 0;
+  }
+  if (!strcmp(key, "announce_cap")) {
+    char *end;
+    double percent = strtod(value, &end);
+    if (end == value || *end || !(percent > 0.0) || percent > 100.0)
+      return 0;
+    f->host.announce_cap_permille = (uint32_t)(percent * 10.0 + 0.5);
+    return f->host.announce_cap_permille != 0;
+  }
   if (!number(value, UINT32_MAX, &n))
     return 0;
   if (!strcmp(key, "listen_port") || !strcmp(key, "target_port")) {
