@@ -27,7 +27,7 @@ typedef struct service_queued {
 struct rnc_service {
     rnc_link *link;
     rnc_resource *tx, *rx;
-    size_t max_value;
+    size_t max_value, max_request;
     uint64_t now;
     service_handler handlers[RNC_SERVICE_HANDLERS];
     service_pending pending[RNC_SERVICE_PENDING], incoming[RNC_SERVICE_PENDING];
@@ -157,6 +157,7 @@ rnc_service *rnc_service_new(rnc_link *link, size_t max_value, rnc_random_fn ran
         return NULL;
     s->link = link;
     s->max_value = max_value;
+    s->max_request = RNC_SERVICE_NO_LIMIT;
     s->tx = rnc_resource_new(link, max_value + 64u, random, ctx);
     s->rx = rnc_resource_new(link, max_value + 64u, random, ctx);
     if (!s->tx || !s->rx) {
@@ -332,6 +333,8 @@ static rnc_result accept_request(rnc_service *s, const uint8_t id[16], const uin
     service_handler *h = NULL;
     rnc_service_event e = {0};
     rnc_result result;
+    if (n > s->max_request)
+        return RNC_OK; /* over the destination's request size limit */
     if (!array(&m, 3) || !timestamp(&m, &e.requested_at) || !rmp_bin(&m, &path, &path_size) ||
         path_size != 16)
         return RNC_PROTOCOL;
@@ -431,6 +434,8 @@ rnc_result rnc_service_input(rnc_service *s, const rnc_link_event *e, uint64_t n
             return result;
         if (!q)
             return RNC_AGAIN;
+        if (!response && total > s->max_request)
+            return RNC_OK; /* a request too big for the destination */
         if (response) {
             int index = slot(s->pending, id);
             if (index < 0)
@@ -488,6 +493,12 @@ rnc_result rnc_service_request_state(const rnc_service *s, const uint8_t id[16],
             return RNC_OK;
         }
     return RNC_STATE;
+}
+rnc_result rnc_service_set_max_request_size(rnc_service *s, size_t max_size) {
+    if (!s)
+        return RNC_INVALID;
+    s->max_request = max_size;
+    return RNC_OK;
 }
 rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
     rnc_resource_event re;

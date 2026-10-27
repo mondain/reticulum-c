@@ -54,8 +54,17 @@ rnc_link_event *rnc_emit(rnc_link *link, rnc_link_event_type type) {
     ++link->count;
     return event;
 }
+/* Application data, as opposed to establishment, keepalive and close traffic. */
+static int is_data_packet(const rnc_packet *packet) {
+    return (packet->flags & 3u) == RNC_DATA &&
+           packet->context != 250 && packet->context != 251 &&
+           packet->context != 252 && packet->context != 254 &&
+           packet->context != 255;
+}
 void rnc_emit_packet(rnc_link *link, const rnc_packet *packet) {
     link->outbound = link->now;
+    if (is_data_packet(packet))
+        link->data_at = link->now;
     rnc_emit(link, RNC_LINK_SEND)->packet = *packet;
 }
 rnc_result rnc_link_poll(rnc_link *link, rnc_link_event *event) {
@@ -152,8 +161,8 @@ rnc_result rnc_link_send_packet_hashed(rnc_link *link, uint8_t context, const vo
     if (result == RNC_OK && hash)
         result = rnc_packet_hash(&packet, digest);
     if (result == RNC_OK) {
-        rnc_emit_packet(link, &packet);
         link->now = now;
+        rnc_emit_packet(link, &packet);
         if (hash)
             memcpy(hash, digest, 32);
     }
@@ -180,8 +189,8 @@ rnc_result rnc_link_send_resource_packet(rnc_link *link, uint8_t packet_type, ui
     memcpy(packet.destination, link->address, 16);
     packet.data_size = size;
     memcpy(packet.data, data, size);
-    rnc_emit_packet(link, &packet);
     link->now = now;
+    rnc_emit_packet(link, &packet);
     return RNC_OK;
 }
 static int token_mac(const uint8_t key[32], const uint8_t *data, size_t size, uint8_t tag[32]) {
@@ -298,6 +307,7 @@ rnc_result rnc_link_open(rnc_link *link, const rnc_announce *peer, uint64_t now)
         goto done;
     packet.flags = 2;
     packet.data_size = 67;
+    link->est_cost = 19u + packet.data_size;
     memcpy(packet.destination, peer->destination, 16);
     memcpy(packet.data, ephemeral.public_key, 64);
     signalling(packet.data + 64, link->local_mtu);
@@ -373,6 +383,7 @@ rnc_result rnc_link_accept(rnc_link *link, const rnc_identity *local, const uint
     link->mtu = mtu;
     link->mdu = mdu_for_mtu(mtu);
     begin(link, RNC_LINK_WAIT_RTT, 0, now);
+    link->est_cost += 19u + request->data_size + 19u + proof.data_size;
     rnc_emit_packet(link, &proof);
 done:
     OPENSSL_cleanse(private_key, sizeof(private_key));
@@ -451,7 +462,8 @@ static rnc_result accept_proof(rnc_link *link, const rnc_packet *packet, uint64_
     link->mdu = mdu_for_mtu(mtu);
     link->remote_set = 1;
     link->state = RNC_LINK_RUNNING;
-    link->activated = now;
+    link->activated = link->data_at = now;
+    link->est_cost += 19u + packet->data_size;
     link->rtt_ms = now - link->started ? now - link->started : 1u;
     rnc_emit_packet(link, &reply);
     rnc_emit(link, RNC_LINK_ACTIVE);
@@ -564,7 +576,7 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
                 if (!link->rtt_ms)
                     link->rtt_ms = 1;
                 link->state = RNC_LINK_RUNNING;
-                link->activated = now;
+                link->activated = link->data_at = now;
                 rnc_emit(link, RNC_LINK_ACTIVE);
                 {
                     char label[33];
@@ -620,6 +632,8 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
     if (result == RNC_OK) {
         link->now = link->activity = now;
         link->stale = 0;
+        if (is_data_packet(packet))
+            link->data_at = now;
     }
     return result;
 }
@@ -752,6 +766,21 @@ rnc_result rnc_link_age_ms(const rnc_link *link, uint64_t now, uint64_t *age) {
 }
 uint64_t rnc_link_no_inbound_ms(const rnc_link *link, uint64_t now) {
     return link && now >= link->activity ? now - link->activity : 0;
+}
+uint64_t rnc_link_no_data_ms(const rnc_link *link, uint64_t now) {
+    return link && now >= link->data_at ? now - link->data_at : 0;
+}
+unsigned rnc_link_mode(const rnc_link *link) {
+    (void)link;
+    return 1u; /* AES-256-CBC, the only mode supported */
+}
+rnc_result rnc_link_establishment_rate(const rnc_link *link, uint64_t *bits_per_second) {
+    if (!link || !bits_per_second)
+        return RNC_INVALID;
+    if (link->state != RNC_LINK_RUNNING || !link->est_cost || !link->rtt_ms)
+        return RNC_STATE;
+    *bits_per_second = (uint64_t)link->est_cost * 8u * 1000u / link->rtt_ms;
+    return RNC_OK;
 }
 uint64_t rnc_link_no_outbound_ms(const rnc_link *link, uint64_t now) {
     return link && now >= link->outbound ? now - link->outbound : 0;

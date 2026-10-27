@@ -331,10 +331,27 @@ static void getters_test(void) {
     CHECK(rnc_link_age_ms(p.client, 1102, &value) == RNC_OK && value == 1000);
     CHECK(rnc_link_no_inbound_ms(p.client, 2102) == 2000u);
     CHECK(rnc_link_no_outbound_ms(p.client, 2102) >= 1999u);
+    /* mode: AES-256-CBC, 1 in the reference's numbering */
+    CHECK(rnc_link_mode(p.client) == 1u && rnc_link_mode(p.server) == 1u);
+    /* establishment rate: request (86 bytes) and proof (118) over the RTT */
+    CHECK(rnc_link_establishment_rate(p.client, &value) == RNC_OK &&
+          value == 204u * 8u * 1000u / 2u);
+    CHECK(rnc_link_establishment_rate(p.server, &value) == RNC_OK && value > 0);
+    /* data idle time counts application data, in both directions */
+    CHECK(rnc_link_no_data_ms(p.client, 502) == 400u);
+    CHECK(rnc_link_send_packet(p.client, 0, "x", 1, 600) == RNC_OK);
+    {
+        rnc_packet data = outgoing(p.client);
+        CHECK(rnc_link_no_data_ms(p.client, 700) == 100u);
+        CHECK(rnc_link_no_data_ms(p.server, 650) == 547u); /* since activation at 103 */
+        CHECK(rnc_link_input(p.server, &data, 650) == RNC_OK);
+        CHECK(rnc_link_no_data_ms(p.server, 700) == 50u);
+    }
     finish(&p);
     init(&p);
     CHECK(rnc_link_rtt(p.client, &value) == RNC_STATE);
     CHECK(rnc_link_age_ms(p.client, 10, &value) == RNC_STATE);
+    CHECK(rnc_link_establishment_rate(p.client, &value) == RNC_STATE);
     finish(&p);
 }
 int main(int argc, char **argv) {

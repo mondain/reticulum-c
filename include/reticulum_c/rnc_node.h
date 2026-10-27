@@ -192,6 +192,27 @@ rnc_result rnc_node_announce(rnc_node *node, const uint8_t destination[16],
                              uint64_t unix_seconds, uint64_t now_ms);
 rnc_result rnc_node_request_path(rnc_node *node, const uint8_t destination[16],
                                  uint64_t now_ms);
+/* Transport.request_path with its options. interface_id 0 sends on every
+ * interface, otherwise only on that one (RNC_STATE if unknown). tag NULL draws
+ * a random 16 byte tag, else tag_size is 1 to 16. With recursive and an
+ * interface (the form a transport uses to pass requests on) nothing is sent,
+ * and RNC_AGAIN returned, while announces are queued for that interface or its
+ * announce bandwidth allowance has not yet recovered. */
+rnc_result rnc_node_request_path_ex(rnc_node *node, const uint8_t destination[16],
+                                    uint32_t interface_id, const uint8_t *tag,
+                                    size_t tag_size, int recursive,
+                                    uint64_t now_ms);
+/* Transport.hops_to: hops to a destination with a known path, else
+ * RNC_PATHFINDER_MAX_HOPS. */
+#define RNC_PATHFINDER_MAX_HOPS 128u
+unsigned rnc_node_hops_to(rnc_node *node, const uint8_t destination[16],
+                          uint64_t now_ms);
+/* Destination.accepts_links (default on): link requests addressed to a
+ * destination that does not accept them are dropped before the application
+ * sees them. rnc_node_accepts_links returns 0 for an unknown destination. */
+rnc_result rnc_node_set_accepts_links(rnc_node *node, const uint8_t destination[16],
+                                      int accepts);
+int rnc_node_accepts_links(rnc_node *node, const uint8_t destination[16]);
 rnc_result rnc_node_input(rnc_node *node, uint32_t interface_id,
                           const rnc_packet *packet, uint64_t unix_seconds,
                           uint64_t now_ms);

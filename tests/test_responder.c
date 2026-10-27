@@ -30,7 +30,7 @@ typedef struct net {
   uint8_t destination[16];
   uint64_t now;
   unsigned calls, with_identity, responses, timeouts, denied;
-  uint8_t identity_seen[16], last[64];
+  uint8_t identity_seen[16], last[4200];
   size_t last_size;
 } net;
 /* Echoes the request; "/quiet" produces no response. */
@@ -57,7 +57,7 @@ static void pump(net *n, unsigned steps) {
     rnc_link_event le;
     rnc_node_event e;
     rnc_service_event se;
-    uint8_t value[64];
+    uint8_t value[4200];
     size_t got;
     n->now += 10;
     CHECK(rnc_node_tick(n->client, UNIX, n->now) == RNC_OK);
@@ -232,6 +232,49 @@ static void arguments(void) {
   CHECK(rnc_responder_new(NULL, 0, rng, NULL) == NULL);
   teardown(&n);
 }
+/* Destination.set_max_request_size: requests above it, inline or as a
+ * Resource, are dropped before any handler runs. */
+static void max_request_size(void) {
+  net n;
+  uint8_t small[20], medium[99], large[3003], unknown[16] = {9};
+  size_t i;
+  small[0] = 0xc4;
+  small[1] = 18;
+  medium[0] = 0xc4;
+  medium[1] = 97;
+  large[0] = 0xc5;
+  large[1] = 0x0b;
+  large[2] = 0xb8;
+  for (i = 2; i < sizeof(small); i++)
+    small[i] = (uint8_t)i;
+  for (i = 2; i < sizeof(medium); i++)
+    medium[i] = (uint8_t)i;
+  for (i = 3; i < sizeof(large); i++)
+    large[i] = (uint8_t)(i * 3u);
+  setup(&n);
+  CHECK(rnc_responder_set_max_request_size(n.responder, n.destination, 60) ==
+        RNC_OK);
+  ask(&n, "/echo", small, sizeof(small), 3000);
+  pump(&n, 100);
+  CHECK(n.calls == 1 && n.responses == 1);
+  ask(&n, "/echo", medium, sizeof(medium), 500);
+  pump(&n, 150);
+  CHECK(n.calls == 1 && n.responses == 1 && n.timeouts == 1);
+  ask(&n, "/echo", large, sizeof(large), 1500);
+  pump(&n, 400);
+  CHECK(n.calls == 1 && n.responses == 1 && n.timeouts == 2);
+  CHECK(rnc_responder_set_max_request_size(n.responder, unknown, 10) == RNC_STATE);
+  teardown(&n);
+  /* the default and an explicit NO_LIMIT take any size */
+  setup(&n);
+  CHECK(rnc_responder_set_max_request_size(n.responder, n.destination,
+                                           RNC_SERVICE_NO_LIMIT) == RNC_OK);
+  ask(&n, "/echo", medium, sizeof(medium), 3000);
+  pump(&n, 100);
+  CHECK(n.calls == 1 && n.responses == 1);
+  CHECK(rnc_responder_set_max_request_size(NULL, n.destination, 10) == RNC_INVALID);
+  teardown(&n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "echo"))
@@ -244,6 +287,8 @@ int main(int argc, char **argv) {
     close_frees_slot();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
+  else if (!strcmp(argv[1], "max_request"))
+    max_request_size();
   else
     CHECK(0);
   puts("responder test passed");

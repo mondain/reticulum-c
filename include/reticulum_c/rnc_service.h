@@ -64,6 +64,12 @@ typedef enum rnc_request_state {
 rnc_result rnc_service_request_state(const rnc_service *service,
                                      const uint8_t request_id[16],
                                      rnc_request_state *state, double *progress);
+/* Destination.set_max_request_size: incoming requests larger than this many
+ * bytes (the packed request, or the Resource advertising it) are dropped
+ * before any handler sees them. RNC_SERVICE_NO_LIMIT (the default) accepts any
+ * size up to the service's max_value. */
+#define RNC_SERVICE_NO_LIMIT ((size_t)-1)
+rnc_result rnc_service_set_max_request_size(rnc_service *service, size_t max_size);
 /* Only responds once to an admitted, unexpired request. */
 rnc_result rnc_service_respond(rnc_service *service, const uint8_t request_id[16],
                                const void *encoded_value, size_t value_size, uint64_t now_ms);
