@@ -211,6 +211,18 @@ static int interface_key(interface_config *f, const char *key,
     f->host.mtu = (uint16_t)n;
     return 1;
   }
+  if (!strcmp(key, "announce_rate_target")) {
+    f->host.announce_rate_target = (uint32_t)n;
+    return 1;
+  }
+  if (!strcmp(key, "announce_rate_grace")) {
+    f->host.announce_rate_grace = (uint32_t)n;
+    return 1;
+  }
+  if (!strcmp(key, "announce_rate_penalty")) {
+    f->host.announce_rate_penalty = (uint32_t)n;
+    return 1;
+  }
   if (!strcmp(key, "bitrate")) {
     if (!n)
       return 0;

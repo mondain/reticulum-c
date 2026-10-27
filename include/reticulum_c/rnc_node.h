@@ -89,6 +89,11 @@ typedef enum rnc_interface_mode {
 typedef struct rnc_interface_policy {
   rnc_interface_mode mode;
   uint32_t announce_cap_permille;
+  /* Per-destination limit on announces received here before they are
+   * rebroadcast. Target is the minimum seconds between announces (0 disables).
+   * More than `grace` violations block rebroadcast for target + penalty
+   * seconds; paths are still learned. */
+  uint32_t announce_rate_target, announce_rate_grace, announce_rate_penalty;
 } rnc_interface_policy;
 rnc_result rnc_node_interface_policy(rnc_node *node, uint32_t interface_id,
                                      const rnc_interface_policy *policy);

@@ -46,7 +46,7 @@ Largest gaps, in priority order:
 | IMPL | Wire format, MTU 500..4096 with 3B signalling | |
 | IMPL | Crypto primitives (OpenSSL) | |
 | IMPL | Ratchets: generate, rotate, export/import, encrypt/decrypt, 30-day peer expiry | `src/ratchet.c` |
-| PART | Announce propagation (6.7.4) | No PATHFINDER_R retries, no local-rebroadcast suppression/counting, no hold-down/grace timers; hop drop at >= 127 vs reference 128 |
+| IMPL | Announce propagation (6.7.4) | One retry after 5.5s (PATHFINDER_R/G/RW), cancelled after 2 heard neighbour rebroadcasts or when passed on a further hop; single transmission for shared-instance clients; locally originated announces blocked on AP interfaces. Verified against reference `Transport.py` at the pinned commit. Hold-down of announces during path-request answers is not implemented; hop drop remains at wire hops >= 127 (reference allows 128 after increment); `MODE_INTERNAL` not implemented |
 | IMPL | Path expiry | 7 days; AP 1 day, Roaming 6 hours by ingress interface mode |
 | IMPL | Delivery proofs | Endpoint proof creation (implicit 64B / explicit 96B) via `rnc_node_prove` and PROVE_ALL; validation by signer in `rnc_node_send_tracked` receipts (closed in `feature/spec-gap-closure`) |
 | PART | Packet prioritisation | Only the announce queue is ordered |
@@ -164,9 +164,9 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | --- | --- | --- |
 | IMPL | `type`, `enabled` (daemon), `name`, `bitrate`, `mtu`, IFAC (`networkname`, `passphrase`, `ifac_size`) | |
 | MISS | `outgoing`, `bootstrap_only`, `ifac_netname` / `ifac_netkey` aliases | |
-| IMPL | Interface modes: full, gateway, access_point, roaming, boundary | `rnc_node_interface_policy`; announce propagation rules follow the reference behavior as recalled, because the manual's table is an image and is not in the extracted text. Gateway/AP path-request discovery on behalf of clients is NOT yet implemented. Config keys `mode`/`interface_mode` in the daemon |
+| IMPL | Interface modes: full, gateway, access_point, roaming, boundary | `rnc_node_interface_policy`; announce propagation rules follow the reference behavior as recalled, (the manual's table is an image, so the reference source was used). Rules verified against the pinned reference `Transport.py`. Gateway/AP path-request discovery on behalf of clients is NOT yet implemented. Config keys `mode`/`interface_mode` in the daemon |
 | IMPL | Announce rate control: `announce_cap` | Per-interface via policy and daemon `announce_cap` (percent); default 2% |
-| MISS | `announce_rate_target` / `grace` / `penalty` | No per-destination state |
+| IMPL | `announce_rate_target` / `grace` / `penalty` | Per-interface policy and daemon keys; blocks rebroadcast only, paths still learned; bounded 128-entry table |
 | MISS | New destination rate limiting (8.18) | No tracking |
 | PART | Path request burst control (8.19) | Tag dedup and pending-table expiry exist, which is not rate limiting |
 | MISS | Per-interface request counters / hold-off | |

@@ -65,6 +65,8 @@ typedef struct rnc_host_config {
   int tx_power, flow_control;
   rnc_interface_mode mode;        /* default FULL; inherited by child ifaces */
   uint32_t announce_cap_permille; /* 0 = 20 (2%) */
+  /* Per-destination announce rate control; see rnc_interface_policy. */
+  uint32_t announce_rate_target, announce_rate_grace, announce_rate_penalty;
 } rnc_host_config;
 typedef struct rnc_host_status {
   uint32_t interface_id, parent_id;

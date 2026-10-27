@@ -10,14 +10,33 @@
 #define PATH_LIFETIME UINT64_C(604800000)
 #define PACKET_LIFETIME UINT64_C(300000)
 #define REQUEST_LIFETIME UINT64_C(15000)
+#define NODE_ANNOUNCES 64u
+#define NODE_RATES 128u
+/* PATHFINDER_G (5s grace) + PATHFINDER_RW (0.5s window) before the one retry. */
+#define ANNOUNCE_RETRY_MS UINT64_C(5500)
+#define LOCAL_REBROADCASTS_MAX 2u
 typedef struct node_interface {
   uint32_t id, bitrate;
   size_t mtu;
   int local;
   rnc_interface_mode mode;
-  uint32_t cap;
+  uint32_t cap, rate_target, rate_grace, rate_penalty;
   uint64_t announce_after;
 } node_interface;
+typedef struct node_announce {
+  int used;
+  uint8_t destination[16], hops;
+  uint32_t ingress;
+  unsigned heard;
+  uint64_t retry_at;
+  rnc_packet packet;
+} node_announce;
+typedef struct node_rate {
+  int used;
+  uint8_t destination[16];
+  unsigned violations;
+  uint64_t last, blocked_until, touched;
+} node_rate;
 typedef struct node_route {
   int used;
   rnc_route route;
@@ -84,6 +103,8 @@ struct rnc_node {
   node_reverse reverse[NODE_REVERSE];
   node_request requests[NODE_REQUESTS];
   node_receipt receipts[RNC_NODE_RECEIPTS];
+  node_announce announces[NODE_ANNOUNCES];
+  node_rate rates[NODE_RATES];
   node_queued queued[NODE_QUEUE];
   rnc_node_event events[RNC_NODE_EVENTS];
   size_t head, count;
@@ -318,6 +339,8 @@ rnc_result rnc_node_add_interface(rnc_node *n, uint32_t id, uint32_t bitrate) {
       n->interfaces[i].mtu = RNC_MTU;
       n->interfaces[i].mode = RNC_MODE_FULL;
       n->interfaces[i].cap = 0;
+      n->interfaces[i].rate_target = n->interfaces[i].rate_grace = 0;
+      n->interfaces[i].rate_penalty = 0;
       return RNC_OK;
     }
   return RNC_NO_SPACE;
@@ -364,6 +387,9 @@ rnc_result rnc_node_interface_policy(rnc_node *n, uint32_t id,
     return RNC_STATE;
   i->mode = policy->mode;
   i->cap = policy->announce_cap_permille;
+  i->rate_target = policy->announce_rate_target;
+  i->rate_grace = policy->announce_rate_grace;
+  i->rate_penalty = policy->announce_rate_penalty;
   return RNC_OK;
 }
 rnc_result rnc_node_remove_interface(rnc_node *n, uint32_t id) {
@@ -497,7 +523,7 @@ rnc_result rnc_node_announce(rnc_node *n, const uint8_t destination[16],
   if (r != RNC_OK)
     return r;
   for (i = 0; i < RNC_NODE_INTERFACES; i++)
-    if (n->interfaces[i].id)
+    if (n->interfaces[i].id && n->interfaces[i].mode != RNC_MODE_ACCESS_POINT)
       queue(n, n->interfaces[i].id, &p, now);
   n->now = now;
   return RNC_OK;
@@ -608,6 +634,93 @@ static size_t relay_count(rnc_node *n, uint32_t ingress) {
       c++;
   return c;
 }
+/* Reference-compatible per-destination announce rate table. Returns nonzero
+ * when the announce must not be rebroadcast. Paths are learned regardless. */
+static int rate_blocked(rnc_node *n, const node_interface *iface,
+                        const uint8_t destination[16], uint64_t now) {
+  node_rate *r = NULL, *oldest = &n->rates[0];
+  uint64_t target = (uint64_t)iface->rate_target * 1000u;
+  size_t i;
+  if (!iface->rate_target)
+    return 0;
+  for (i = 0; i < NODE_RATES; i++) {
+    if (n->rates[i].used && same(n->rates[i].destination, destination)) {
+      r = &n->rates[i];
+      break;
+    }
+    if (!n->rates[i].used || n->rates[i].touched < oldest->touched)
+      oldest = &n->rates[i];
+  }
+  if (!r) {
+    r = oldest;
+    memset(r, 0, sizeof(*r));
+    r->used = 1;
+    memcpy(r->destination, destination, 16);
+    r->last = r->touched = now;
+    return 0;
+  }
+  r->touched = now;
+  if (now <= r->blocked_until)
+    return 1;
+  if (now - r->last < target)
+    r->violations++;
+  else if (r->violations)
+    r->violations--;
+  if (r->violations > iface->rate_grace) {
+    r->blocked_until = after(after(r->last, target),
+                             (uint64_t)iface->rate_penalty * 1000u);
+    return 1;
+  }
+  r->last = now;
+  return 0;
+}
+/* Another node rebroadcast an announce we have scheduled for retransmission. */
+static void heard_rebroadcast(rnc_node *n, const rnc_packet *p, uint64_t now) {
+  size_t i;
+  if (!(p->flags & 0x40u))
+    return;
+  for (i = 0; i < NODE_ANNOUNCES; i++) {
+    node_announce *a = &n->announces[i];
+    if (!a->used || !same(a->destination, p->destination))
+      continue;
+    if (p->hops == (uint8_t)(a->hops + 1u) && ++a->heard >= LOCAL_REBROADCASTS_MAX)
+      a->used = 0;
+    else if (p->hops == (uint8_t)(a->hops + 2u) && now < a->retry_at)
+      a->used = 0;
+    return;
+  }
+}
+static void schedule_retry(rnc_node *n, const rnc_packet *relay,
+                           uint32_t ingress, uint64_t due) {
+  size_t i;
+  for (i = 0; i < NODE_ANNOUNCES; i++)
+    if (!n->announces[i].used || same(n->announces[i].destination, relay->destination)) {
+      node_announce *a = &n->announces[i];
+      memset(a, 0, sizeof(*a));
+      a->used = 1;
+      memcpy(a->destination, relay->destination, 16);
+      a->hops = relay->hops;
+      a->ingress = ingress;
+      a->retry_at = after(due, ANNOUNCE_RETRY_MS);
+      a->packet = *relay;
+      return;
+    }
+}
+/* The single retransmission; skipped if the path or ingress is gone, or the
+ * queue is full (retried on the next tick). */
+static void announce_retry(rnc_node *n, node_announce *a, uint64_t now) {
+  size_t k, targets = relay_count(n, a->ingress);
+  if (!interface(n, a->ingress) || !route_find(n, a->destination, now)) {
+    a->used = 0;
+    return;
+  }
+  if (queue_free(n) < targets)
+    return;
+  for (k = 0; k < RNC_NODE_INTERFACES; k++)
+    if (n->interfaces[k].id && relay_target(n, a->ingress, n->interfaces[k].id))
+      queue(n, n->interfaces[k].id, &a->packet, now);
+  a->used = 0;
+}
 static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
                             uint64_t unix_seconds, uint64_t now) {
   rnc_announce a;
@@ -625,6 +738,8 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   if (destination_find(n, p->destination) &&
       destination_find(n, p->destination)->type == RNC_SINGLE)
     return RNC_OK;
+  if (n->transport)
+    heard_rebroadcast(n, p, now);
   stamp = announce_time(&a);
   if (stamp > unix_seconds && stamp - unix_seconds > 300)
     return RNC_PROTOCOL;
@@ -670,14 +785,17 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
            (p->flags & 0x40) ? p->transport_id : p->destination, 16);
     n->routes[slot] = fresh;
     emit(n, RNC_NODE_ANNOUNCE, ingress, p)->route = fresh.route;
-    if (targets && p->context == 0) {
+    if (targets && p->context == 0 &&
+        !rate_blocked(n, interface(n, ingress), p->destination, now)) {
       rnc_packet relay = *p;
+      uint64_t due = after(now, ((unsigned)jitter[0] * 256 + jitter[1]) % 501u);
       relay_announce(n, &relay);
       for (i = 0; i < RNC_NODE_INTERFACES; i++)
         if (n->interfaces[i].id &&
             relay_target(n, ingress, n->interfaces[i].id))
-          queue(n, n->interfaces[i].id, &relay,
-                after(now, ((unsigned)jitter[0] * 256 + jitter[1]) % 501u));
+          queue(n, n->interfaces[i].id, &relay, due);
+      if (!interface(n, ingress)->local)
+        schedule_retry(n, &relay, ingress, due);
     }
   }
   /* A cached PATH_RESPONSE can satisfy pending requests even if route data is
@@ -1161,6 +1279,11 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
   for (i = 0; i < NODE_REQUESTS; i++)
     if (n->requests[i].used && n->requests[i].expiry <= now)
       n->requests[i].used = 0;
+  for (i = 0; i < NODE_ANNOUNCES; i++) {
+    node_announce *a = &n->announces[i];
+    if (a->used && a->retry_at <= now)
+      announce_retry(n, a, now);
+  }
   for (i = 0; i < RNC_NODE_RECEIPTS && room(n, 1); i++)
     if (n->receipts[i].used && n->receipts[i].expiry <= now) {
       rnc_node_event *e = emit(n, RNC_NODE_RECEIPT, 0, NULL);
