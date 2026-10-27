@@ -201,6 +201,15 @@ static int interface_key(interface_config *f, const char *key,
       f->host.airtime_limit_long = percent;
     return 1;
   }
+  if (!strcmp(key, "kiss_framing") || !strcmp(key, "prefer_ipv6")) {
+    if (!boolean(value, &b))
+      return 0;
+    if (key[0] == 'k')
+      f->host.kiss_framing = b;
+    else
+      f->host.prefer_ipv6 = b;
+    return 1;
+  }
   if (!strcmp(key, "block_fast_flapping")) {
     if (!boolean(value, &b))
       return 0;
@@ -283,6 +292,21 @@ static int interface_key(interface_config *f, const char *key,
   }
   if (!number(value, UINT32_MAX, &n))
     return 0;
+  if (!strcmp(key, "max_reconnect_tries")) {
+    if (n > 1000000)
+      return 0;
+    f->host.max_reconnect_tries = (unsigned)n;
+    return 1;
+  }
+  if (!strcmp(key, "connect_timeout") || !strcmp(key, "reconnect_wait")) {
+    if (n == 0 || n > 3600)
+      return 0;
+    if (key[0] == 'c')
+      f->host.connect_timeout_ms = (unsigned)n * 1000u;
+    else
+      f->host.reconnect_wait_ms = (unsigned)n * 1000u;
+    return 1;
+  }
   if (!strcmp(key, "fast_flapping_grace")) {
     if (n == 0 || n > 1000)
       return 0;

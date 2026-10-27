@@ -92,6 +92,11 @@ typedef struct rnc_host_config {
   int recursive_path_requests;  /* see rnc_interface_policy */
   rnc_ingress_policy ingress;   /* zero = reference defaults */
   rnc_fast_flap fast_flap;      /* TCP_LISTEN only; off by default */
+  /* TCP_CONNECT: retry pacing and limits (0 = reference defaults: 5 s wait,
+   * unlimited tries, 5 s connect timeout); kiss_framing uses KISS data frames
+   * instead of HDLC. prefer_ipv6 picks an IPv6 address when a name has both. */
+  unsigned reconnect_wait_ms, max_reconnect_tries, connect_timeout_ms;
+  int kiss_framing, prefer_ipv6;
 } rnc_host_config;
 typedef struct rnc_host_status {
   uint32_t interface_id, parent_id;

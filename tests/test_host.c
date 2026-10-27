@@ -4,8 +4,10 @@
 #endif
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netdb.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
 #include <stdio.h>
@@ -630,6 +632,7 @@ static void pipe_test(void) {
       break;
   }
   CHECK(status.reconnects >= 1);
+  CHECK(i < 60); /* respawn_delay_ms honoured, not the 1 s default */
   rnc_host_free(host);
   rnc_node_free(node);
   puts("host pipe tests passed");
@@ -810,6 +813,231 @@ static void fast_flap_test(void) {
   rnc_node_free(node);
   puts("host fast-flap tests passed");
 }
+static int tcp_listener(int family, uint16_t *port) {
+  struct sockaddr_storage a = {0};
+  socklen_t n = sizeof(a);
+  int fd = socket(family, SOCK_STREAM, 0), one = 1;
+  CHECK(fd >= 0);
+  (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  if (family == AF_INET) {
+    struct sockaddr_in *v4 = (struct sockaddr_in *)&a;
+    v4->sin_family = AF_INET;
+    v4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    v4->sin_port = htons(*port);
+  } else {
+    struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&a;
+    v6->sin6_family = AF_INET6;
+    v6->sin6_addr = in6addr_loopback;
+    v6->sin6_port = htons(*port);
+  }
+  if (bind(fd, (struct sockaddr *)&a, family == AF_INET
+                                          ? sizeof(struct sockaddr_in)
+                                          : sizeof(struct sockaddr_in6)) < 0) {
+    close(fd);
+    return -1;
+  }
+  CHECK(listen(fd, 4) == 0);
+  CHECK(getsockname(fd, (struct sockaddr *)&a, &n) == 0);
+  *port = ntohs(family == AF_INET ? ((struct sockaddr_in *)&a)->sin_port
+                                  : ((struct sockaddr_in6 *)&a)->sin6_port);
+  CHECK(fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
+  return fd;
+}
+static int accept_within(rnc_host *host, int listener, uint64_t *now,
+                         unsigned steps) {
+  unsigned i;
+  for (i = 0; i < steps; ++i) {
+    int fd;
+    CHECK(rnc_host_step(host, 5, 1700000000, *now += 10) == RNC_OK);
+    fd = accept(listener, NULL, NULL);
+    if (fd >= 0)
+      return fd;
+  }
+  return -1;
+}
+static void tcp_options_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  uint64_t now = 100;
+  uint16_t port = 0, free_port = 0;
+  int listener, accepted, one = 1, value;
+  socklen_t n;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_packet plain = {0};
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  (void)one;
+  /* keepalive and user timeout on the host's connected socket */
+  host = rnc_host_new(node);
+  CHECK(host);
+  listener = tcp_listener(AF_INET, &port);
+  CHECK(listener >= 0);
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  cfg.address = "127.0.0.1";
+  cfg.port = port;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 50);
+  CHECK(accepted >= 0);
+  {
+    int fd, found = 0;
+    for (fd = 3; fd < 256; ++fd) {
+      struct sockaddr_in peer;
+      socklen_t peer_size = sizeof(peer);
+      if (fd == listener || fd == accepted ||
+          getpeername(fd, (struct sockaddr *)&peer, &peer_size) != 0 ||
+          peer.sin_family != AF_INET || ntohs(peer.sin_port) != port)
+        continue;
+      found = 1;
+      n = sizeof(value);
+      CHECK(getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &value, &n) == 0 &&
+            value == 1);
+#ifdef __linux__
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &value, &n) == 0 &&
+            value == 5);
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &value, &n) == 0 &&
+            value == 2);
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &value, &n) == 0 &&
+            value == 12);
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &value, &n) == 0 &&
+            value == 24000);
+#endif
+    }
+    CHECK(found);
+  }
+  close(accepted);
+  rnc_host_free(host);
+  /* kiss_framing: data frames are FEND 0x00 ... FEND instead of HDLC */
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kiss_framing = 1;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 50);
+  CHECK(accepted >= 0);
+  CHECK(rnc_node_send(node, &plain, 1700000000, now) == RNC_OK);
+  {
+    uint8_t bytes[64];
+    ssize_t got = -1;
+    for (i = 0; i < 50 && got <= 0; ++i) {
+      CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+      got = recv(accepted, bytes, sizeof(bytes), MSG_DONTWAIT);
+    }
+    CHECK(got > 3 && bytes[0] == 0xc0 && bytes[1] == 0x00 &&
+          bytes[got - 1] == 0xc0);
+  }
+  close(accepted);
+  rnc_host_free(host);
+  close(listener);
+  /* max_reconnect_tries stops retrying; reconnect_wait_ms paces attempts */
+  listener = tcp_listener(AF_INET, &free_port);
+  CHECK(listener >= 0);
+  close(listener); /* nothing listens on free_port now */
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kiss_framing = 0;
+  cfg.port = free_port;
+  cfg.reconnect_wait_ms = 50;
+  cfg.max_reconnect_tries = 2;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  for (i = 0; i < 100; ++i)
+    CHECK(rnc_host_step(host, 1, 1700000000, now += 10) == RNC_OK);
+  listener = tcp_listener(AF_INET, &free_port);
+  CHECK(listener >= 0);
+  CHECK(accept_within(host, listener, &now, 100) < 0);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && !status.online);
+  close(listener);
+  rnc_host_free(host);
+  /* without a limit, the same client connects once the listener appears */
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.max_reconnect_tries = 0;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  for (i = 0; i < 20; ++i)
+    CHECK(rnc_host_step(host, 1, 1700000000, now += 10) == RNC_OK);
+  listener = tcp_listener(AF_INET, &free_port);
+  CHECK(listener >= 0);
+  accepted = accept_within(host, listener, &now, 100);
+  CHECK(accepted >= 0);
+  close(accepted);
+  close(listener);
+  rnc_host_free(host);
+  /* prefer_ipv6 picks the IPv6 address of a name that has both */
+  {
+    struct addrinfo hints = {0}, *res = NULL;
+    uint16_t port6 = 0;
+    int listener6;
+    int v4 = 0, v6 = 0;
+    struct addrinfo *entry;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo("localhost", "1", &hints, &res) == 0)
+      for (entry = res; entry; entry = entry->ai_next) {
+        v4 |= entry->ai_family == AF_INET;
+        v6 |= entry->ai_family == AF_INET6;
+      }
+    if (res)
+      freeaddrinfo(res);
+    /* needs a dual-stack "localhost"; skipped where the resolver has no ::1 */
+    listener6 = v4 && v6 ? tcp_listener(AF_INET6, &port6) : -1;
+    if (listener6 < 0)
+      puts("prefer_ipv6 check skipped: localhost is not dual-stack here");
+    if (listener6 >= 0) {
+      host = rnc_host_new(node);
+      CHECK(host);
+      cfg.address = "localhost";
+      cfg.port = port6;
+      cfg.reconnect_wait_ms = 50;
+      cfg.prefer_ipv6 = 1;
+      CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+      accepted = accept_within(host, listener6, &now, 100);
+      CHECK(accepted >= 0);
+      close(accepted);
+      close(listener6);
+      rnc_host_free(host);
+    }
+  }
+  /* a connect that never completes is abandoned after connect_timeout_ms */
+  {
+    uint16_t stuck_port = 0;
+    int stuck = tcp_listener(AF_INET, &stuck_port), fillers[8], k;
+    struct sockaddr_in a = {0};
+    CHECK(stuck >= 0);
+    CHECK(listen(stuck, 0) == 0);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(stuck_port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    for (k = 0; k < 8; ++k) { /* saturate the accept queue so SYNs are dropped */
+      fillers[k] = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+      (void)connect(fillers[k], (struct sockaddr *)&a, sizeof(a));
+    }
+    host = rnc_host_new(node);
+    CHECK(host);
+    cfg.address = "127.0.0.1";
+    cfg.port = stuck_port;
+    cfg.prefer_ipv6 = 0;
+    cfg.connect_timeout_ms = 200;
+    cfg.reconnect_wait_ms = 100000;
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && !status.online);
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 100) == RNC_OK);
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 250) == RNC_OK);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK &&
+          status.last_errno == ETIMEDOUT);
+    rnc_host_free(host);
+    for (k = 0; k < 8; ++k)
+      close(fillers[k]);
+    close(stuck);
+  }
+  rnc_node_free(node);
+  puts("host TCP option tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -830,6 +1058,8 @@ int main(int argc, char **argv) {
     ax25_test();
   else if (!strcmp(argv[1], "fast_flap"))
     fast_flap_test();
+  else if (!strcmp(argv[1], "tcp_options"))
+    tcp_options_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))
