@@ -634,6 +634,118 @@ static void pipe_test(void) {
   rnc_node_free(node);
   puts("host pipe tests passed");
 }
+typedef struct tnc_frame {
+  uint8_t command, data[RNC_HOST_FRAME_MAX];
+  size_t size;
+} tnc_frame;
+static size_t tnc_read(int master, rnc_host_framer *parser, tnc_frame *out,
+                       size_t count, size_t max) {
+  uint8_t bytes[512];
+  ssize_t n = read(master, bytes, sizeof(bytes));
+  size_t k;
+  for (k = 0; n > 0 && k < (size_t)n && count < max; ++k) {
+    uint8_t decoded[RNC_IFAC_FRAME_MAX], command;
+    size_t size;
+    if (rnc_host_frame_feed(parser, RNC_HOST_KISS_FRAMING, bytes[k], &command,
+                            decoded, sizeof(decoded), &size) == RNC_OK) {
+      out[count].command = command;
+      out[count].size = size;
+      memcpy(out[count].data, decoded, size);
+      ++count;
+    }
+  }
+  return count;
+}
+static void ax25_test(void) {
+  int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  uint8_t key[64] = {0}, ready[RNC_HOST_FRAME_MAX], header[16];
+  unsigned rng = 0, i;
+  size_t count = 0, ready_size, k;
+  tnc_frame frames[16];
+  rnc_host_framer parser = {0};
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_packet plain = {0};
+  const uint8_t setup[][2] = {{0x01, 35}, {0x04, 2}, {0x02, 64},
+                              {0x03, 2},  {0x0f, 1}};
+  const char dst[] = "APZRNS", src[] = "N0CALL";
+  CHECK(master >= 0 && !grantpt(master) && !unlockpt(master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_AX25;
+  cfg.address = ptsname(master);
+  cfg.serial_baud = 115200;
+  cfg.callsign = "ab";
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+  cfg.callsign = "n0call";
+  cfg.ssid = 16;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+  cfg.ssid = 3;
+  cfg.flow_control = 1;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  CHECK(rnc_node_send(node, &plain, 1700000000, 100) == RNC_OK);
+  for (i = 0; i < 100 && count < 6; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, 100 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 6);
+  for (k = 0; k < 5; ++k)
+    CHECK(frames[k].command == setup[k][0] && frames[k].size == 1 &&
+          frames[k].data[0] == setup[k][1]);
+  CHECK(frames[5].command == 0 && frames[5].size > 16);
+  for (k = 0; k < 6; ++k) {
+    header[k] = (uint8_t)(dst[k] << 1);
+    header[7 + k] = (uint8_t)(src[k] << 1);
+  }
+  header[6] = 0x60;
+  header[13] = 0x60 | (3 << 1) | 1;
+  header[14] = 0x03;
+  header[15] = 0xf0;
+  CHECK(!memcmp(frames[5].data, header, 16));
+  /* with flow control, the next packet waits for the TNC's ready frame */
+  CHECK(rnc_node_send(node, &plain, 1700000001, 1000) == RNC_OK);
+  for (i = 0; i < 20; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000001, 1000 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 6);
+  CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0x0f,
+                              (const uint8_t[]){1}, 1, ready,
+                              sizeof(ready), &ready_size) == RNC_OK);
+  CHECK(write(master, ready, ready_size) == (ssize_t)ready_size);
+  for (i = 0; i < 20; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000001, 3000 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 7 && frames[6].command == 0);
+  /* a frame arriving from the TNC has its AX.25 header stripped */
+  {
+    uint8_t echo[RNC_HOST_FRAME_MAX];
+    size_t echo_size;
+    CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0, frames[6].data,
+                                frames[6].size, echo, sizeof(echo),
+                                &echo_size) == RNC_OK);
+    CHECK(write(master, echo, echo_size) == (ssize_t)echo_size);
+  }
+  for (i = 0; i < 20; ++i)
+    CHECK(rnc_host_step(host, 0, 1700000001, 5000 + 100u * i) == RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+  CHECK(status.kind == RNC_HOST_AX25 && status.rx_packets == 1 &&
+        status.tx_packets == 2);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(master);
+  puts("host AX.25 KISS tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -650,6 +762,8 @@ int main(int argc, char **argv) {
     radio_extras_test();
   else if (!strcmp(argv[1], "pipe"))
     pipe_test();
+  else if (!strcmp(argv[1], "ax25"))
+    ax25_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))

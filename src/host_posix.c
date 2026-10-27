@@ -233,6 +233,8 @@ typedef struct host_interface {
   unsigned radio_ack_mask;
   uint64_t radio_deadline;
   pid_t child;
+  char ax_call[7];
+  uint64_t lock_at;
   rnc_host_config radio;
   char callsign[RNC_HOST_CALLSIGN_MAX + 1u];
   size_t callsign_size;
@@ -622,6 +624,36 @@ static void put32(uint8_t out[4], uint32_t x) {
   out[2] = (uint8_t)(x >> 8);
   out[3] = (uint8_t)x;
 }
+/* TNC timing in 10 ms units, as the reference sends them. */
+static uint8_t tnc_units(unsigned ms) {
+  return ms / 10u > 255u ? 255u : (uint8_t)(ms / 10u);
+}
+static rnc_result configure_ax25(host_interface *f, const rnc_host_config *c) {
+  uint8_t b[1];
+  rnc_result r;
+  b[0] = tnc_units(c->preamble_ms ? c->preamble_ms : 350u);
+  r = queue_command(f, 1, b, 1);
+  if (r == RNC_OK) {
+    b[0] = tnc_units(c->txtail_ms ? c->txtail_ms : 20u);
+    r = queue_command(f, 4, b, 1);
+  }
+  if (r == RNC_OK) {
+    b[0] = (uint8_t)(c->persistence > 255u ? 255u
+                                           : c->persistence ? c->persistence
+                                                            : 64u);
+    r = queue_command(f, 2, b, 1);
+  }
+  if (r == RNC_OK) {
+    b[0] = tnc_units(c->slottime_ms ? c->slottime_ms : 20u);
+    r = queue_command(f, 3, b, 1);
+  }
+  if (r == RNC_OK) {
+    b[0] = 1; /* the reference always sends READY=1 after configuring */
+    r = queue_command(f, 0x0f, b, 1);
+  }
+  f->ready = 1;
+  return r;
+}
 static rnc_result configure_radio(host_interface *f, const rnc_host_config *c) {
   uint8_t b[4];
   rnc_result r;
@@ -795,7 +827,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   socklen_t bind_size;
   rnc_result r = RNC_STATE;
   if (!h || !c || !id || id >= 0x80000000u || c->kind < RNC_HOST_TCP_LISTEN ||
-      c->kind > RNC_HOST_PIPE || c->kiss_port > 15 || find_interface(h, id))
+      c->kind > RNC_HOST_AX25 || c->kiss_port > 15 || find_interface(h, id))
     return RNC_INVALID;
   if (c->kind == RNC_HOST_RNODE &&
       (!c->frequency || !c->bandwidth || c->spreading_factor < 5 ||
@@ -809,6 +841,16 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
        (c->id_callsign && (!*c->id_callsign ||
                            strlen(c->id_callsign) > RNC_HOST_CALLSIGN_MAX))))
     return RNC_INVALID;
+  if (c->kind == RNC_HOST_AX25) {
+    size_t k, len = c->callsign ? strlen(c->callsign) : 0;
+    if (len < 3 || len > 6 || c->ssid > 15)
+      return RNC_INVALID;
+    for (k = 0; k < len; ++k)
+      if (c->callsign[k] < '0' || c->callsign[k] > 'z' ||
+          (c->callsign[k] > '9' && c->callsign[k] < 'A') ||
+          (c->callsign[k] > 'Z' && c->callsign[k] < 'a'))
+        return RNC_INVALID;
+  }
   if (c->mtu && (c->mtu < RNC_MTU || c->mtu > RNC_MAX_MTU ||
                  (c->kind >= RNC_HOST_SERIAL && c->mtu > RNC_MTU) ||
                  (c->kind == RNC_HOST_AUTO && c->mtu > 1196)))
@@ -859,7 +901,9 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     if (!f->bitrate)
       f->bitrate = 1u;
   } else
-    f->bitrate = c->kind == RNC_HOST_PIPE ? 1000000u : 10000000u;
+    f->bitrate = c->kind == RNC_HOST_PIPE  ? 1000000u
+                 : c->kind == RNC_HOST_AX25 ? 1200u
+                                            : 10000000u;
   f->status.bitrate = f->bitrate;
   f->status.local = c->local;
   if (c->name) {
@@ -880,6 +924,13 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->radio.ifac = NULL;
   f->radio.name = NULL;
   f->radio.id_callsign = NULL;
+  f->radio.callsign = NULL;
+  if (c->kind == RNC_HOST_AX25) {
+    size_t k;
+    for (k = 0; c->callsign[k]; ++k)
+      f->ax_call[k] = (char)(c->callsign[k] >= 'a' ? c->callsign[k] - 32
+                                                    : c->callsign[k]);
+  }
   if (c->kind == RNC_HOST_RNODE && c->id_callsign) {
     f->callsign_size = strlen(c->id_callsign);
     memcpy(f->callsign, c->id_callsign, f->callsign_size);
@@ -950,6 +1001,10 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       goto fail;
     if (c->kind == RNC_HOST_RNODE) {
       r = configure_radio(f, c);
+      if (r != RNC_OK)
+        goto fail;
+    } else if (c->kind == RNC_HOST_AX25) {
+      r = configure_ax25(f, c);
       if (r != RNC_OK)
         goto fail;
     }
@@ -1023,6 +1078,23 @@ static rnc_result queue_packet(host_interface *f, const rnc_packet *p) {
   if (f->status.kind == RNC_HOST_UDP || f->status.kind == RNC_HOST_AUTO) {
     memcpy(q->data, wire, m);
     q->size = m;
+  } else if (f->status.kind == RNC_HOST_AX25) {
+    uint8_t ax[16 + RNC_MAX_FRAME];
+    size_t k;
+    for (k = 0; k < 6; ++k) {
+      ax[k] = (uint8_t)("APZRNS"[k] << 1);
+      ax[7 + k] = k < strlen(f->ax_call) ? (uint8_t)(f->ax_call[k] << 1) : 0x20;
+    }
+    ax[6] = 0x60;
+    ax[13] = (uint8_t)(0x60u | (f->radio.ssid << 1) | 1u);
+    ax[14] = 0x03; /* UI frame */
+    ax[15] = 0xf0; /* no layer 3 */
+    memcpy(ax + 16, wire, m);
+    r = rnc_host_frame_encode(RNC_HOST_KISS_FRAMING,
+                              (uint8_t)(f->kiss_port << 4), ax, 16 + m,
+                              q->data, sizeof(q->data), &q->size);
+    if (r != RNC_OK)
+      return r;
   } else {
     r = rnc_host_frame_encode(f->status.kind == RNC_HOST_TCP_LISTEN ||
                                       f->status.kind == RNC_HOST_TCP_CONNECT ||
@@ -1283,7 +1355,8 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
   rnc_result r;
   ssize_t got;
   rnc_host_framing mode =
-      f->status.kind == RNC_HOST_KISS || f->status.kind == RNC_HOST_RNODE
+      f->status.kind == RNC_HOST_KISS || f->status.kind == RNC_HOST_RNODE ||
+              f->status.kind == RNC_HOST_AX25
           ? RNC_HOST_KISS_FRAMING
           : RNC_HOST_HDLC;
   if (f->pending) {
@@ -1379,10 +1452,22 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
         }
         continue;
       }
-      if (f->status.kind == RNC_HOST_KISS &&
+      if (f->status.kind == RNC_HOST_AX25 && (command & 15u) == 0x0f) {
+        if (f->flow_control)
+          f->ready = 1;
+        continue;
+      }
+      if ((f->status.kind == RNC_HOST_KISS || f->status.kind == RNC_HOST_AX25) &&
           ((command & 15u) != 0 || (command >> 4) != f->kiss_port))
         continue;
-      r = input_packet(h, f, raw, n, unix_seconds);
+      if (f->status.kind == RNC_HOST_AX25) {
+        if (n <= 16u) {
+          ++f->status.dropped_packets;
+          continue;
+        }
+        r = input_packet(h, f, raw + 16, n - 16u, unix_seconds);
+      } else
+        r = input_packet(h, f, raw, n, unix_seconds);
       if (r == RNC_AGAIN)
         return RNC_OK;
       if (r != RNC_OK)
@@ -1434,6 +1519,12 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
   if (f->status.kind == RNC_HOST_RNODE && !q->control &&
       (!f->status.radio_ready || (f->flow_control && !f->ready)))
     return RNC_OK;
+  if (f->status.kind == RNC_HOST_AX25 && !q->control && f->flow_control &&
+      !f->ready) {
+    if (h->now < f->lock_at + 5000u) /* reference unlock timeout */
+      return RNC_OK;
+    f->ready = 1;
+  }
   if (f->status.kind == RNC_HOST_AUTO && f->status.parent_id) {
     socket_owner = find_interface(h, f->status.parent_id);
     if (!socket_owner)
@@ -1503,8 +1594,12 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
           f->status.tx_announce_bytes += q->wire_size;
         }
       }
-      if (f->status.kind == RNC_HOST_RNODE && f->flow_control)
+      if ((f->status.kind == RNC_HOST_RNODE ||
+           f->status.kind == RNC_HOST_AX25) &&
+          f->flow_control) {
         f->ready = 0;
+        f->lock_at = h->now;
+      }
     }
     if (index + 1u < f->queue_count)
       memmove(&f->queue[index], &f->queue[index + 1u],
@@ -1562,6 +1657,8 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
           ++f->status.reconnects;
           if (f->status.kind == RNC_HOST_RNODE)
             (void)configure_radio(f, &f->radio);
+          else if (f->status.kind == RNC_HOST_AX25)
+            (void)configure_ax25(f, &f->radio);
         } else {
           if (f->fd >= 0) {
             close(f->fd);

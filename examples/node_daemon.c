@@ -27,7 +27,7 @@
 typedef struct interface_config {
   rnc_host_config host;
   char name[64], address[256], target[256], device[64], group[64], netname[128],
-      passphrase[128], callsign[RNC_HOST_CALLSIGN_MAX + 2u];
+      passphrase[128], callsign[RNC_HOST_CALLSIGN_MAX + 2u], ax_call[8];
   size_t ifac_size;
   uint32_t interface_id;
   int enabled, has_type;
@@ -112,7 +112,8 @@ static int set_type(interface_config *f, const char *value) {
                {"SerialInterface", RNC_HOST_SERIAL},
                {"KISSInterface", RNC_HOST_KISS},
                {"RNodeInterface", RNC_HOST_RNODE},
-               {"PipeInterface", RNC_HOST_PIPE}};
+               {"PipeInterface", RNC_HOST_PIPE},
+               {"AX25KISSInterface", RNC_HOST_AX25}};
   size_t i;
   for (i = 0; i < sizeof(types) / sizeof(*types); ++i)
     if (!strcmp(value, types[i].name)) {
@@ -202,6 +203,8 @@ static int interface_key(interface_config *f, const char *key,
     f->host.respawn_delay_ms = (unsigned)(seconds * 1000.0 + 0.5);
     return 1;
   }
+  if (!strcmp(key, "callsign"))
+    return text_copy(f->ax_call, sizeof(f->ax_call), value);
   if (!strcmp(key, "id_callsign")) {
     if (strlen(value) > RNC_HOST_CALLSIGN_MAX)
       return 0;
@@ -335,6 +338,19 @@ static int interface_key(interface_config *f, const char *key,
     f->host.coding_rate = (unsigned)n;
     return 1;
   }
+  if (!strcmp(key, "ssid") || !strcmp(key, "preamble") ||
+      !strcmp(key, "txtail") || !strcmp(key, "persistence") ||
+      !strcmp(key, "slottime")) {
+    unsigned *field = !strcmp(key, "ssid")          ? &f->host.ssid
+                      : !strcmp(key, "preamble")    ? &f->host.preamble_ms
+                      : !strcmp(key, "txtail")      ? &f->host.txtail_ms
+                      : !strcmp(key, "persistence") ? &f->host.persistence
+                                                    : &f->host.slottime_ms;
+    if (n > 65535)
+      return 0;
+    *field = (unsigned)n;
+    return 1;
+  }
   if (!strcmp(key, "id_interval")) {
     if (n == 0 || n > 86400)
       return 0;
@@ -420,6 +436,7 @@ static int finish_config(config *c) {
     f->host.device = f->device[0] ? f->device : NULL;
     f->host.group = f->group[0] ? f->group : NULL;
     f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
+    f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
     if (!f->enabled)
       continue;
     ++enabled;

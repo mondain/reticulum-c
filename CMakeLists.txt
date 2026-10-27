@@ -189,10 +189,10 @@ if(UNIX AND RNC_BUILD_HOST)
     if(BUILD_TESTING)
         add_executable(test_host tests/test_host.c)
         target_link_libraries(test_host PRIVATE reticulum_c_host OpenSSL::Crypto)
-        foreach(case codecs serial network keys rnode rnode_extras pipe pressure udp policy)
+        foreach(case codecs serial network keys rnode rnode_extras pipe ax25 pressure udp policy)
             add_test(NAME reticulum_host_${case} COMMAND test_host ${case})
         endforeach()
-        set_tests_properties(reticulum_host_serial reticulum_host_rnode reticulum_host_rnode_extras reticulum_host_pipe reticulum_host_pressure
+        set_tests_properties(reticulum_host_serial reticulum_host_rnode reticulum_host_rnode_extras reticulum_host_pipe reticulum_host_ax25 reticulum_host_pressure
             PROPERTIES LABELS pty)
         set_tests_properties(reticulum_host_network reticulum_host_udp
             PROPERTIES LABELS network TIMEOUT 30)

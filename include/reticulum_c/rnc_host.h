@@ -18,7 +18,8 @@ typedef enum rnc_host_kind {
   RNC_HOST_SERIAL,
   RNC_HOST_KISS,
   RNC_HOST_RNODE,
-  RNC_HOST_PIPE /* address = command line; HDLC over the child's stdio */
+  RNC_HOST_PIPE, /* address = command line; HDLC over the child's stdio */
+  RNC_HOST_AX25  /* address = serial path; AX.25 UI frames inside KISS */
 } rnc_host_kind;
 typedef enum rnc_host_framing {
   RNC_HOST_HDLC = 1,
@@ -72,6 +73,11 @@ typedef struct rnc_host_config {
   const char *id_callsign;
   unsigned id_interval;
   unsigned respawn_delay_ms; /* PIPE: wait before restarting; 0 = 5000 */
+  /* AX25: source callsign (3 to 6 characters, upper-cased) and SSID (0-15);
+   * TNC settings in milliseconds (persistence is 0-255), 0 = reference
+   * defaults of 350, 20, 64 and 20. */
+  const char *callsign;
+  unsigned ssid, preamble_ms, txtail_ms, persistence, slottime_ms;
   rnc_interface_mode mode;        /* default FULL; inherited by child ifaces */
   uint32_t announce_cap_permille; /* 0 = 20 (2%) */
   /* Per-destination announce rate control; see rnc_interface_policy. */
