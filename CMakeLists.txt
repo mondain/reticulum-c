@@ -19,7 +19,7 @@ if(RNC_COMPRESSION)
 endif()
 add_library(reticulum_c src/crypto.c src/packet.c src/framing.c src/announce.c
     src/link.c src/channel.c src/node.c src/ifac.c src/ratchet.c src/group.c
-    src/stream.c src/resource.c src/service.c src/ipc.c src/responder.c src/requester.c src/stamp.c src/discovery.c src/log.c)
+    src/stream.c src/resource.c src/service.c src/ipc.c src/responder.c src/requester.c src/transfer.c src/stamp.c src/discovery.c src/log.c)
 if(RNC_COMPRESSION)
     target_compile_definitions(reticulum_c PRIVATE RNC_HAVE_BZIP2=1)
     target_link_libraries(reticulum_c PRIVATE BZip2::BZip2)
@@ -95,6 +95,11 @@ if(BUILD_TESTING)
     target_link_libraries(test_responder PRIVATE reticulum_c)
     foreach(case echo quiet allow_list close arguments)
         add_test(NAME reticulum_responder_${case} COMMAND test_responder ${case})
+    endforeach()
+    add_executable(test_transfer tests/test_transfer.c)
+    target_link_libraries(test_transfer PRIVATE reticulum_c)
+    foreach(case send large denied fetch refused unavailable arguments)
+        add_test(NAME reticulum_transfer_${case} COMMAND test_transfer ${case})
     endforeach()
     add_executable(test_requester tests/test_requester.c)
     target_link_libraries(test_requester PRIVATE reticulum_c)
@@ -231,11 +236,15 @@ if(UNIX AND RNC_BUILD_HOST)
         target_link_libraries(reticulum-c-ctl PRIVATE reticulum_c_host OpenSSL::Crypto)
         target_compile_options(reticulum-c-ctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
         install(TARGETS reticulum-c-ctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+        add_executable(reticulum-c-cp examples/reticulum_cp.c)
+        target_link_libraries(reticulum-c-cp PRIVATE reticulum_c_host OpenSSL::Crypto)
+        target_compile_options(reticulum-c-cp PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        install(TARGETS reticulum-c-cp RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif()
     if(BUILD_TESTING)
         add_executable(test_host tests/test_host.c)
         target_link_libraries(test_host PRIVATE reticulum_c_host OpenSSL::Crypto)
-        foreach(case codecs serial network keys rnode rnode_extras pipe ax25 fast_flap tcp_options serial_params kiss log tunnel pressure udp policy)
+        foreach(case codecs serial network keys rnode rnode_extras pipe ax25 fast_flap tcp_options connect_late_clock serial_params kiss log tunnel pressure udp policy)
             add_test(NAME reticulum_host_${case} COMMAND test_host ${case})
         endforeach()
         set_tests_properties(reticulum_host_serial reticulum_host_kiss reticulum_host_rnode reticulum_host_rnode_extras reticulum_host_pipe reticulum_host_ax25 reticulum_host_pressure
@@ -255,6 +264,9 @@ if(UNIX AND RNC_BUILD_HOST)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
+            add_test(NAME reticulum_node_process_cp_tools COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> cp_tools $<TARGET_FILE:reticulum-c-cp>)
+            set_tests_properties(reticulum_node_process_cp_tools PROPERTIES LABELS network TIMEOUT 120)
             add_test(NAME reticulum_node_process_cli_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cli_tools $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
@@ -269,6 +281,12 @@ if(UNIX AND RNC_BUILD_HOST)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 60)
+                add_test(NAME reticulum_node_process_cp_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> cp_ref
+                    $<TARGET_FILE:reticulum-c-cp> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_cp_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
                 add_test(NAME reticulum_cli_id_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-ctl> cli_id_ref

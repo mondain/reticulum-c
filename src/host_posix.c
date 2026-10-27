@@ -577,9 +577,9 @@ static int connect_interface(rnc_host *h, host_interface *f) {
   }
   f->fd = fd;
   f->connecting = rc < 0;
-  f->connect_deadline =
-      h->now + (f->radio.connect_timeout_ms ? f->radio.connect_timeout_ms
-                                            : 5000u);
+  /* rnc_host_add has no clock, so h->now may still be stale; the deadline is
+   * set from the first step that sees the connection pending. */
+  f->connect_deadline = 0;
   if (!f->connecting && activate(h, f) != RNC_OK) {
     close(fd);
     f->fd = -1;
@@ -1901,6 +1901,10 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         continue;
       }
     }
+    if (f->connecting && !f->connect_deadline)
+      f->connect_deadline =
+          now + (f->radio.connect_timeout_ms ? f->radio.connect_timeout_ms
+                                             : 5000u);
     if (f->connecting && now >= f->connect_deadline) {
       disconnect_interface(h, f, ETIMEDOUT);
       continue;
