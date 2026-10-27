@@ -441,7 +441,9 @@ rnc_result rnc_service_input(rnc_service *s, const rnc_link_event *e, uint64_t n
         if (s->rx_binding && (s->rx_response != response || CRYPTO_memcmp(s->rx_id, id, 16)))
             return RNC_AGAIN;
         result = rnc_resource_accept(s->rx, e->data, e->size, now);
-        if (result == RNC_OK) {
+        /* A completed advertisement only replays its cached Resource proof;
+         * it produces no new completion event to release a service binding. */
+        if (result == RNC_OK && !rnc_resource_is_complete(s->rx)) {
             s->rx_response = response;
             s->rx_binding = 1;
             memcpy(s->rx_id, id, 16);
@@ -511,10 +513,12 @@ rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
         free(p);
         if (result == RNC_AGAIN)
             return RNC_OK;
-        if (result != RNC_OK)
-            return result;
+        /* Completed input is consumed even when its service envelope is
+         * rejected. Only backpressure retains it for a later pump. */
         s->rx_ready = 0;
         s->rx_binding = 0;
+        if (result != RNC_OK)
+            return result;
     }
     for (i = 0; i < RNC_SERVICE_PENDING; i++)
         if (s->pending[i].used && s->pending[i].timed_out) {

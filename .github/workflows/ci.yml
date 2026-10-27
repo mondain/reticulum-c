@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [static, shared, sanitizers]
+        variant: [static, shared, sanitizers, nocompression]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -24,6 +24,7 @@ jobs:
           opts=(-DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Debug)
           if [ '${{ matrix.variant }}' = shared ]; then opts+=(-DBUILD_SHARED_LIBS=ON); fi
           if [ '${{ matrix.variant }}' = sanitizers ]; then opts+=(-DRNC_SANITIZERS=ON -DCMAKE_C_COMPILER=clang); fi
+          if [ '${{ matrix.variant }}' = nocompression ]; then opts+=(-DRNC_COMPRESSION=OFF); fi
           cmake -S . -B build -G Ninja "${opts[@]}"
       - run: cmake --build build
       - name: Unit, process and relocated SDK tests

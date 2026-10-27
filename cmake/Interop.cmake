@@ -17,7 +17,7 @@ if(BUILD_TESTING AND RNC_INTEROP_TESTS)
     add_executable(test_rnc_interop ${PROJECT_SOURCE_DIR}/tests/test_interop.c)
     target_link_libraries(test_rnc_interop PRIVATE reticulum_c OpenSSL::Crypto)
     target_compile_options(test_rnc_interop PRIVATE -Wall -Wextra -Wpedantic -Werror)
-    foreach(role client server loss)
+    foreach(role client server loss large)
         add_test(NAME reticulum_live_${role} COMMAND ${CMAKE_COMMAND} -E env
             "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
             $<TARGET_FILE:test_rnc_interop> ${Python3_EXECUTABLE} "${RNC_REFERENCE_DIR}/Examples/Channel.py" ${role})
@@ -26,13 +26,19 @@ if(BUILD_TESTING AND RNC_INTEROP_TESTS)
     add_executable(test_rnc_mesh_interop ${PROJECT_SOURCE_DIR}/tests/test_interop.c)
     target_compile_definitions(test_rnc_mesh_interop PRIVATE RNC_ROUTED_INTEROP=1)
     target_link_libraries(test_rnc_mesh_interop PRIVATE reticulum_c OpenSSL::Crypto)
-    foreach(role client server loss)
+    foreach(role client server loss large)
         add_test(NAME reticulum_mesh_${role} COMMAND ${CMAKE_COMMAND} -E env
             "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
             $<TARGET_FILE:test_rnc_mesh_interop> ${Python3_EXECUTABLE} "${RNC_REFERENCE_DIR}/Examples/Channel.py" ${role})
         set_tests_properties(reticulum_mesh_${role} PROPERTIES TIMEOUT 30 LABELS "reticulum_interop;network")
     endforeach()
     find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+    add_executable(test_ipc_oracle ${PROJECT_SOURCE_DIR}/tests/test_ipc.c)
+    target_compile_definitions(test_ipc_oracle PRIVATE RNC_IPC_WITH_PYTHON=1)
+    target_link_libraries(test_ipc_oracle PRIVATE reticulum_c Python3::Python)
+    add_test(NAME reticulum_ipc_oracle COMMAND test_ipc_oracle oracle
+        "${RNC_REFERENCE_DIR}" "${RNC_INTEROP_PYTHONPATH}")
+    set_tests_properties(reticulum_ipc_oracle PROPERTIES LABELS "reticulum_interop;differential" TIMEOUT 30)
     add_executable(test_security_oracle ${PROJECT_SOURCE_DIR}/tests/test_security_oracle.c)
     target_link_libraries(test_security_oracle PRIVATE reticulum_c OpenSSL::Crypto Python3::Python)
     add_test(NAME reticulum_security_oracle COMMAND test_security_oracle

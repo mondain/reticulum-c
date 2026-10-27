@@ -293,7 +293,10 @@ int main(int argc, char **argv) {
         if (transport >= 0 && !h->server && !requested && strstr(oracle_log, "running, waiting for a connection")) {
             send_stdin("\n"); requested = 1;
         }
-        if (transport >= 0 && h->server && !h->started && now >= announce_at) {
+        /* RNS starts its TCP read thread before configuring IFAC fields.
+         * Socket acceptance alone is too early to send the first announce. */
+        if (transport >= 0 && h->server && !h->started && now >= announce_at &&
+            strstr(oracle_log, "System interfaces are ready")) {
             rnc_packet packet; time_t seconds = time(NULL); CHECK(seconds >= 0);
             CHECK(rnc_announce_create(&h->own, "example_utilities.channelexample", NULL, 0,
                 (uint64_t)seconds, random_bytes, NULL, &packet) == RNC_OK);

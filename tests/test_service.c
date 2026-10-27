@@ -9,6 +9,7 @@ typedef struct spair {
     uint8_t id[16];
     uint8_t *value;
     size_t size;
+    rnc_link_event bulk_advertisement;
 } spair;
 static void sinit(spair *s, size_t limit, rnc_service_policy policy) {
     memset(s, 0, sizeof(*s));
@@ -31,6 +32,8 @@ static void swire(spair *s, rnc_link *from, rnc_link *to, rnc_service *service) 
         else if (e.type == RNC_LINK_PACKET || e.type == RNC_LINK_RESOURCE_PACKET) {
             rnc_result r = rnc_service_input(service, &e, s->links.now);
             CHECK(r == RNC_OK || r == RNC_AGAIN);
+            if (service == s->b && e.type == RNC_LINK_PACKET && e.context == 2)
+                s->bulk_advertisement = e;
         }
     }
 }
@@ -164,6 +167,131 @@ static void replay_test(void) {
     CHECK(rnc_service_poll(s.b, &event, out, sizeof(out), &n) == RNC_AGAIN);
     sfinish(&s);
 }
+static void recovery_test(void) {
+    for (unsigned wrong_binding = 0; wrong_binding < 2; wrong_binding++) {
+        spair s;
+        uint8_t malformed[600] = {0x91}, hash[32], value[5003];
+        rnc_resource_options options = {0};
+        unsigned rejected = 0, completed = 0;
+        sinit(&s, 10000, RNC_SERVICE_ALLOW_ALL);
+        CHECK(rnc_hash(malformed, sizeof(malformed), hash) == RNC_OK);
+        hash[0] ^= (uint8_t)wrong_binding;
+        options.request_id = hash;
+        CHECK(rnc_resource_send(s.links.tx, malformed, sizeof(malformed), &options,
+                                s.links.now) == RNC_OK);
+        for (unsigned i = 0; i < 1000 && !completed; i++) {
+            rnc_link_event e;
+            rnc_resource_event re;
+            rnc_result result;
+            CHECK(rnc_resource_pump(s.links.tx, s.links.now) == RNC_OK);
+            result = rnc_service_pump(s.b, s.links.now);
+            if (result == (wrong_binding ? RNC_AUTH : RNC_PROTOCOL))
+                rejected++;
+            else
+                CHECK(result == RNC_OK);
+            while (rnc_link_poll(s.links.a, &e) == RNC_OK) {
+                if (e.type == RNC_LINK_SEND)
+                    CHECK(rnc_link_input(s.links.b, &e.packet, s.links.now) == RNC_OK);
+                else if (e.type == RNC_LINK_PACKET || e.type == RNC_LINK_RESOURCE_PACKET) {
+                    result = rnc_resource_input(s.links.tx, &e, s.links.now);
+                    CHECK(result == RNC_OK || result == RNC_AGAIN);
+                }
+            }
+            swire(&s, s.links.b, s.links.a, s.b);
+            while (rnc_resource_poll(s.links.tx, &re) == RNC_OK) {
+                CHECK(re.type != RNC_RESOURCE_FAILED);
+                if (re.type == RNC_RESOURCE_COMPLETE)
+                    completed++;
+            }
+            s.links.now++;
+        }
+        if (completed != 1 || rejected != 1)
+            fprintf(stderr, "bulk recovery: completed=%u rejected=%u binding=%u\n",
+                    completed, rejected, wrong_binding);
+        CHECK(completed == 1 && rejected == 1);
+        /* A rejected completed envelope must not poison the next pump or
+         * prevent a fresh bulk request on this same authenticated link. */
+        CHECK(rnc_service_pump(s.b, s.links.now) == RNC_OK);
+        value[0] = 0xc5;
+        value[1] = (uint8_t)(5000 >> 8);
+        value[2] = (uint8_t)5000;
+        for (size_t i = 3; i < sizeof(value); i++)
+            value[i] = (uint8_t)(i * 73u);
+        s.value = value;
+        s.size = sizeof(value);
+        CHECK(rnc_service_request(s.a, "/echo", value, sizeof(value), 1700000000,
+                                  s.links.now, 30000, s.id) == RNC_OK);
+        srun(&s, 2000);
+        CHECK(s.requests == 1 && s.responses == 1 && !s.timeouts);
+        sfinish(&s);
+    }
+}
+static void backpressure_test(void) {
+    spair s;
+    uint8_t nil = 0xc0, value[1003], out[sizeof(value)];
+    rnc_service_event event;
+    size_t n;
+    sinit(&s, 10000, RNC_SERVICE_ALLOW_NONE);
+    for (unsigned i = 0; i < RNC_SERVICE_EVENTS; i++) {
+        CHECK(rnc_service_request(s.a, "/echo", &nil, 1, 1700000000 + i,
+                                  s.links.now, 30000, s.id) == RNC_OK);
+        swire(&s, s.links.a, s.links.b, s.a);
+        swire(&s, s.links.b, s.links.a, s.b);
+    }
+    /* Retire the fixture's unanswered requests, keeping the receiver's full
+     * event queue and the same authenticated link. */
+    rnc_service_free(s.a);
+    s.a = rnc_service_new(s.links.a, 10000, random_bytes, &s.links.ar);
+    CHECK(s.a && rnc_service_register(s.b, "/echo", RNC_SERVICE_ALLOW_ALL,
+                                     NULL, 0) == RNC_OK);
+    value[0] = 0xc5;
+    value[1] = (uint8_t)(1000 >> 8);
+    value[2] = (uint8_t)1000;
+    memset(value + 3, 0x42, sizeof(value) - 3);
+    s.value = value;
+    s.size = sizeof(value);
+    CHECK(rnc_service_request(s.a, "/echo", value, sizeof(value), 1700000100,
+                              s.links.now, 30000, s.id) == RNC_OK);
+    for (unsigned i = 0; i < 100; i++) {
+        CHECK(rnc_service_pump(s.a, s.links.now) == RNC_OK);
+        CHECK(rnc_service_pump(s.b, s.links.now) == RNC_OK);
+        swire(&s, s.links.a, s.links.b, s.a);
+        swire(&s, s.links.b, s.links.a, s.b);
+        s.links.now++;
+    }
+    CHECK(rnc_service_poll(s.b, &event, out, sizeof(out), &n) == RNC_OK &&
+          event.type == RNC_SERVICE_DENIED);
+    s.denied++;
+    srun(&s, 1000);
+    CHECK(s.requests == 1 && s.responses == 1 && s.denied == RNC_SERVICE_EVENTS &&
+          !s.timeouts);
+    sfinish(&s);
+}
+static void bulk_replay_test(void) {
+    spair s;
+    uint8_t value[1003];
+    sinit(&s, 10000, RNC_SERVICE_ALLOW_ALL);
+    value[0] = 0xc5;
+    value[1] = (uint8_t)(1000 >> 8);
+    value[2] = (uint8_t)1000;
+    memset(value + 3, 0x42, sizeof(value) - 3);
+    s.value = value;
+    s.size = sizeof(value);
+    CHECK(rnc_service_request(s.a, "/echo", value, sizeof(value), 1700000000,
+                              s.links.now, 30000, s.id) == RNC_OK);
+    srun(&s, 1000);
+    CHECK(s.requests == 1 && s.responses == 1 && s.bulk_advertisement.context == 2);
+    /* A completed Resource advertisement may be repeated to recover a lost
+     * proof. Replaying the receipt must not acquire a new service RX binding. */
+    CHECK(rnc_service_input(s.b, &s.bulk_advertisement, s.links.now) == RNC_OK);
+    CHECK(rnc_service_pump(s.b, s.links.now) == RNC_OK);
+    s.responses = 0;
+    CHECK(rnc_service_request(s.a, "/echo", value, sizeof(value), 1700000001,
+                              s.links.now, 30000, s.id) == RNC_OK);
+    srun(&s, 1000);
+    CHECK(s.requests == 2 && s.responses == 1 && !s.timeouts);
+    sfinish(&s);
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     if (!strcmp(argv[1], "inline"))
@@ -176,6 +304,12 @@ int main(int argc, char **argv) {
         replay_test();
     else if (!strcmp(argv[1], "bounds"))
         bounds_test();
+    else if (!strcmp(argv[1], "recovery"))
+        recovery_test();
+    else if (!strcmp(argv[1], "backpressure"))
+        backpressure_test();
+    else if (!strcmp(argv[1], "bulk_replay"))
+        bulk_replay_test();
     else
         CHECK(0);
     return 0;

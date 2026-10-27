@@ -58,6 +58,42 @@ and shared SDK socket-free tests each pass 10/10, installed-package consumer
 21/21 and source-provider consumer 30/30. Those local selections supplement,
 and do not replace, the hosted network/leak results above.
 
-Windows, multi-hop routing, IFAC, radio hardware and other implementations remain
-unexecuted. The passing matrix certifies only the tested subset at these exact
+At that extraction snapshot, Windows, multi-hop routing, IFAC, radio hardware
+and other implementations remained unexecuted. The passing matrix covers only the tested subset at these exact
 revisions. It does not establish complete Reticulum stack or radio compatibility.
+
+## SDK 0.2 development branch
+
+The `feature/network-stack-parity` expansion has the following refreshed local
+Linux evidence (GCC 13.3, Clang 18.1.3, OpenSSL 3.0.13):
+
+| Configuration | Result | Scope |
+| --- | --- | --- |
+| Static SDK with pinned RNS oracle | 88/88 | Includes 14 actual network cases and 16 differential fixtures. |
+| Shared SDK | 62/62 | Includes POSIX host, daemon, TCP shared-instance and relocated package consumer. |
+| Compression disabled | 61/61 | Same native suite without BZip2/compression case. |
+| Clang ASAN/UBSAN/LSAN | 62/62 | Leak detection enabled, including native process/PTY/package cases. |
+| Pinned Leviculum C API | 65/65 | Native suite plus live initiator, responder and loss recovery. |
+
+RNS source remains pinned to `e40191b3d193b46b7f2d8a44424a594cd758839b`;
+Leviculum to `395edd42fbbffcdfb438fcd80afa17668459d331` (local oracle built
+with Rust 1.98.1). Both reference trees were verified unmodified by CMake.
+Direct and two-router RNS cases include exact bidirectional Channel payloads,
+signed receipts, loss recovery, close and a 1024-byte large-MTU exchange.
+A process case exercises unmodified RNS shared-instance status RPC.
+Resource/service/security/RPC fixtures embed CPython solely as a test oracle;
+they establish differential behavior after handshake, not live Resource/service
+sessions against the external node. The native routing suite additionally
+exercises encrypted in-memory multi-hop links and bounded routing state.
+
+The C harness now waits for RNS's interface-ready log before announcing: an
+earlier parallel run exposed RNS's TCP-read/IFAC-initialization startup race.
+Both direct/routed server cases subsequently passed ten consecutive executions.
+The suite also covers malformed bulk-envelope recovery, completed-advertisement
+proof replay followed by another bulk request, receive-queue backpressure,
+Resource allocation failure/reuse and distant map-hash collisions.
+
+Socket and leak tests require execution outside the restricted local sandbox.
+These results refresh Linux evidence only; hosted macOS/CI for the expansion,
+consumer mesh integration, actual radio, AutoInterface multicast deployment,
+Windows and additional implementations still need separate verification.

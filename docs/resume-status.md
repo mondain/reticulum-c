@@ -33,7 +33,7 @@ BZip2 is an optional compression dependency, enabled by default.
   interface IDs, atomic persistence/reload, native admin and TCP shared-instance
   data/RPC. RNS1.5.5 RPC is authenticated MessagePack, not legacy pickle.
 
-## Last verification
+## Prior checkpoint verification
 
 `out/parity-rns`: **63/63 socket-free CTests passed**. Includes 15 C/CPython
 post-handshake differential Resource/service cases and a security oracle against
@@ -56,7 +56,7 @@ ctest --test-dir out/parity-rns -LE network --output-on-failure
 Local sockets still fail EPERM. Actual TCP/UDP/daemon/RNS process tests must run
 in hosted CI. Do not count differential method fixtures as live network results.
 
-## Resume next
+## Original resume queue (see resumption record below)
 
 1. Finish the remaining confirmed review fix: `src/service.c` completed malformed
    bulk envelope errors leave `rx_ready`/`rx_binding` occupied. Release terminal
@@ -92,3 +92,35 @@ queued events, oversized HEADER2, duplicate path request amplification, service
 late/replayed responses and stale bulk completion, Resource quotas/duplicate HMU,
 serial idle reads under backpressure, UDP errors, checkpoint configuration
 binding and retry after partial state-write failure.
+
+## Resumption verification, 2026-10-27 UTC
+
+Resume items 1-4 are implemented and verified. The terminal malformed bulk
+envelope regression failed before the fix (same input rejected repeatedly),
+then completed a fresh valid bulk request/response after the fix. Independent
+review found a second receive-binding leak on completed advertisement replay;
+its checked-in regression also failed before the fix and now passes. Queued
+backpressure retains the completed input until the application drains events.
+Resource allocation/collision fixtures, host key/RNode/pressure/UDP modes,
+daemon/RPC/process modes, IPC differential oracle, and direct/routed large-MTU
+network cases are now registered in CMake. Shared test_stream explicitly links
+its direct BZip2 dependency. CI adds a compression-disabled Linux variant.
+
+Final Linux matrix: static+RNS 88/88; shared 62/62; compression disabled 61/61;
+Clang18 ASAN/UBSAN/LSAN with detect_leaks=1 62/62; Leviculum 65/65. These include
+actual loopback/process/PTY execution outside the sandbox. A parallel RNS run
+exposed the oracle's early TCP-read/IFAC configuration race. The C harness now
+waits for the interface-ready log; direct/routed server cases passed ten runs
+each and the complete RNS suite subsequently passed. Initial sandbox leak and
+socket failures are environmental and are not counted as passing runs. A Swift
+Clang17 compilation crashed under the sandbox; final sanitizer evidence uses
+system Clang18 and freshly rebuilt binaries.
+
+README/API/provenance/compatibility were updated in place. No new Markdown
+files were created.
+
+Next: publish the tested preparation branch as a draft PR and inspect hosted
+Linux/macOS/RNS/Leviculum results. Then integrate SDK0.2 in Chitchatr's separate
+feature/mesh-sdk worktree with routed room/client/bot examples and validate
+PACKAGE/SOURCE/FETCH plus codec/process tests. This checkpoint is not a release
+or a full-stack/hardware certification claim.
