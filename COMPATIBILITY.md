@@ -486,3 +486,38 @@ stdin, output limits, stderr, a missing executable, a timeout that stops
 row) and differential tests against the unmodified reference `rnx` in both
 directions (the reference runs a command on ours and mirrors its exit code; ours
 runs one on the reference listener).
+
+## Remote shell: reticulum-c-sh (`feature/rnsh`)
+
+`reticulum-c-sh` speaks rnsh protocol 1 over a Link Channel: destination
+`rnsh`, message types `0xac00` plus 0 (noop), 2 (window size), 3 (execute
+command), 4 (stream data, the Buffer stream format with stream ids 0 to 2),
+5 (version, `[software, 1]`), 6 (error) and 7 (command exited). The listener
+requires the initiator to identify, checks its allow list, exchanges versions,
+then runs the requested program (or its own default, `-C` refuses remote command
+lines, `-A` appends them to the default) on a pty when the initiator is a
+terminal and on pipes otherwise, as the reference does. It sets `TERM` and
+`RNS_REMOTE_IDENTITY`, applies the initial and later window sizes, relays
+stdin, stdout and stderr with EOF, and reports the exit code (the signal number
+for a signal). A command that ignores HUP and TERM is killed when the session
+ends. The initiator puts a terminal in raw mode, forwards `SIGWINCH`, and
+recognises `~.` after a newline (`~~` sends a tilde).
+
+Differences: there is no accept-anyone mode; line-interactive mode (`~L`) and
+the allowed-identities file are not implemented; stream data is sent
+uncompressed (compressed data from the reference is understood); the terminal
+attributes the initiator sends are not applied on the pty (the reference does
+not apply them either); the listener runs at most 4 sessions, announces only
+with `-b`, as the reference does. The reference's listener reports
+`waitpid() & 0xff`, which is 0 for any normal exit, so `-m` against a reference
+listener only mirrors signals.
+
+Evidence: process tests with the real binaries (a command, its exit code, stdin,
+stderr, the default program with the remote identity in the environment, 30000
+lines of output through the channel flow control, a pty for terminal clients,
+typing into the shell, the `~.` escape, a program that ignores HUP and TERM,
+an unlisted identity, `-C`), and differential tests against the unmodified
+reference rnsh in both directions. The reference listener's pipe mode fails in
+this test environment (its transmit path reports a bad file descriptor after it
+starts the child), so that direction runs the client on a terminal, which uses
+the reference's pty mode.

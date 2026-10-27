@@ -244,6 +244,10 @@ if(UNIX AND RNC_BUILD_HOST)
         target_link_libraries(reticulum-c-x PRIVATE reticulum_c_host OpenSSL::Crypto)
         target_compile_options(reticulum-c-x PRIVATE -Wall -Wextra -Wpedantic -Werror)
         install(TARGETS reticulum-c-x RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+        add_executable(reticulum-c-sh examples/reticulum_sh.c)
+        target_link_libraries(reticulum-c-sh PRIVATE reticulum_c_host OpenSSL::Crypto)
+        target_compile_options(reticulum-c-sh PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        install(TARGETS reticulum-c-sh RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif()
     if(BUILD_TESTING)
         add_executable(test_host tests/test_host.c)
@@ -268,6 +272,9 @@ if(UNIX AND RNC_BUILD_HOST)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
+            add_test(NAME reticulum_node_process_sh_tools COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> sh_tools $<TARGET_FILE:reticulum-c-sh>)
+            set_tests_properties(reticulum_node_process_sh_tools PROPERTIES LABELS network TIMEOUT 120)
             add_test(NAME reticulum_node_process_x_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> x_tools $<TARGET_FILE:reticulum-c-x>)
             set_tests_properties(reticulum_node_process_x_tools PROPERTIES LABELS network TIMEOUT 120)
@@ -299,6 +306,12 @@ if(UNIX AND RNC_BUILD_HOST)
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> x_ref
                     $<TARGET_FILE:reticulum-c-x> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_x_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
+                add_test(NAME reticulum_node_process_sh_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> sh_ref
+                    $<TARGET_FILE:reticulum-c-sh> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_sh_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
                 add_test(NAME reticulum_cli_id_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
