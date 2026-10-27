@@ -7,8 +7,7 @@ or a claim of complete reference compatibility.
 
 Repository: mondain/reticulum-c, branch `feature/network-stack-parity`.
 Base: `6536fb6f0a1889c428cf4cfd3f104541cc0a3e70`.
-Local worktree in the Chitchatr workspace: `out/reticulum-c-parity`.
-The original SDK checkout remains `out/reticulum-c-stage` on main.
+Use a dedicated worktree for this branch and preserve the main checkout.
 
 User approved implementing the audited gaps, in C. MIT; Linux primary, macOS
 second, Windows last. Protocol core remains sans I/O. External RNS, Leviculum,
@@ -42,15 +41,14 @@ multi-hop in-memory encrypted links. Some newly written tests are not registered
 in CMake yet. Independent agents additionally ran focused ASAN/UBSAN with leak
 checks disabled locally because process tracing is restricted.
 
-Reproduce from the Chitchatr workspace root:
+Reproduce from the SDK repository root with an external reference checkout:
 
 ```sh
-cmake -S out/reticulum-c-parity -B out/parity-rns \
-  -DRNC_INTEROP_TESTS=ON -DRNC_REFERENCE_DIR="$PWD/out/rns-reference" \
-  -DRNC_INTEROP_PYTHONPATH="$PWD/out/rns-oracle-deps" \
-  -DPython3_EXECUTABLE=/usr/bin/python3
-cmake --build out/parity-rns -j4
-ctest --test-dir out/parity-rns -LE network --output-on-failure
+cmake -S . -B build-rns \
+  -DRNC_INTEROP_TESTS=ON -DRNC_REFERENCE_DIR=/absolute/path/to/Reticulum \
+  -DPython3_EXECUTABLE=/absolute/path/to/oracle-venv/bin/python
+cmake --build build-rns -j4
+ctest --test-dir build-rns -LE network --output-on-failure
 ```
 
 Local sockets still fail EPERM. Actual TCP/UDP/daemon/RNS process tests must run
@@ -78,10 +76,7 @@ in hosted CI. Do not count differential method fixtures as live network results.
 5. Run normal/shared/compression-disabled/sanitizer suites, publish a draft
    preparation branch/PR, and inspect Linux/macOS/RNS/Leviculum hosted results.
    Update README/API/compatibility/provenance to match the final scope.
-6. Integrate SDK0.2 in Chitchatr's separate `feature/mesh-sdk` worktree, including
-   a usable routed room/client/bot example. Revalidate core, PACKAGE/SOURCE/FETCH,
-   codec tests and process sessions. No consumer code change has landed yet.
-7. Finish independent review and publish exact verified refs. Actual radio and
+6. Finish independent review and publish exact verified refs. Actual radio and
    Windows execution remain unverified; no hardware or full-stack claim.
 
 ## Review evidence already addressed
@@ -120,7 +115,6 @@ README/API/provenance/compatibility were updated in place. No new Markdown
 files were created.
 
 Next: publish the tested preparation branch as a draft PR and inspect hosted
-Linux/macOS/RNS/Leviculum results. Then integrate SDK0.2 in Chitchatr's separate
-feature/mesh-sdk worktree with routed room/client/bot examples and validate
-PACKAGE/SOURCE/FETCH plus codec/process tests. This checkpoint is not a release
-or a full-stack/hardware certification claim.
+Linux/macOS/RNS/Leviculum results. Continue standalone SDK example and package
+validation. This checkpoint is not a release or a full-stack/hardware
+certification claim.

@@ -3,7 +3,7 @@
 User authorization: proceed with implementations to eliminate the audited gaps.
 C11, MIT, Linux first, macOS second, Windows last. RNS 1.5.5 at
 `e40191b3d193b46b7f2d8a44424a594cd758839b` is the protocol baseline. Read the
-consumer's docs/reticulum-manual-1.5.5.txt before the reference source. External
+Reticulum Manual 1.5.5 in text form before the reference source. External
 implementations are test oracles only. No implementation is copied from them.
 
 ## Design and boundaries
@@ -13,7 +13,7 @@ randomness, packet delivery and persistence are supplied by the caller. New
 protocol modules are independently usable; hosts compose them with links.
 Bound all queues, tables and transfers; invalid/authentication-failing input
 must not commit output/state. RNC_AGAIN is retryable without partial consumption.
-Preserve existing default link behavior and Chitchatr compatibility.
+Preserve existing default link behavior and public API compatibility.
 
 The node engine owns interface IDs, destinations, announcement/path management,
 packet duplicate/reverse/link routing and caller-drained events. Host adapters
@@ -46,9 +46,9 @@ use the standard Channel system message 0xff00 and preserve EOF/backpressure.
   per-interface announce/airtime queues; a configurable daemon with persistent
   identities/network state and shared-instance/admin tools. Verify processes,
   reload/reconnect, private state permissions, malformed config/IPC and PTYs.
-- [ ] Integrate node/transfer APIs in standalone examples and Chitchatr without
-  introducing runtime dependencies on Python/Rust/other stacks. Verify the
-  installed SDK, SOURCE/PACKAGE/FETCH consumers and existing codec checks.
+- [ ] Integrate node/transfer APIs in standalone examples without introducing
+  runtime dependencies on Python/Rust/other stacks. Verify source integration
+  and the relocated installed SDK consumer.
 - [ ] Fresh independent review, Linux/macOS/shared/sanitizer CI, RNS/Leviculum
   and reticulum-rs interoperability matrix, exact tested publication refs.
 
@@ -90,5 +90,5 @@ existing callers working; version packaging will reflect actual ABI changes.
   maphashcollision search-window defect and malformedcompletedservice recovery
   stillunderinvestigation. FixImportant findings before publication.
 - Stillrequired: integrateIPC/daemon/tests/CMake; liveRNSlarge-MTUcase; published
-  Linux/static/shared/sanitizer/mac/RNS/Lev CI; Chitchatr0.2dependency+mesh example,
-  package/source/fetch/codec validation; currentdocs/featurematrix; exactrefs.
+  Linux/static/shared/sanitizer/mac/RNS/Lev CI; standalone SDK package/source
+  validation; currentdocs/featurematrix; exactrefs.
