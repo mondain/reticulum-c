@@ -128,7 +128,7 @@ if(BUILD_TESTING)
     endforeach()
     add_executable(test_security tests/test_security.c)
     target_link_libraries(test_security PRIVATE reticulum_c OpenSSL::Crypto)
-    foreach(case ifac ratchet group)
+    foreach(case ifac ratchet group ratchet_reference)
         add_test(NAME reticulum_security_${case} COMMAND test_security ${case})
     endforeach()
     add_executable(test_link_services tests/test_link_services.c)
@@ -331,6 +331,12 @@ if(UNIX AND RNC_BUILD_HOST)
                     $<TARGET_FILE:reticulum-c-sh> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_sh_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
+                add_executable(test_ratchet_reference tests/test_ratchet_reference.c)
+                target_link_libraries(test_ratchet_reference PRIVATE reticulum_c OpenSSL::Crypto)
+                add_test(NAME reticulum_ratchet_file_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_ratchet_reference> ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_ratchet_file_rns PROPERTIES LABELS "reticulum_interop" TIMEOUT 60)
                 add_test(NAME reticulum_cli_id_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-ctl> cli_id_ref

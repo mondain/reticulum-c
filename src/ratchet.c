@@ -107,6 +107,106 @@ rnc_result rnc_ratchets_import(rnc_ratchets *store,const rnc_identity *owner,
     store->last_rotation=last;store->last_time=seen;status=RNC_OK;
 done:OPENSSL_cleanse(public_keys,sizeof(public_keys));return status;
 }
+/* ---- the reference's ratchet file ---------------------------------------- */
+#define REF_PACKED_MAX (3u + 34u * RNC_RATCHET_MAX_KEYS)
+static size_t ref_bin_header(uint8_t *out, size_t n) {
+    if (n <= 0xffu) { out[0] = 0xc4; out[1] = (uint8_t)n; return 2; }
+    out[0] = 0xc5; out[1] = (uint8_t)(n >> 8); out[2] = (uint8_t)n; return 3;
+}
+rnc_result rnc_ratchets_export_reference(const rnc_ratchets *store, const rnc_identity *owner,
+    uint8_t *output, size_t capacity, size_t *written) {
+    uint8_t packed[REF_PACKED_MAX], signature[64];
+    size_t n = 0, i, o = 0;
+    rnc_result status;
+    if (written) *written = 0;
+    if (!valid(store) || !owner || !owner->has_private || !output || !written ||
+        CRYPTO_memcmp(store->owner_hash, owner->hash, 16)) return RNC_INVALID;
+    if (store->count < 16) packed[n++] = (uint8_t)(0x90u | store->count);
+    else { packed[n++] = 0xdc; packed[n++] = (uint8_t)(store->count >> 8); packed[n++] = (uint8_t)store->count; }
+    for (i = 0; i < store->count; i++) {
+        packed[n++] = 0xc4; packed[n++] = 32;
+        memcpy(packed + n, store->keys[i].private_key, 32); n += 32;
+    }
+    if (capacity < 1u + 10u + 2u + 64u + 9u + 3u + n) { OPENSSL_cleanse(packed, sizeof(packed)); return RNC_NO_SPACE; }
+    status = rnc_identity_sign(owner, packed, n, signature);
+    if (status == RNC_OK) {
+        output[o++] = 0x82;
+        output[o++] = 0xa9; memcpy(output + o, "signature", 9); o += 9;
+        o += ref_bin_header(output + o, 64); memcpy(output + o, signature, 64); o += 64;
+        output[o++] = 0xa8; memcpy(output + o, "ratchets", 8); o += 8;
+        o += ref_bin_header(output + o, n); memcpy(output + o, packed, n); o += n;
+        *written = o;
+    }
+    OPENSSL_cleanse(packed, sizeof(packed));
+    return status;
+}
+/* a bin value at *p; returns its data and length, 0 on a malformed one */
+static int ref_bin(const uint8_t *data, size_t size, size_t *at, const uint8_t **out, size_t *n) {
+    size_t head;
+    if (*at >= size) return 0;
+    if (data[*at] == 0xc4) { if (*at + 2 > size) return 0; *n = data[*at + 1]; head = 2; }
+    else if (data[*at] == 0xc5) { if (*at + 3 > size) return 0; *n = (size_t)data[*at + 1] * 256u + data[*at + 2]; head = 3; }
+    else return 0;
+    if (*n > size - *at - head) return 0;
+    *out = data + *at + head;
+    *at += head + *n;
+    return 1;
+}
+rnc_result rnc_ratchets_import_reference(rnc_ratchets *store, const rnc_identity *owner,
+    const uint8_t *file, size_t size, uint64_t unix_seconds) {
+    const uint8_t *signature = NULL, *packed = NULL;
+    size_t at = 1, sig_n = 0, packed_n = 0, count, i, j, k;
+    uint8_t public_keys[RNC_RATCHET_MAX_KEYS][32];
+    rnc_result status = RNC_PROTOCOL;
+    if (!valid(store) || !owner || !file || !size) return RNC_INVALID;
+    if (size < 20u || file[0] != 0x82) return RNC_PROTOCOL;
+    for (k = 0; k < 2; k++) {
+        size_t klen;
+        if (at >= size || (file[at] & 0xe0u) != 0xa0u) return RNC_PROTOCOL;
+        klen = file[at] & 0x1fu;
+        if (at + 1 + klen > size) return RNC_PROTOCOL;
+        if (klen == 9 && !memcmp(file + at + 1, "signature", 9)) {
+            at += 1 + klen;
+            if (signature || !ref_bin(file, size, &at, &signature, &sig_n) || sig_n != 64) return RNC_PROTOCOL;
+        } else if (klen == 8 && !memcmp(file + at + 1, "ratchets", 8)) {
+            at += 1 + klen;
+            if (packed || !ref_bin(file, size, &at, &packed, &packed_n)) return RNC_PROTOCOL;
+        } else return RNC_PROTOCOL;
+    }
+    if (at != size || !signature || !packed) return RNC_PROTOCOL;
+    if (CRYPTO_memcmp(owner->hash, store->owner_hash, 16)) return RNC_AUTH;
+    if (rnc_identity_verify(owner, packed, packed_n, signature) != RNC_OK) return RNC_AUTH;
+    /* the packed list: fixarray or array16, then 32 byte bins */
+    at = 0;
+    if (!packed_n) return RNC_PROTOCOL;
+    if ((packed[0] & 0xf0u) == 0x90u) { count = packed[0] & 0x0fu; at = 1; }
+    else if (packed[0] == 0xdc && packed_n >= 3) { count = (size_t)packed[1] * 256u + packed[2]; at = 3; }
+    else return RNC_PROTOCOL;
+    if (count > RNC_RATCHET_MAX_KEYS || packed_n != at + 34u * count) return RNC_PROTOCOL;
+    for (i = 0; i < count; i++)
+        if (packed[at + 34u * i] != 0xc4 || packed[at + 34u * i + 1] != 32) return RNC_PROTOCOL;
+    if (count > store->capacity) return RNC_NO_SPACE;
+    if (store->count && unix_seconds < store->last_time) return RNC_AUTH;
+    memset(public_keys, 0, sizeof(public_keys));
+    for (i = 0; i < count; i++) {
+        if (!public_key(packed + at + 34u * i + 2u, public_keys[i])) { status = RNC_CRYPTO; goto done; }
+        for (j = 0; j < i; j++)
+            if (!CRYPTO_memcmp(public_keys[j], public_keys[i], 32)) { status = RNC_PROTOCOL; goto done; }
+    }
+    OPENSSL_cleanse(store->keys, store->capacity * sizeof(*store->keys));
+    for (i = 0; i < count; i++) {
+        store->keys[i].created_at = 0;
+        memcpy(store->keys[i].private_key, packed + at + 34u * i + 2u, 32);
+        memcpy(store->keys[i].public_key, public_keys[i], 32);
+    }
+    store->count = count;
+    store->last_rotation = 0;
+    store->last_time = unix_seconds;
+    status = RNC_OK;
+done:
+    OPENSSL_cleanse(public_keys, sizeof(public_keys));
+    return status;
+}
 rnc_result rnc_ratchet_encrypt(const rnc_identity *destination,
     const uint8_t ratchet_public[32],const void *data,size_t size,
     rnc_random_fn random,void *context,uint8_t *output,size_t capacity,size_t *written) {

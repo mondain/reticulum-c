@@ -81,7 +81,7 @@ Largest gaps, in priority order:
 | --- | --- | --- |
 | IMPL | `expand_name`, `hash_from_name_and_identity`, announce, path response, request handlers (ALLOW_NONE/ALL/LIST/identified), GROUP keys | |
 | IMPL | `accepts_links` toggle, `set_max_request_size`, `set/clear_default_app_data` | `rnc_node_set_accepts_links`, `rnc_responder_set_max_request_size` / `rnc_service_set_max_request_size` (inline requests and Resource-delivered ones), `rnc_node_set_destination_data` (NULL, 0 clears) |
-| PART | `enable_ratchets` persistence | Ratchet persistence is caller-owned |
+| IMPL | `enable_ratchets` persistence | `rnc_ratchets_export_reference` / `rnc_ratchets_import_reference` read and write the reference's ratchet file (signed MessagePack list of private keys); the host owns the file itself. Verified against the reference in both directions |
 | IMPL | `proof_strategy`, `set_proof_requested_callback` | `rnc_node_set_proof_strategy` (NONE, APP, ALL); with APP the packet arrives as a LOCAL event and the application answers with `rnc_node_prove`, which is the callback's decision |
 
 ### Packet / PacketReceipt

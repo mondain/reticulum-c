@@ -100,6 +100,61 @@ static void ratchet_tests(void) {
      CHECK(rnc_ratchets_import(&copy,&pub,record,record_size)==RNC_OK&&!memcmp(large,restored,RNC_RATCHET_MAX_KEYS*sizeof(*large)));
      rnc_ratchets_clear(&store);rnc_ratchets_clear(&copy);free(large);free(restored);}
 }
+/* The reference's ratchet file: {"signature": Ed25519 over the packed list,
+ * "ratchets": msgpack list of the 32 byte private keys, newest first}. */
+static void ratchet_reference_tests(void) {
+    rnc_identity id,other;rnc_ratchet_key keys[6],back[6];rnc_ratchets store,copy;
+    uint8_t random=7,file[2048],bad[2048],pub[32];size_t n,i;
+    owner(&id,3);owner(&other,90);
+    CHECK(rnc_ratchets_init(&store,&id,keys,6,10)==RNC_OK);
+    for(i=0;i<3;i++)CHECK(rnc_ratchets_rotate(&store,100+i*10,rng,&random)==RNC_OK);
+    CHECK(store.count==3);
+    CHECK(rnc_ratchets_export_reference(&store,&id,file,sizeof(file),&n)==RNC_OK);
+    /* layout: fixmap(2), "signature" bin8(64), "ratchets" bin8(len), fixarray(3) of bin8(32) */
+    CHECK(file[0]==0x82&&file[1]==0xa9&&!memcmp(file+2,"signature",9)&&file[11]==0xc4&&file[12]==64);
+    CHECK(file[77]==0xa8&&!memcmp(file+78,"ratchets",8)&&file[86]==0xc4&&file[87]==3*34+1);
+    CHECK(file[88]==0x93&&file[89]==0xc4&&file[90]==32&&!memcmp(file+91,keys[0].private_key,32));
+    CHECK(n==88u+3u*34u+1u);
+    CHECK(rnc_identity_verify(&id,file+88,3*34+1,file+13)==RNC_OK);
+    /* a store restored from it has the same keys, newest first, due for rotation */
+    CHECK(rnc_ratchets_init(&copy,&id,back,6,10)==RNC_OK);
+    CHECK(rnc_ratchets_import_reference(&copy,&id,file,n,500)==RNC_OK&&copy.count==3);
+    for(i=0;i<3;i++)CHECK(!memcmp(back[i].private_key,keys[i].private_key,32)&&!memcmp(back[i].public_key,keys[i].public_key,32));
+    CHECK(rnc_ratchets_public(&copy,pub)==RNC_OK&&!memcmp(pub,keys[0].public_key,32));
+    CHECK(rnc_ratchets_rotate(&copy,501,rng,&random)==RNC_OK&&copy.count==4&&!memcmp(back[1].private_key,keys[0].private_key,32));
+    /* an empty list is a valid file too */
+    CHECK(rnc_ratchets_init(&store,&id,keys,6,10)==RNC_OK);
+    CHECK(rnc_ratchets_export_reference(&store,&id,file,sizeof(file),&n)==RNC_OK&&n==88u+1u);
+    CHECK(rnc_ratchets_init(&copy,&id,back,6,10)==RNC_OK&&rnc_ratchets_import_reference(&copy,&id,file,n,500)==RNC_OK&&copy.count==0);
+    /* more than 15 keys use an array16 */
+    {
+        rnc_ratchet_key many[40],restored[40];rnc_ratchets big,again;uint64_t counter=1;
+        CHECK(rnc_ratchets_init(&big,&id,many,40,1)==RNC_OK);
+        for(i=0;i<20;i++)CHECK(rnc_ratchets_rotate(&big,100+i*2,counter_rng,&counter)==RNC_OK);
+        CHECK(big.count==20);
+        CHECK(rnc_ratchets_export_reference(&big,&id,file,sizeof(file),&n)==RNC_OK);
+        CHECK(file[86]==0xc5&&file[89]==0xdc&&file[90]==0&&file[91]==20);
+        CHECK(rnc_ratchets_init(&again,&id,restored,40,1)==RNC_OK&&rnc_ratchets_import_reference(&again,&id,file,n,500)==RNC_OK&&again.count==20&&!memcmp(restored[19].private_key,many[19].private_key,32));
+    }
+    /* refusals: wrong owner, damaged signature or keys, bad framing, too little room */
+    CHECK(rnc_ratchets_init(&store,&id,keys,6,10)==RNC_OK&&rnc_ratchets_rotate(&store,100,rng,&random)==RNC_OK);
+    CHECK(rnc_ratchets_export_reference(&store,&id,file,sizeof(file),&n)==RNC_OK);
+    CHECK(rnc_ratchets_export_reference(&store,&other,file+1000,1000,&i)==RNC_INVALID);
+    CHECK(rnc_ratchets_export_reference(&store,&id,bad,10,&i)==RNC_NO_SPACE);
+    CHECK(rnc_ratchets_init(&copy,&other,back,6,10)==RNC_OK&&rnc_ratchets_import_reference(&copy,&other,file,n,500)==RNC_AUTH);
+    CHECK(rnc_ratchets_init(&copy,&id,back,6,10)==RNC_OK);
+    for(i=0;i<n;i++) {memcpy(bad,file,n);bad[i]^=1;CHECK(rnc_ratchets_import_reference(&copy,&id,bad,n,500)!=RNC_OK&&copy.count==0);}
+    CHECK(rnc_ratchets_import_reference(&copy,&id,file,n-1,500)!=RNC_OK&&rnc_ratchets_import_reference(&copy,&id,file,0,500)==RNC_INVALID);
+    /* a file with more keys than the store holds */
+    {
+        rnc_ratchet_key two[2];rnc_ratchets tiny;
+        CHECK(rnc_ratchets_init(&tiny,&id,two,2,10)==RNC_OK);
+        CHECK(rnc_ratchets_init(&store,&id,keys,6,10)==RNC_OK);
+        for(i=0;i<3;i++)CHECK(rnc_ratchets_rotate(&store,100+i*10,rng,&random)==RNC_OK);
+        CHECK(rnc_ratchets_export_reference(&store,&id,file,sizeof(file),&n)==RNC_OK);
+        CHECK(rnc_ratchets_import_reference(&tiny,&id,file,n,500)==RNC_NO_SPACE);
+    }
+}
 static void group_tests(void) {
     rnc_group_key a,b,saved;uint8_t random=3,token[500],plain[500],rawkey[64],hash[32],dest[16];size_t n,w,i;
     CHECK(rnc_group_generate(&a,rng,&random)==RNC_OK);memcpy(rawkey,a.bytes,64);CHECK(rnc_group_import(&b,rawkey)==RNC_OK);
@@ -113,4 +168,4 @@ static void group_tests(void) {
     CHECK(rnc_plain_destination_hash("rnstransport.path.request",dest)==RNC_OK);CHECK(rnc_hash("rnstransport.path.request",25,hash)==RNC_OK);CHECK(rnc_hash(hash,10,plain)==RNC_OK&&!memcmp(dest,plain,16));
     rnc_group_clear(&a);rnc_group_clear(&b);CHECK(zero(&a,sizeof(a))&&zero(&b,sizeof(b)));
 }
-int main(int argc,char **argv) {if(argc!=2)return 2;if(!strcmp(argv[1],"ifac"))ifac_tests();else if(!strcmp(argv[1],"ratchet"))ratchet_tests();else if(!strcmp(argv[1],"group"))group_tests();else return 2;return 0;}
+int main(int argc,char **argv) {if(argc!=2)return 2;if(!strcmp(argv[1],"ifac"))ifac_tests();else if(!strcmp(argv[1],"ratchet"))ratchet_tests();else if(!strcmp(argv[1],"ratchet_reference"))ratchet_reference_tests();else if(!strcmp(argv[1],"group"))group_tests();else return 2;return 0;}

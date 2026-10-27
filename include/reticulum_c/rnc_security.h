@@ -74,6 +74,19 @@ rnc_result rnc_ratchets_export(const rnc_ratchets *store, const rnc_identity *ow
     uint8_t *output, size_t capacity, size_t *written);
 rnc_result rnc_ratchets_import(rnc_ratchets *store, const rnc_identity *owner,
     const uint8_t *record, size_t size);
+/* The reference's ratchet file (Destination.enable_ratchets): a MessagePack map
+ * {"signature": Ed25519 signature by the owner over the packed list, "ratchets":
+ * the packed list of the 32 byte private keys, newest first}. The file carries
+ * no timestamps: an imported store has every key at time 0 and its next
+ * rotation is due at once, as the reference's first announce after a restart.
+ * Import verifies the owner's signature and framing before replacing state;
+ * RNC_NO_SPACE if the store cannot hold the keys, RNC_AUTH for a wrong owner,
+ * a bad signature or a time rollback. unix_seconds is the store's new time. */
+rnc_result rnc_ratchets_export_reference(const rnc_ratchets *store,
+    const rnc_identity *owner, uint8_t *output, size_t capacity, size_t *written);
+rnc_result rnc_ratchets_import_reference(rnc_ratchets *store,
+    const rnc_identity *owner, const uint8_t *file, size_t size,
+    uint64_t unix_seconds);
 /* Encrypted wire tokens use the owner's identity hash as HKDF salt. */
 rnc_result rnc_ratchet_encrypt(const rnc_identity *destination,
     const uint8_t ratchet_public[32], const void *data, size_t size,
