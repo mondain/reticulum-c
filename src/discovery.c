@@ -153,30 +153,28 @@ rnc_result rnc_discovery_pack(const rnc_discovery_info *info, uint8_t *output,
   }
   return RNC_OK;
 }
-rnc_result rnc_discovery_announce_data(const rnc_discovery_info *info,
-                                       unsigned stamp_cost,
-                                       const rnc_identity *encrypt_to,
-                                       rnc_random_fn random, void *random_context,
-                                       uint8_t *output, size_t capacity,
-                                       size_t *written) {
-  uint8_t packed[RNC_DISCOVERY_PAYLOAD_MAX], infohash[32], body[RNC_DISCOVERY_PAYLOAD_MAX];
-  size_t n = 0, body_size, encrypted = 0;
+rnc_result rnc_discovery_stamp_material(const uint8_t *packed,
+                                        size_t packed_size, uint8_t material[32]) {
+  if (!packed || !packed_size || !material)
+    return RNC_INVALID;
+  return rnc_hash(packed, packed_size, material) == RNC_OK ? RNC_OK : RNC_CRYPTO;
+}
+rnc_result rnc_discovery_seal(const uint8_t *packed, size_t packed_size,
+                              const uint8_t stamp[RNC_STAMP_SIZE],
+                              const rnc_identity *encrypt_to, rnc_random_fn random,
+                              void *random_context, uint8_t *output,
+                              size_t capacity, size_t *written) {
+  uint8_t body[RNC_DISCOVERY_PAYLOAD_MAX];
+  size_t body_size, encrypted = 0;
   rnc_result r;
   if (written)
     *written = 0;
-  if (!info || !output || !written || !random)
+  if (!packed || !packed_size || packed_size + RNC_STAMP_SIZE > sizeof(body) ||
+      !stamp || !output || !written || (encrypt_to && !random))
     return RNC_INVALID;
-  r = rnc_discovery_pack(info, packed, sizeof(packed) - RNC_STAMP_SIZE, &n);
-  if (r != RNC_OK)
-    return r;
-  if (rnc_hash(packed, n, infohash) != RNC_OK)
-    return RNC_CRYPTO;
-  memcpy(body, packed, n);
-  r = rnc_stamp_generate(infohash, 32, RNC_DISCOVERY_STAMP_ROUNDS, stamp_cost,
-                         random, random_context, 0, body + n);
-  if (r != RNC_OK)
-    return r;
-  body_size = n + RNC_STAMP_SIZE;
+  memcpy(body, packed, packed_size);
+  memcpy(body + packed_size, stamp, RNC_STAMP_SIZE);
+  body_size = packed_size + RNC_STAMP_SIZE;
   if (encrypt_to) {
     uint8_t token[RNC_DISCOVERY_PAYLOAD_MAX + 128];
     r = rnc_identity_encrypt(encrypt_to, body, body_size, random,
@@ -196,6 +194,30 @@ rnc_result rnc_discovery_announce_data(const rnc_discovery_info *info,
   memcpy(output + 1, body, body_size);
   *written = 1 + body_size;
   return RNC_OK;
+}
+rnc_result rnc_discovery_announce_data(const rnc_discovery_info *info,
+                                       unsigned stamp_cost,
+                                       const rnc_identity *encrypt_to,
+                                       rnc_random_fn random, void *random_context,
+                                       uint8_t *output, size_t capacity,
+                                       size_t *written) {
+  uint8_t packed[RNC_DISCOVERY_PAYLOAD_MAX], material[32], stamp[RNC_STAMP_SIZE];
+  size_t n = 0;
+  rnc_result r;
+  if (written)
+    *written = 0;
+  if (!info || !output || !written || !random)
+    return RNC_INVALID;
+  r = rnc_discovery_pack(info, packed, sizeof(packed) - RNC_STAMP_SIZE, &n);
+  if (r == RNC_OK)
+    r = rnc_discovery_stamp_material(packed, n, material);
+  if (r == RNC_OK)
+    r = rnc_stamp_generate(material, 32, RNC_DISCOVERY_STAMP_ROUNDS, stamp_cost,
+                           random, random_context, 0, stamp);
+  if (r != RNC_OK)
+    return r;
+  return rnc_discovery_seal(packed, n, stamp, encrypt_to, random,
+                            random_context, output, capacity, written);
 }
 /* ---- parsing ---- */
 static int take_text(rmp *r, char *out, size_t capacity) {

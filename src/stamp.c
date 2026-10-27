@@ -109,15 +109,57 @@ int rnc_stamp_valid(const uint8_t *workblock, size_t size,
     return 0;
   return meets_cost(hash, cost);
 }
+rnc_result rnc_stamp_find(const uint8_t *workblock, size_t workblock_size,
+                          unsigned cost, uint8_t cursor[RNC_STAMP_SIZE],
+                          uint64_t attempts, uint8_t stamp[RNC_STAMP_SIZE]) {
+  EVP_MD_CTX *base, *work;
+  uint8_t candidate[RNC_STAMP_SIZE], hash[32];
+  uint64_t attempt;
+  unsigned i;
+  rnc_result r = RNC_AGAIN;
+  if (!workblock || !workblock_size || cost > 256 || !cursor || !stamp)
+    return RNC_INVALID;
+  memcpy(candidate, cursor, sizeof(candidate));
+  /* hash the workblock once; each attempt only adds the stamp */
+  base = EVP_MD_CTX_new();
+  work = EVP_MD_CTX_new();
+  if (!base || !work || EVP_DigestInit_ex(base, EVP_sha256(), NULL) != 1 ||
+      EVP_DigestUpdate(base, workblock, workblock_size) != 1) {
+    EVP_MD_CTX_free(base);
+    EVP_MD_CTX_free(work);
+    return RNC_CRYPTO;
+  }
+  for (attempt = 0; attempt < attempts; attempt++) {
+    unsigned n = 0;
+    if (EVP_MD_CTX_copy_ex(work, base) != 1 ||
+        EVP_DigestUpdate(work, candidate, sizeof(candidate)) != 1 ||
+        EVP_DigestFinal_ex(work, hash, &n) != 1 || n != 32) {
+      r = RNC_CRYPTO;
+      break;
+    }
+    /* count up through the low 8 bytes (big endian) */
+    if (meets_cost(hash, cost)) {
+      memcpy(stamp, candidate, sizeof(candidate));
+      r = RNC_OK;
+    }
+    for (i = 0; i < 8; i++)
+      if (++candidate[31 - i])
+        break;
+    if (r == RNC_OK)
+      break;
+  }
+  if (r == RNC_OK || r == RNC_AGAIN)
+    memcpy(cursor, candidate, sizeof(candidate));
+  EVP_MD_CTX_free(base);
+  EVP_MD_CTX_free(work);
+  return r;
+}
 rnc_result rnc_stamp_generate(const void *material, size_t size, unsigned rounds,
                               unsigned cost, rnc_random_fn random,
                               void *random_context, uint64_t max_attempts,
                               uint8_t stamp[RNC_STAMP_SIZE]) {
-  uint8_t *block, candidate[RNC_STAMP_SIZE], hash[32];
+  uint8_t *block, cursor[RNC_STAMP_SIZE], found[RNC_STAMP_SIZE];
   size_t block_size;
-  EVP_MD_CTX *base, *work;
-  uint64_t attempt;
-  unsigned i;
   rnc_result r;
   if (!material || !size || !rounds || rounds > RNC_STAMP_MAX_ROUNDS ||
       cost > 256 || !random || !stamp)
@@ -130,44 +172,15 @@ rnc_result rnc_stamp_generate(const void *material, size_t size, unsigned rounds
   r = rnc_stamp_workblock(material, size, rounds, block,
                           (size_t)rounds * RNC_STAMP_ROUND_SIZE, &block_size);
   if (r == RNC_OK)
-    r = random(random_context, candidate, sizeof(candidate));
-  if (r != RNC_OK) {
-    free(block);
-    return r;
+    r = random(random_context, cursor, sizeof(cursor));
+  if (r == RNC_OK) {
+    r = rnc_stamp_find(block, block_size, cost, cursor, max_attempts, found);
+    if (r == RNC_OK)
+      memcpy(stamp, found, sizeof(found));
+    else if (r == RNC_AGAIN)
+      r = RNC_TIMEOUT;
   }
-  /* hash the workblock once; each attempt only adds the stamp */
-  base = EVP_MD_CTX_new();
-  work = EVP_MD_CTX_new();
-  if (!base || !work || EVP_DigestInit_ex(base, EVP_sha256(), NULL) != 1 ||
-      EVP_DigestUpdate(base, block, block_size) != 1) {
-    EVP_MD_CTX_free(base);
-    EVP_MD_CTX_free(work);
-    OPENSSL_cleanse(block, block_size);
-    free(block);
-    return RNC_CRYPTO;
-  }
-  r = RNC_TIMEOUT;
-  for (attempt = 0; attempt < max_attempts; attempt++) {
-    unsigned n = 0;
-    if (EVP_MD_CTX_copy_ex(work, base) != 1 ||
-        EVP_DigestUpdate(work, candidate, sizeof(candidate)) != 1 ||
-        EVP_DigestFinal_ex(work, hash, &n) != 1 || n != 32) {
-      r = RNC_CRYPTO;
-      break;
-    }
-    if (meets_cost(hash, cost)) {
-      memcpy(stamp, candidate, sizeof(candidate));
-      r = RNC_OK;
-      break;
-    }
-    /* count up through the low 8 bytes (big endian) */
-    for (i = 0; i < 8; i++)
-      if (++candidate[31 - i])
-        break;
-  }
-  EVP_MD_CTX_free(base);
-  EVP_MD_CTX_free(work);
-  OPENSSL_cleanse(block, block_size);
+  OPENSSL_cleanse(block, (size_t)rounds * RNC_STAMP_ROUND_SIZE);
   free(block);
   return r;
 }

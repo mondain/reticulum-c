@@ -29,6 +29,13 @@ rnc_result rnc_stamp_generate(const void *material, size_t size, unsigned rounds
                               unsigned cost, rnc_random_fn random,
                               void *random_context, uint64_t max_attempts,
                               uint8_t stamp[RNC_STAMP_SIZE]);
+/* Resumable search for event loops: tries up to `attempts` stamps starting at
+ * *cursor (any 32 bytes; the low 8 count up) and advances it. RNC_OK with the
+ * stamp when one meets `cost`, RNC_AGAIN when this slice found none. The
+ * workblock is built once by the caller with rnc_stamp_workblock. */
+rnc_result rnc_stamp_find(const uint8_t *workblock, size_t workblock_size,
+                          unsigned cost, uint8_t cursor[RNC_STAMP_SIZE],
+                          uint64_t attempts, uint8_t stamp[RNC_STAMP_SIZE]);
 #ifdef __cplusplus
 }
 #endif

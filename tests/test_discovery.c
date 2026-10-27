@@ -319,6 +319,32 @@ static void config_entries(void) {
         strstr(out, "target_host = example.org"));
   CHECK(rnc_discovery_config_entry(&i, 1, out, 20) == RNC_NO_SPACE);
 }
+static void sealing(void) {
+  uint8_t packed[512], material[32], stamp[32], cursor[32] = {0}, data[1024],
+          *block, out[32];
+  size_t n, written, work;
+  unsigned value;
+  rnc_discovery_info info, got;
+  rnc_result r;
+  backbone_info(&info);
+  CHECK(rnc_discovery_pack(&info, packed, sizeof(packed), &n) == RNC_OK);
+  CHECK(rnc_discovery_stamp_material(packed, n, material) == RNC_OK);
+  block = malloc(256u * RNC_DISCOVERY_STAMP_ROUNDS);
+  CHECK(block);
+  CHECK(rnc_stamp_workblock(material, 32, RNC_DISCOVERY_STAMP_ROUNDS, block,
+                            256u * RNC_DISCOVERY_STAMP_ROUNDS, &work) == RNC_OK);
+  do
+    r = rnc_stamp_find(block, work, 10, cursor, 500, stamp);
+  while (r == RNC_AGAIN);
+  CHECK(r == RNC_OK);
+  free(block);
+  CHECK(rnc_discovery_seal(packed, n, stamp, NULL, rng, NULL, data,
+                           sizeof(data), &written) == RNC_OK);
+  CHECK(rnc_discovery_parse(data, written, 10, NULL, &got, out, &value) ==
+        RNC_OK && !memcmp(out, stamp, 32) && !strcmp(got.name, "My Backbone"));
+  CHECK(rnc_discovery_seal(packed, n, stamp, NULL, rng, NULL, data, 10,
+                           &written) == RNC_NO_SPACE && written == 0);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "packing"))
@@ -329,6 +355,8 @@ int main(int argc, char **argv) {
     encryption();
   else if (!strcmp(argv[1], "helpers"))
     helpers();
+  else if (!strcmp(argv[1], "seal"))
+    sealing();
   else if (!strcmp(argv[1], "record_pack"))
     record_pack();
   else if (!strcmp(argv[1], "record_unpack"))

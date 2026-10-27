@@ -47,6 +47,17 @@ rnc_result rnc_discovery_announce_data(const rnc_discovery_info *info,
                                        rnc_random_fn random, void *random_context,
                                        uint8_t *output, size_t capacity,
                                        size_t *written);
+/* Final step of announce_data for callers that stamp in slices: `packed` is
+ * the map from rnc_discovery_pack, `stamp` found over SHA256(packed) with
+ * RNC_DISCOVERY_STAMP_ROUNDS rounds (see rnc_discovery_stamp_material). */
+rnc_result rnc_discovery_seal(const uint8_t *packed, size_t packed_size,
+                              const uint8_t stamp[RNC_STAMP_SIZE],
+                              const rnc_identity *encrypt_to, rnc_random_fn random,
+                              void *random_context, uint8_t *output,
+                              size_t capacity, size_t *written);
+/* The stamp is searched over a workblock built from SHA256(packed). */
+rnc_result rnc_discovery_stamp_material(const uint8_t *packed, size_t packed_size,
+                                        uint8_t material[32]);
 /* Validates and decodes announce app data. RNC_OK: well formed with a stamp of
  * at least required_value (*value and stamp are filled). RNC_AUTH: stamp below
  * the requirement. RNC_STATE: encrypted but no network identity with a private

@@ -93,6 +93,25 @@ static void generation(void) {
   CHECK(rnc_stamp_generate(material, 32, 0, 12, rng, NULL, 10, stamp) ==
         RNC_INVALID);
 }
+/* A slice-wise search finds a valid stamp and moves its cursor. */
+static void find(void) {
+  uint8_t material[32] = {5}, cursor[32] = {0}, first[32], stamp[32], block[256 * 20];
+  size_t written;
+  unsigned slices = 0;
+  rnc_result r;
+  CHECK(rnc_stamp_workblock(material, 32, 20, block, sizeof(block), &written) ==
+        RNC_OK);
+  memcpy(first, cursor, 32);
+  do {
+    r = rnc_stamp_find(block, written, 12, cursor, 64, stamp);
+    CHECK(r == RNC_OK || r == RNC_AGAIN);
+    CHECK(++slices < 100000);
+  } while (r == RNC_AGAIN);
+  CHECK(slices > 1 && memcmp(cursor, first, 32)); /* needed several slices */
+  CHECK(rnc_stamp_valid(block, written, stamp, 12));
+  CHECK(rnc_stamp_find(block, written, 300, cursor, 4, stamp) == RNC_INVALID);
+  CHECK(rnc_stamp_find(NULL, written, 12, cursor, 4, stamp) == RNC_INVALID);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "workblock"))
@@ -101,6 +120,8 @@ int main(int argc, char **argv) {
     value_and_validity();
   else if (!strcmp(argv[1], "generate"))
     generation();
+  else if (!strcmp(argv[1], "find"))
+    find();
   else
     CHECK(0);
   puts("stamp test passed");
