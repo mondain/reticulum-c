@@ -214,7 +214,7 @@ done:
 
 typedef struct host_frame {
   size_t size, offset, wire_size;
-  int announce, control;
+  int announce, control, beacon;
   uint8_t data[RNC_HOST_FRAME_MAX];
 } host_frame;
 typedef struct host_interface {
@@ -231,6 +231,10 @@ typedef struct host_interface {
   unsigned radio_ack_mask;
   uint64_t radio_deadline;
   rnc_host_config radio;
+  char callsign[RNC_HOST_CALLSIGN_MAX + 1u];
+  size_t callsign_size;
+  uint64_t first_tx;
+  int first_tx_set;
   struct sockaddr_storage peer, multicast;
   socklen_t peer_size, multicast_size;
   rnc_ifac ifac;
@@ -360,6 +364,7 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
     f->radio_ack_mask = 0;
     f->radio_deadline = 0;
     f->ready = 0;
+    f->first_tx_set = 0;
   }
   f->status.last_errno = error;
   f->connecting = 0;
@@ -559,6 +564,20 @@ static rnc_result configure_radio(host_interface *f, const rnc_host_config *c) {
     if (r != RNC_OK)
       return r;
   }
+  {
+    /* airtime lock commands carry hundredths of a percent, big endian */
+    const double limit[2] = {c->airtime_limit_short, c->airtime_limit_long};
+    for (i = 0; i < 2; ++i) {
+      unsigned at = (unsigned)(limit[i] * 100.0);
+      if (limit[i] <= 0.0)
+        continue;
+      b[0] = (uint8_t)(at >> 8);
+      b[1] = (uint8_t)at;
+      r = queue_command(f, i ? 0x0c : 0x0b, b, 2);
+      if (r != RNC_OK)
+        return r;
+    }
+  }
   return RNC_OK;
 }
 static int auto_socket(uint16_t port) {
@@ -688,6 +707,13 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
        c->spreading_factor > 12 || c->coding_rate < 5 || c->coding_rate > 8 ||
        c->tx_power < 0 || c->tx_power > 27))
     return RNC_INVALID;
+  if (c->kind == RNC_HOST_RNODE &&
+      (!(c->airtime_limit_short >= 0.0 && c->airtime_limit_short <= 100.0) ||
+       !(c->airtime_limit_long >= 0.0 && c->airtime_limit_long <= 100.0) ||
+       !c->id_callsign != !c->id_interval ||
+       (c->id_callsign && (!*c->id_callsign ||
+                           strlen(c->id_callsign) > RNC_HOST_CALLSIGN_MAX))))
+    return RNC_INVALID;
   if (c->mtu && (c->mtu < RNC_MTU || c->mtu > RNC_MAX_MTU ||
                  (c->kind >= RNC_HOST_SERIAL && c->mtu > RNC_MTU) ||
                  (c->kind == RNC_HOST_AUTO && c->mtu > 1196)))
@@ -758,6 +784,11 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->radio.address = f->radio.target = f->radio.device = f->radio.group = NULL;
   f->radio.ifac = NULL;
   f->radio.name = NULL;
+  f->radio.id_callsign = NULL;
+  if (c->kind == RNC_HOST_RNODE && c->id_callsign) {
+    f->callsign_size = strlen(c->id_callsign);
+    memcpy(f->callsign, c->id_callsign, f->callsign_size);
+  }
   if (c->ifac) {
     f->ifac = *c->ifac;
     f->has_ifac = 1;
@@ -1266,6 +1297,20 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
   size_t i, index = 0;
   ssize_t sent;
   int fd, delivered = 1;
+  if (f->callsign_size && f->first_tx_set && f->status.online &&
+      f->status.radio_ready && f->queue_count < RNC_HOST_QUEUE_FRAMES &&
+      h->now >= f->first_tx + (uint64_t)f->radio.id_interval * 1000u) {
+    host_frame *b = &f->queue[f->queue_count];
+    memset(b, 0, sizeof(*b));
+    b->beacon = 1;
+    if (rnc_host_frame_encode(RNC_HOST_KISS_FRAMING,
+                              (uint8_t)(f->kiss_port << 4),
+                              (const uint8_t *)f->callsign, f->callsign_size,
+                              b->data, sizeof(b->data), &b->size) == RNC_OK) {
+      ++f->queue_count;
+      f->first_tx_set = 0; /* restarts with the next ordinary transmission */
+    }
+  }
   if (!f->queue_count || !f->status.online || f->connecting)
     return RNC_OK;
   for (i = 0; i < f->queue_count; ++i)
@@ -1340,7 +1385,14 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
     f->next_tx = h->now + duration;
     if (q->announce)
       f->next_announce = h->now + duration * 50u;
-    if (!q->control) {
+    if (q->beacon) {
+      if (f->flow_control)
+        f->ready = 0;
+    } else if (!q->control) {
+      if (f->callsign_size && !f->first_tx_set) {
+        f->first_tx = h->now;
+        f->first_tx_set = 1;
+      }
       if (delivered) {
         ++f->status.tx_packets;
         f->status.tx_bytes += q->wire_size;

@@ -18,7 +18,7 @@ Largest gaps, in priority order:
 2. Interface policy: interface modes, configurable `announce_cap`, per-destination announce rate limiting, new-destination rate limiting, path request burst control, ingress control.
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
 4. Missing interface types: Backbone, I2P, AX.25 KISS, Pipe, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
-5. RNode correctness (bitrate from SF/BW/CR now done; remaining): airtime limits, callsign beacon, detection/firmware check.
+5. RNode correctness (bitrate from SF/BW/CR, airtime limits and callsign beacon done; remaining): detection/firmware check.
 6. Management plane: blackhole management, remote management destination, interface discovery, network identities, probe responder.
 7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
 8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
@@ -147,7 +147,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | UDP | MISS | Broadcast, multiple targets |
 | I2P | MISS | Entire type |
 | RNode LoRa | IMPL | Radio setup over KISS, `radio_ready` ack, flow control, serial reopen |
-| RNode LoRa | MISS | Detection and firmware check, BLE/TCP RNode, `airtime_limit_short/long`, `id_callsign` / `id_interval`, RSSI/SNR/battery stats |
+| RNode LoRa | MISS | Detection and firmware check, BLE/TCP RNode, RSSI/SNR/battery stats |
 | RNode Multi | MISS | Sub-interfaces (only `kiss_port` in the command byte) |
 | Serial | IMPL | HDLC over termios, speed |
 | Serial | MISS | databits, parity, stopbits, hardware flow control, port locking |
@@ -218,7 +218,7 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 
 **Phase B: host interfaces**
 
-1. RNode bitrate from LoRa parameters, airtime limits, beacon.
+1. RNode detection and firmware check (bitrate, airtime limits, beacon done).
 2. Backbone, TCP hardening, KISS TNC parameters, serial parameters, UDP broadcast.
 3. Pipe, AX.25 KISS, RNode Multi, I2P; Auto allow/ignore lists.
 

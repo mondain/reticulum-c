@@ -44,6 +44,7 @@ rnc_result rnc_host_frame_feed(rnc_host_framer *state, rnc_host_framing framing,
 rnc_result rnc_host_auto_group(const char *group, uint8_t multicast[16]);
 rnc_result rnc_host_auto_token(const char *group, const char *ipv6,
                                uint8_t token[32]);
+#define RNC_HOST_CALLSIGN_MAX 32u
 typedef struct rnc_host_config {
   rnc_host_kind kind;
   const char *name; /* optional human-readable interface name */
@@ -63,6 +64,12 @@ typedef struct rnc_host_config {
   uint32_t frequency, bandwidth; /* RNODE required Hz */
   unsigned spreading_factor, coding_rate;
   int tx_power, flow_control;
+  /* RNODE: airtime limits in percent (0 = leave the radio default) and an
+   * optional station ID beacon: id_callsign (at most RNC_HOST_CALLSIGN_MAX
+   * bytes) sent id_interval seconds after the first transmission. */
+  double airtime_limit_short, airtime_limit_long;
+  const char *id_callsign;
+  unsigned id_interval;
   rnc_interface_mode mode;        /* default FULL; inherited by child ifaces */
   uint32_t announce_cap_permille; /* 0 = 20 (2%) */
   /* Per-destination announce rate control; see rnc_interface_policy. */

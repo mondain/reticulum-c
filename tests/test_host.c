@@ -470,6 +470,119 @@ static void policy_test(void) {
   rnc_node_free(node);
   puts("host interface policy tests passed");
 }
+
+/* Reads whatever the radio side of the PTY received and counts KISS frames by
+ * command; data frames (command 0) are compared against the callsign. */
+typedef struct radio_tap {
+  int master;
+  rnc_host_framer parser;
+  unsigned data_frames, beacons, saw_st, saw_lt;
+  uint8_t st[2], lt[2];
+} radio_tap;
+static void radio_drain(radio_tap *t) {
+  uint8_t bytes[256], decoded[RNC_IFAC_FRAME_MAX], command;
+  size_t size, k;
+  ssize_t n = read(t->master, bytes, sizeof(bytes));
+  if (n <= 0)
+    return;
+  for (k = 0; k < (size_t)n; ++k)
+    if (rnc_host_frame_feed(&t->parser, RNC_HOST_KISS_FRAMING, bytes[k],
+                            &command, decoded, sizeof(decoded),
+                            &size) == RNC_OK) {
+      uint8_t ack[RNC_HOST_FRAME_MAX];
+      size_t ack_size;
+      if (command == 0) {
+        if (size == 6 && !memcmp(decoded, "N0CALL", 6))
+          ++t->beacons;
+        else
+          ++t->data_frames;
+      } else if (command == 0x0b && size == 2) {
+        t->saw_st = 1;
+        memcpy(t->st, decoded, 2);
+      } else if (command == 0x0c && size == 2) {
+        t->saw_lt = 1;
+        memcpy(t->lt, decoded, 2);
+      } else if (command >= 1 && command <= 6) {
+        if (command == 1)
+          decoded[3] = (uint8_t)(decoded[3] + 50u);
+        CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, command, decoded,
+                                    size, ack, sizeof(ack),
+                                    &ack_size) == RNC_OK);
+        CHECK(write(t->master, ack, ack_size) == (ssize_t)ack_size);
+      }
+    }
+}
+static void radio_extras_test(void) {
+  radio_tap tap = {0};
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_packet plain = {0};
+  uint64_t now = 100;
+  tap.master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  CHECK(tap.master >= 0);
+  CHECK(!grantpt(tap.master) && !unlockpt(tap.master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_RNODE;
+  cfg.address = ptsname(tap.master);
+  cfg.serial_baud = 115200;
+  cfg.frequency = 915000000;
+  cfg.bandwidth = 125000;
+  cfg.tx_power = 10;
+  cfg.spreading_factor = 7;
+  cfg.coding_rate = 5;
+  cfg.airtime_limit_short = 25.5;
+  cfg.airtime_limit_long = 10.0;
+  cfg.id_callsign = "N0CALL";
+  cfg.id_interval = 10;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  for (i = 0; i < 1000; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, ++now) == RNC_OK);
+    radio_drain(&tap);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    if (status.radio_ready && tap.saw_st && tap.saw_lt)
+      break;
+  }
+  CHECK(status.radio_ready && tap.saw_st && tap.saw_lt);
+  CHECK(tap.st[0] == 0x09 && tap.st[1] == 0xf6); /* 25.5% in hundredths */
+  CHECK(tap.lt[0] == 0x03 && tap.lt[1] == 0xe8); /* 10.0% */
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  now = 5000;
+  CHECK(rnc_node_send(node, &plain, 1700000001, now) == RNC_OK);
+  for (i = 0; i < 20; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000001, ++now) == RNC_OK);
+    radio_drain(&tap);
+  }
+  CHECK(tap.data_frames == 1 && tap.beacons == 0);
+  /* first transmission at ~5000 ms starts the ID clock; 10 s later we ID */
+  CHECK(rnc_host_step(host, 0, 1700000010, 14000) == RNC_OK);
+  radio_drain(&tap);
+  CHECK(tap.beacons == 0);
+  CHECK(rnc_host_step(host, 0, 1700000011, 15100) == RNC_OK);
+  CHECK(rnc_host_step(host, 0, 1700000011, 15200) == RNC_OK);
+  radio_drain(&tap);
+  CHECK(tap.beacons == 1);
+  /* the beacon itself does not restart the clock: nothing until new traffic */
+  CHECK(rnc_host_step(host, 0, 1700000040, 40000) == RNC_OK);
+  radio_drain(&tap);
+  CHECK(tap.beacons == 1);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK &&
+        status.tx_packets == 1);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(tap.master);
+  puts("host RNode airtime and beacon tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -482,6 +595,8 @@ int main(int argc, char **argv) {
     keys();
   else if (!strcmp(argv[1], "rnode"))
     radio_test();
+  else if (!strcmp(argv[1], "rnode_extras"))
+    radio_extras_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))

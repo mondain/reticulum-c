@@ -27,7 +27,7 @@
 typedef struct interface_config {
   rnc_host_config host;
   char name[64], address[256], target[256], device[64], group[64], netname[128],
-      passphrase[128];
+      passphrase[128], callsign[RNC_HOST_CALLSIGN_MAX + 2u];
   size_t ifac_size;
   uint32_t interface_id;
   int enabled, has_type;
@@ -180,6 +180,23 @@ static int interface_key(interface_config *f, const char *key,
     f->host.announce_cap_permille = (uint32_t)(percent * 10.0 + 0.5);
     return f->host.announce_cap_permille != 0;
   }
+  if (!strcmp(key, "airtime_limit_short") ||
+      !strcmp(key, "airtime_limit_long")) {
+    char *end;
+    double percent = strtod(value, &end);
+    if (end == value || *end || !(percent > 0.0) || percent > 100.0)
+      return 0;
+    if (!strcmp(key, "airtime_limit_short"))
+      f->host.airtime_limit_short = percent;
+    else
+      f->host.airtime_limit_long = percent;
+    return 1;
+  }
+  if (!strcmp(key, "id_callsign")) {
+    if (strlen(value) > RNC_HOST_CALLSIGN_MAX)
+      return 0;
+    return text_copy(f->callsign, sizeof(f->callsign), value);
+  }
   if (!strcmp(key, "ingress_control")) {
     if (!boolean(value, &b))
       return 0;
@@ -308,6 +325,12 @@ static int interface_key(interface_config *f, const char *key,
     f->host.coding_rate = (unsigned)n;
     return 1;
   }
+  if (!strcmp(key, "id_interval")) {
+    if (n == 0 || n > 86400)
+      return 0;
+    f->host.id_interval = (unsigned)n;
+    return 1;
+  }
   if (!strcmp(key, "txpower")) {
     if (n > 27)
       return 0;
@@ -386,6 +409,7 @@ static int finish_config(config *c) {
     f->host.target = f->target[0] ? f->target : NULL;
     f->host.device = f->device[0] ? f->device : NULL;
     f->host.group = f->group[0] ? f->group : NULL;
+    f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
     if (!f->enabled)
       continue;
     ++enabled;
