@@ -108,6 +108,30 @@ int rnc_link_is_active(const rnc_link *link);
 rnc_result rnc_link_remote_identity(const rnc_link *link, rnc_identity *identity);
 rnc_result rnc_link_address(const rnc_link *link, uint8_t address[16]);
 
+/* Link lifecycle (manual 16.6). Keepalive = RTT * 360/1.75 s clamped to 5..360 s;
+ * a link with no inbound traffic for twice that is STALE and is torn down
+ * RTT*4 + 5 s later unless traffic arrives. Establishment timeout defaults to
+ * 30 s; configure hops/first-hop time before opening for the reference
+ * formula first_hop + 6 s * max(1, hops). */
+typedef enum rnc_link_status {
+    RNC_LINK_STATUS_PENDING = 0, RNC_LINK_STATUS_HANDSHAKE, RNC_LINK_STATUS_ACTIVE,
+    RNC_LINK_STATUS_STALE, RNC_LINK_STATUS_CLOSED
+} rnc_link_status;
+typedef enum rnc_link_teardown {
+    RNC_TEARDOWN_NONE = 0, RNC_TEARDOWN_TIMEOUT, RNC_TEARDOWN_INITIATOR_CLOSED,
+    RNC_TEARDOWN_DESTINATION_CLOSED
+} rnc_link_teardown;
+rnc_link_status rnc_link_status_of(const rnc_link *link);
+rnc_link_teardown rnc_link_teardown_reason(const rnc_link *link);
+rnc_result rnc_link_configure_establishment(rnc_link *link, unsigned hops,
+                                            uint64_t first_hop_timeout_ms);
+/* RTT measured during establishment; RNC_STATE until the link is active. */
+rnc_result rnc_link_rtt(const rnc_link *link, uint64_t *rtt_ms);
+uint64_t rnc_link_keepalive_ms(const rnc_link *link);
+rnc_result rnc_link_age_ms(const rnc_link *link, uint64_t now_ms, uint64_t *age_ms);
+uint64_t rnc_link_no_inbound_ms(const rnc_link *link, uint64_t now_ms);
+uint64_t rnc_link_no_outbound_ms(const rnc_link *link, uint64_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

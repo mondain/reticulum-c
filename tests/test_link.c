@@ -138,6 +138,7 @@ static void reliability_test(void) {
     CHECK(rnc_link_send(p.client, 0x4348, "third", 5, 1003) == RNC_OK);
     finish(&p);
 }
+static void establish_with_rtt(pair *p, uint64_t rtt_ms);
 static void lifecycle_test(void) {
     pair p; rnc_packet request; unsigned i; init(&p);
     CHECK(rnc_link_open(p.client, &p.announce, 100) == RNC_OK);
@@ -152,15 +153,23 @@ static void lifecycle_test(void) {
     CHECK(rnc_link_tick(p.client, 99) == RNC_INVALID);
     CHECK(rnc_link_tick(p.client, 30100) == RNC_OK);
     CHECK(count(p.client, RNC_LINK_CLOSED) == 1); finish(&p);
-    init(&p); establish(&p);
-    CHECK(rnc_link_send(p.client, 1, "lost", 4, 110) == RNC_OK);
+    /* A slow link (large keepalive) so channel retries, not staleness, end it. */
+    init(&p); establish_with_rtt(&p, 5000);
+    CHECK(rnc_link_send(p.client, 1, "lost", 4, 5200) == RNC_OK);
     (void)outgoing(p.client);
-    for (i = 1; i <= 5; ++i) {
-        CHECK(rnc_link_tick(p.client, 110u+i*10000u) == RNC_OK);
-        if (i < 5) (void)outgoing(p.client);
+    {
+        unsigned closed = 0, resends = 0;
+        rnc_link_event event;
+        for (i = 1; i <= 400 && rnc_link_is_active(p.client); ++i) {
+            CHECK(rnc_link_tick(p.client, 5200u + i * 1000u) == RNC_OK);
+            while (rnc_link_poll(p.client, &event) == RNC_OK) {
+                resends += event.type == RNC_LINK_SEND && event.packet.context == 14;
+                closed += event.type == RNC_LINK_CLOSED;
+            }
+        }
+        CHECK(closed == 1 && resends == 4);
     }
-    CHECK(!rnc_link_is_active(p.client));
-    CHECK(count(p.client, RNC_LINK_CLOSED) == 1); finish(&p);
+    CHECK(!rnc_link_is_active(p.client)); finish(&p);
 }
 static void keepalive_test(void) {
     pair p; rnc_packet ping, pong; uint64_t now; init(&p); establish(&p);
@@ -175,8 +184,10 @@ static void keepalive_test(void) {
     /* Wrong-role bytes never extend liveness; a silent peer still expires. */
     ping.data[0] = 0xfe;
     CHECK(rnc_link_input(p.server, &ping, 470100) == RNC_PROTOCOL);
-    CHECK(rnc_link_tick(p.server, 480100) == RNC_OK && !rnc_link_is_active(p.server));
-    CHECK(rnc_link_tick(p.client, 480100) == RNC_OK && !rnc_link_is_active(p.client));
+    CHECK(rnc_link_tick(p.server, 480100) == RNC_OK && rnc_link_status_of(p.server) == RNC_LINK_STATUS_STALE);
+    CHECK(rnc_link_tick(p.client, 480100) == RNC_OK && rnc_link_status_of(p.client) == RNC_LINK_STATUS_STALE);
+    CHECK(rnc_link_tick(p.server, 490000) == RNC_OK && !rnc_link_is_active(p.server));
+    CHECK(rnc_link_tick(p.client, 490000) == RNC_OK && !rnc_link_is_active(p.client));
     finish(&p);
 }
 static void boundaries_test(void) {
@@ -219,6 +230,113 @@ static void boundaries_test(void) {
     CHECK(rnc_link_remote_identity(p.server, &remote) == RNC_OK && !memcmp(remote.hash, p.client_identity.hash, 16));
     finish(&p);
 }
+/* Establish with a chosen link-request round trip so the measured RTT is known. */
+static void establish_with_rtt(pair *p, uint64_t rtt_ms) {
+    rnc_packet request, proof, rtt;
+    CHECK(rnc_link_open(p->client, &p->announce, 100) == RNC_OK);
+    request = outgoing(p->client);
+    CHECK(rnc_link_accept(p->server, &p->identity, p->announce.destination, &request, 101) == RNC_OK);
+    proof = outgoing(p->server);
+    CHECK(rnc_link_input(p->client, &proof, 100 + rtt_ms) == RNC_OK);
+    rtt = outgoing(p->client);
+    CHECK(rnc_link_input(p->server, &rtt, 101 + rtt_ms) == RNC_OK);
+    (void)count(p->client, RNC_LINK_ACTIVE); (void)count(p->server, RNC_LINK_ACTIVE);
+}
+static unsigned sends(rnc_link *link) { return count(link, RNC_LINK_SEND); }
+/* Keepalive scales with RTT (RTT * 360/1.75 s, clamped to 5..360 s). */
+static void keepalive_scale_test(void) {
+    pair p; init(&p); establish_with_rtt(&p, 2);
+    CHECK(rnc_link_keepalive_ms(p.client) == 5000u);
+    finish(&p);
+    init(&p); establish_with_rtt(&p, 1000);
+    CHECK(rnc_link_keepalive_ms(p.client) == 205714u);
+    finish(&p);
+    init(&p); establish_with_rtt(&p, 5000);
+    CHECK(rnc_link_keepalive_ms(p.client) == 360000u);
+    finish(&p);
+}
+/* Quiet fast link: ping after one keepalive, STALE after two, teardown after
+ * the RTT-derived grace; any inbound traffic revives a stale link. */
+static void stale_test(void) {
+    pair p; rnc_packet pong; rnc_link_event event; init(&p); establish_with_rtt(&p, 2);
+    CHECK(rnc_link_status_of(p.client) == RNC_LINK_STATUS_ACTIVE);
+    CHECK(rnc_link_tick(p.client, 3000) == RNC_OK && sends(p.client) == 0);
+    CHECK(rnc_link_tick(p.client, 5200) == RNC_OK && sends(p.client) == 1);
+    CHECK(rnc_link_status_of(p.client) == RNC_LINK_STATUS_ACTIVE);
+    CHECK(rnc_link_tick(p.client, 10200) == RNC_OK);
+    CHECK(rnc_link_status_of(p.client) == RNC_LINK_STATUS_STALE && rnc_link_is_active(p.client));
+    (void)sends(p.client);
+    /* A reply from the peer returns the link to ACTIVE. */
+    {
+        rnc_packet ping = {0};
+        ping.flags = 12; ping.context = 250; ping.data_size = 1; ping.data[0] = 0xfe;
+        memcpy(ping.destination, p.client->address, 16);
+        CHECK(rnc_link_input(p.client, &ping, 10300) == RNC_OK);
+        (void)pong;
+    }
+    CHECK(rnc_link_status_of(p.client) == RNC_LINK_STATUS_ACTIVE);
+    CHECK(rnc_link_tick(p.client, 20400) == RNC_OK);
+    CHECK(rnc_link_status_of(p.client) == RNC_LINK_STATUS_STALE);
+    (void)sends(p.client);
+    /* Grace is RTT*4 + 5 s after becoming stale. */
+    CHECK(rnc_link_tick(p.client, 25400) == RNC_OK && rnc_link_is_active(p.client));
+    CHECK(rnc_link_tick(p.client, 25420) == RNC_OK);
+    CHECK(!rnc_link_is_active(p.client));
+    CHECK(rnc_link_status_of(p.client) == RNC_LINK_STATUS_CLOSED);
+    CHECK(rnc_link_teardown_reason(p.client) == RNC_TEARDOWN_TIMEOUT);
+    CHECK(rnc_link_poll(p.client, &event) == RNC_OK && event.type == RNC_LINK_SEND && event.packet.context == 252);
+    CHECK(rnc_link_poll(p.client, &event) == RNC_OK && event.type == RNC_LINK_CLOSED && event.reason == RNC_TIMEOUT);
+    finish(&p);
+}
+static void reasons_test(void) {
+    pair p; rnc_packet close; init(&p); establish(&p);
+    CHECK(rnc_link_teardown_reason(p.client) == RNC_TEARDOWN_NONE);
+    CHECK(rnc_link_close(p.client, 200) == RNC_OK);
+    CHECK(rnc_link_teardown_reason(p.client) == RNC_TEARDOWN_INITIATOR_CLOSED);
+    close = outgoing(p.client);
+    CHECK(rnc_link_input(p.server, &close, 201) == RNC_OK);
+    CHECK(rnc_link_teardown_reason(p.server) == RNC_TEARDOWN_INITIATOR_CLOSED);
+    CHECK(rnc_link_status_of(p.server) == RNC_LINK_STATUS_CLOSED);
+    finish(&p);
+    init(&p); establish(&p);
+    CHECK(rnc_link_close(p.server, 200) == RNC_OK);
+    CHECK(rnc_link_teardown_reason(p.server) == RNC_TEARDOWN_DESTINATION_CLOSED);
+    close = outgoing(p.server);
+    CHECK(rnc_link_input(p.client, &close, 201) == RNC_OK);
+    CHECK(rnc_link_teardown_reason(p.client) == RNC_TEARDOWN_DESTINATION_CLOSED);
+    finish(&p);
+}
+/* Establishment timeout follows hop count and first-hop time. */
+static void establishment_test(void) {
+    pair p; init(&p);
+    CHECK(rnc_link_configure_establishment(p.client, 3, 4000) == RNC_OK);
+    CHECK(rnc_link_open(p.client, &p.announce, 100) == RNC_OK);
+    CHECK(rnc_link_status_of(p.client) == RNC_LINK_STATUS_PENDING);
+    CHECK(rnc_link_tick(p.client, 100 + 21999) == RNC_OK && rnc_link_status_of(p.client) == RNC_LINK_STATUS_PENDING);
+    CHECK(rnc_link_tick(p.client, 100 + 22000) == RNC_OK);
+    CHECK(rnc_link_status_of(p.client) == RNC_LINK_STATUS_CLOSED);
+    CHECK(rnc_link_teardown_reason(p.client) == RNC_TEARDOWN_TIMEOUT);
+    finish(&p);
+    init(&p);
+    CHECK(rnc_link_configure_establishment(p.client, 0, 0) == RNC_OK);
+    CHECK(rnc_link_open(p.client, &p.announce, 100) == RNC_OK);
+    CHECK(rnc_link_tick(p.client, 100 + 5999) == RNC_OK && rnc_link_status_of(p.client) == RNC_LINK_STATUS_PENDING);
+    CHECK(rnc_link_tick(p.client, 100 + 6000) == RNC_OK && rnc_link_status_of(p.client) == RNC_LINK_STATUS_CLOSED);
+    finish(&p);
+}
+/* Age and idle getters distinguish control traffic from application data. */
+static void getters_test(void) {
+    pair p; uint64_t value; init(&p); establish_with_rtt(&p, 2);
+    CHECK(rnc_link_rtt(p.client, &value) == RNC_OK && value == 2);
+    CHECK(rnc_link_age_ms(p.client, 1102, &value) == RNC_OK && value == 1000);
+    CHECK(rnc_link_no_inbound_ms(p.client, 2102) == 2000u);
+    CHECK(rnc_link_no_outbound_ms(p.client, 2102) >= 1999u);
+    finish(&p);
+    init(&p);
+    CHECK(rnc_link_rtt(p.client, &value) == RNC_STATE);
+    CHECK(rnc_link_age_ms(p.client, 10, &value) == RNC_STATE);
+    finish(&p);
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     if (!strcmp(argv[1], "handshake")) handshake_test();
@@ -226,6 +344,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "lifecycle")) lifecycle_test();
     else if (!strcmp(argv[1], "keepalive")) keepalive_test();
     else if (!strcmp(argv[1], "boundaries")) boundaries_test();
+    else if (!strcmp(argv[1], "keepalive_scale")) keepalive_scale_test();
+    else if (!strcmp(argv[1], "stale")) stale_test();
+    else if (!strcmp(argv[1], "reasons")) reasons_test();
+    else if (!strcmp(argv[1], "establishment")) establishment_test();
+    else if (!strcmp(argv[1], "getters")) getters_test();
     else CHECK(0);
     puts("native C link test passed"); return 0;
 }

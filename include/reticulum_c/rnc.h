@@ -100,6 +100,9 @@ rnc_result rnc_announce_create(const rnc_identity *identity, const char *dotted_
     const void *app_data, size_t app_size, uint64_t unix_seconds,
     rnc_random_fn random, void *context, rnc_packet *packet);
 rnc_result rnc_announce_verify(const rnc_packet *packet, rnc_announce *announce);
+/* Announce-handler aspect filter: returns 1 when the announced destination is
+ * the one named by `aspect` (dotted name) for the announcing identity. */
+int rnc_announce_matches_aspect(const rnc_announce *announce, const char *aspect);
 
 #ifdef __cplusplus
 }

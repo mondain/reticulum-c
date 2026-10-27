@@ -27,13 +27,32 @@ typedef struct rnc_route {
 typedef enum rnc_node_event_type {
   RNC_NODE_SEND = 1,
   RNC_NODE_LOCAL,
-  RNC_NODE_ANNOUNCE
+  RNC_NODE_ANNOUNCE,
+  RNC_NODE_RECEIPT
 } rnc_node_event_type;
+/* Per-destination delivery proof policy for SINGLE DATA packets. PROVE_ALL
+ * makes the node answer every locally delivered packet with an implicit proof;
+ * PROVE_APP leaves it to rnc_node_prove(); PROVE_NONE (default) never proves. */
+typedef enum rnc_proof_strategy {
+  RNC_PROVE_NONE = 0,
+  RNC_PROVE_APP,
+  RNC_PROVE_ALL
+} rnc_proof_strategy;
+typedef enum rnc_receipt_status {
+  RNC_RECEIPT_DELIVERED = 1,
+  RNC_RECEIPT_FAILED
+} rnc_receipt_status;
+#define RNC_NODE_RECEIPTS 32u
+#define RNC_NODE_KNOWN 256u
 typedef struct rnc_node_event {
   rnc_node_event_type type;
   uint32_t interface_id;
   rnc_packet packet;
   rnc_route route;
+  /* RNC_NODE_RECEIPT only: full packet hash, status and round trip time. */
+  uint8_t receipt_hash[32];
+  rnc_receipt_status receipt_status;
+  uint64_t rtt_ms;
 } rnc_node_event;
 rnc_result rnc_path_request_create(const uint8_t destination[16],
                                    const uint8_t transport_id[16],
@@ -55,6 +74,48 @@ rnc_result rnc_node_interface_mtu(rnc_node *node, uint32_t interface_id,
  */
 rnc_result rnc_node_local_interface(rnc_node *node, uint32_t interface_id,
                                     int local);
+/* Interface modes follow the Reticulum manual (8.16): ACCESS_POINT does not
+ * receive rebroadcast announces and keeps paths one day; ROAMING keeps paths
+ * six hours and does not carry announces from ROAMING or BOUNDARY segments;
+ * BOUNDARY does not carry announces from ROAMING. FULL (default) and GATEWAY
+ * propagate identically. announce_cap_permille is the share of the interface
+ * bitrate announces may use in thousandths (0 selects the 20 = 2% default). */
+typedef enum rnc_interface_mode {
+  RNC_MODE_FULL = 0,
+  RNC_MODE_GATEWAY,
+  RNC_MODE_ACCESS_POINT,
+  RNC_MODE_ROAMING,
+  RNC_MODE_BOUNDARY
+} rnc_interface_mode;
+/* Ingress/egress control (manual 8.18-8.20), enabled by default. Zero fields
+ * select the reference defaults: new_time 7200s, burst_hold 15s, burst_penalty
+ * 15s, held_release_interval 5s, max_held 256 (bounded by the node's shared
+ * table), announce burst 3 Hz on young / 10 Hz on older interfaces, path
+ * request burst 3 / 8 Hz, egress path request limit 5 Hz. Frequencies are
+ * in milli-hertz. */
+typedef struct rnc_ingress_policy {
+  int disabled;        /* turn off ingress and egress control */
+  uint32_t new_time_s, burst_hold_s, burst_penalty_s, held_release_interval_s;
+  uint32_t max_held;
+  uint32_t burst_freq_new_mhz, burst_freq_mhz;
+  uint32_t pr_burst_freq_new_mhz, pr_burst_freq_mhz, ec_pr_freq_mhz;
+} rnc_ingress_policy;
+typedef struct rnc_interface_policy {
+  rnc_interface_mode mode;
+  uint32_t announce_cap_permille;
+  /* Per-destination limit on announces received here before they are
+   * rebroadcast. Target is the minimum seconds between announces (0 disables).
+   * More than `grace` violations block rebroadcast for target + penalty
+   * seconds; paths are still learned. */
+  uint32_t announce_rate_target, announce_rate_grace, announce_rate_penalty;
+  /* Answer unknown-destination path requests from this interface by searching
+   * other interfaces. GATEWAY, ACCESS_POINT and ROAMING always do; BOUNDARY
+   * searches boundary and gateway peers; FULL only when this is set. */
+  int recursive_path_requests;
+  rnc_ingress_policy ingress;
+} rnc_interface_policy;
+rnc_result rnc_node_interface_policy(rnc_node *node, uint32_t interface_id,
+                                     const rnc_interface_policy *policy);
 rnc_result rnc_node_remove_interface(rnc_node *node, uint32_t interface_id);
 /* Copies private material solely for announce generation; clear/free removes
  * it. Keep name <=127 bytes and app data <=316. Outputs commit only on success.
@@ -74,6 +135,22 @@ rnc_result rnc_node_add_destination_ex(rnc_node *node,
  * NULL disables ratcheted announces. Applies to normal and path responses. */
 rnc_result rnc_node_set_ratchet(rnc_node *node, const uint8_t destination[16],
                                 const uint8_t public_key[32]);
+rnc_result rnc_node_set_proof_strategy(rnc_node *node,
+                                       const uint8_t destination[16],
+                                       rnc_proof_strategy strategy);
+/* Answer a delivered DATA packet (from a LOCAL event; pass its interface_id)
+ * with an implicit (64 byte) or explicit (96 byte) proof signed by the
+ * destination identity. The proof is queued as a SEND on that interface. */
+rnc_result rnc_node_prove(rnc_node *node, const uint8_t destination[16],
+                          const rnc_packet *packet, uint32_t interface_id,
+                          int implicit, uint64_t unix_seconds, uint64_t now_ms);
+/* Send a SINGLE DATA packet and track its delivery proof. A route to the
+ * destination is required to learn the signer. Exactly one RNC_NODE_RECEIPT
+ * event follows: DELIVERED on a valid proof, FAILED after timeout_ms. The
+ * packet hash (also the receipt key) is returned in hash. */
+rnc_result rnc_node_send_tracked(rnc_node *node, const rnc_packet *packet,
+                                 uint64_t timeout_ms, uint64_t unix_seconds,
+                                 uint64_t now_ms, uint8_t hash[32]);
 rnc_result rnc_node_announce(rnc_node *node, const uint8_t destination[16],
                              uint64_t unix_seconds, uint64_t now_ms);
 rnc_result rnc_node_request_path(rnc_node *node, const uint8_t destination[16],
@@ -87,6 +164,19 @@ rnc_result rnc_node_tick(rnc_node *node, uint64_t unix_seconds,
                          uint64_t now_ms);
 rnc_result rnc_node_lookup(const rnc_node *node, const uint8_t destination[16],
                            uint64_t now_ms, rnc_route *route);
+/* Known-destination store (Identity.recall). Every valid, fresh announce for
+ * a non-local destination is remembered independently of path lifetime, in a
+ * table bounded to RNC_NODE_KNOWN entries (least recently heard is evicted).
+ * RNC_STATE means unknown. Newer announces replace older ones; replays do not. */
+rnc_result rnc_node_recall(const rnc_node *node, const uint8_t destination[16],
+                           rnc_announce *announce);
+/* Versioned, SHA-256-sealed snapshot for host persistence. Import is atomic,
+ * rejects any modification (RNC_AUTH) and entries whose destination does not
+ * derive from their identity, and merges into the current table. */
+rnc_result rnc_node_known_export(const rnc_node *node, void *output,
+                                 size_t capacity, size_t *written);
+rnc_result rnc_node_known_import(rnc_node *node, const void *input,
+                                 size_t size);
 rnc_result rnc_node_poll(rnc_node *node, rnc_node_event *event);
 /* Bind a locally owned link before routing its packets (initiator or
  * responder). Transit links are installed by forwarded requests and activated

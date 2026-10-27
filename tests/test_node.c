@@ -263,6 +263,12 @@ static void discovery(void) {
   CHECK(a && router && b);
   CHECK(rnc_node_add_interface(a, 1, 1000000) == RNC_OK);
   CHECK(rnc_node_add_interface(router, 1, 1000000) == RNC_OK);
+  {
+    /* Only gateway-style client interfaces search on their clients' behalf. */
+    rnc_interface_policy gateway = {0};
+    gateway.mode = RNC_MODE_GATEWAY;
+    CHECK(rnc_node_interface_policy(router, 1, &gateway) == RNC_OK);
+  }
   CHECK(rnc_node_add_interface(router, 2, 1000000) == RNC_OK);
   CHECK(rnc_node_add_interface(b, 1, 1000000) == RNC_OK);
   CHECK(rnc_node_add_destination(b, &ids[2], "node.discover", NULL, 0,

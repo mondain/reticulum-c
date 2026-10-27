@@ -84,3 +84,27 @@ Socket and leak tests require execution outside the restricted local sandbox.
 Actual radio, AutoInterface multicast deployment, Windows, live external
 Resource/service sessions and additional implementations still need separate
 verification.
+
+## Spec gap closure branch (`feature/spec-gap-closure`)
+
+Local Linux evidence (GCC 13.3, OpenSSL 3.0.13), not yet run in hosted CI:
+
+| Configuration | Result | Scope |
+| --- | --- | --- |
+| Static SDK with pinned RNS oracle | 120/120 | Previous 88 plus 32 new cases; includes the live direct and two-router RNS sessions. |
+| Sanitizers (ASAN/UBSAN/LSAN), no oracle | 103/103 | Embedded-CPython differential cases are excluded: CPython's own allocations trip LeakSanitizer. |
+
+Oracle: RNS at `e40191b3d193b46b7f2d8a44424a594cd758839b` in a separate checkout,
+with a virtual environment containing `cryptography` 50.0.2 and `pyserial`.
+New behavior is verified by native tests against the reference source's logic
+(endpoint delivery proofs and receipts, interface modes, announce retransmission,
+rate limiting and ingress control, known-destination recall, link keepalive/stale
+state). The new native tests are not differential: they do not exchange these
+features with a live RNS node. Live checks remain limited to the existing
+direct and two-router Channel sessions, which still pass.
+
+Behavior changes relative to the previous branch state: transport nodes no
+longer search for unknown paths on behalf of plain `full`-mode interfaces
+(gateway, access-point, roaming, boundary and local interfaces do); link
+keepalive and timeout now scale with RTT instead of fixed 30 s / 180 s; ingress
+control is enabled by default. See `docs/spec-gap-list.md` for what remains.
