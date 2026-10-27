@@ -1202,6 +1202,102 @@ static void discovery_listen(const char *exe) {
   remove_tree(dir);
   puts("node discovery listening tests passed");
 }
+/* Auto-connect: a bootstrap link brings the announce of a Backbone interface;
+ * the daemon connects to it, drops the bootstrap link once enough auto-connected
+ * interfaces are up, and falls back to bootstrap when they all go away. */
+static unsigned status_count(const char *admin, const char *needle) {
+  char reply[8192];
+  const char *at;
+  unsigned n = 0;
+  admin_command(admin, "STATUS", reply, sizeof(reply));
+  for (at = reply; (at = strstr(at, needle)) != NULL; at += strlen(needle))
+    n++;
+  return n;
+}
+/* Interfaces listed with an id below `limit`: the configured ones, as opposed
+ * to those auto-connected (ids at and above AUTOCONNECT_ID_BASE) or accepted. */
+static unsigned status_ids_below(const char *admin, unsigned long limit) {
+  char reply[8192];
+  const char *at;
+  unsigned n = 0;
+  admin_command(admin, "STATUS", reply, sizeof(reply));
+  for (at = reply; (at = strstr(at, "interface id=")) != NULL; at += 13) {
+    unsigned long id = strtoul(at + 13, NULL, 10);
+    if (id < limit)
+      n++;
+  }
+  return n;
+}
+static int configured_wait(const char *admin, unsigned long limit, unsigned want,
+                           unsigned seconds) {
+  unsigned waited;
+  for (waited = 0; waited < seconds * 10; ++waited) {
+    struct timespec t = {0, 100000000};
+    if (status_ids_below(admin, limit) == want)
+      return 1;
+    nanosleep(&t, NULL);
+  }
+  return 0;
+}
+static int status_wait(const char *admin, const char *needle, unsigned want,
+                       unsigned seconds) {
+  unsigned waited;
+  for (waited = 0; waited < seconds * 10; ++waited) {
+    struct timespec t = {0, 100000000};
+    if (status_count(admin, needle) == want)
+      return 1;
+    nanosleep(&t, NULL);
+  }
+  return 0;
+}
+static void discovery_autoconnect(const char *exe) {
+  char dir[] = "/tmp/rnc-node-ac-XXXXXX", acfg[256], akey[256], aadmin[256],
+       bcfg[256], bkey[256], badmin[256], aid[33], bid[33];
+  unsigned bootstrap_port = unused_port(), public_port = unused_port();
+  int afd, bfd;
+  pid_t a, b;
+  CHECK(bootstrap_port != public_port && mkdtemp(dir));
+  CHECK(snprintf(acfg, sizeof(acfg), "%s/a.config", dir) > 0);
+  CHECK(snprintf(akey, sizeof(akey), "%s/a.identity", dir) > 0);
+  CHECK(snprintf(aadmin, sizeof(aadmin), "%s/a.admin", dir) > 0);
+  CHECK(snprintf(bcfg, sizeof(bcfg), "%s/b.config", dir) > 0);
+  CHECK(snprintf(bkey, sizeof(bkey), "%s/b.identity", dir) > 0);
+  CHECK(snprintf(badmin, sizeof(badmin), "%s/b.admin", dir) > 0);
+  write_config(acfg,
+               "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+               "discovery_job_interval = 1\n[interfaces]\n[[Plain]]\ntype = "
+               "TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n"
+               "[[Public]]\ntype = BackboneInterface\nlisten_ip = 127.0.0.1\n"
+               "port = %u\ndiscoverable = yes\ndiscovery_name = Beta "
+               "Backbone\ndiscovery_stamp_value = 8\nreachable_on = "
+               "127.0.0.1\nannounce_interval_seconds = 2\n",
+               bootstrap_port, public_port);
+  a = start(exe, acfg, akey, aadmin, &afd);
+  ready_line(afd, aid);
+  write_config(bcfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+               "discover_interfaces = yes\nrequired_discovery_value = 8\n"
+               "autoconnect_discovered_interfaces = 1\n"
+               "autoconnect_unverified_implementations = yes\n"
+               "autoconnect_allow_local = yes\n"
+               "autoconnect_monitor_seconds = 1\nautoconnect_detach_seconds = "
+               "2\n[interfaces]\n[[Bootstrap]]\ntype = TCPClientInterface\n"
+               "target_host = 127.0.0.1\ntarget_port = %u\nbootstrap_only = "
+               "yes\nreconnect_wait = 1\n",
+               bootstrap_port);
+  b = start(exe, bcfg, bkey, badmin, &bfd);
+  ready_line(bfd, bid);
+  /* auto-connected interface appears, bootstrap link goes: one TCP client */
+  CHECK(status_wait(badmin, "id=2147287040 parent=0 kind=2 online=1", 1, 40));
+  CHECK(configured_wait(badmin, 2147287040ul, 0, 10)); /* bootstrap link gone */
+  /* the source disappears: the interface is detached, bootstrap returns */
+  stop(a, afd);
+  CHECK(status_wait(badmin, "id=2147287040", 0, 30));
+  CHECK(configured_wait(badmin, 2147287040ul, 1, 30));
+  stop(b, bfd);
+  remove_tree(dir);
+  puts("node discovery auto-connect tests passed");
+}
 static void shared(const char *exe, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-node-shared-XXXXXX", cfg[256], keypath[256],
        admin[256], storage[256], text[2048], identity[33];
@@ -1874,6 +1970,8 @@ int main(int argc, char **argv) {
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+  else if (!strcmp(argv[2], "disc_autoconnect") && argc == 3)
+    discovery_autoconnect(argv[1]);
   else if (!strcmp(argv[2], "disc_listen") && argc == 3)
     discovery_listen(argv[1]);
   else if (!strcmp(argv[2], "disc_announce") && argc == 3)

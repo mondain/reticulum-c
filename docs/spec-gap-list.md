@@ -19,7 +19,7 @@ Largest gaps, in priority order:
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
 4. Missing interface types: I2P, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits and callsign beacon done; remaining): detection/firmware check.
-6. Management plane: blackhole management, remote management destination and probe responder are done; interface discovery and network identities remain.
+6. Management plane: blackhole management, remote management destination, probe responder, network identities and interface discovery are done (see sections 3 and 4).
 7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
 8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
 9. Resource window growth and rate-based timeouts: done (see section 5).
@@ -54,7 +54,7 @@ Largest gaps, in priority order:
 | MISS | Tunnels and tunnel table | |
 | MISS | Transport packet cache and cache-request serving | Context 8 is parsed only inside Resource |
 | IMPL | Persistent known-destinations table | See `rnc_node_known_export/import` |
-| PART | Network identities (6.5) | `network_identity` file (created 0600 if absent, reference file format), reported as `network_id` and over the admin `NETWORK` command, with the `rnstransport.network` and `rnstransport.network.instance.<hash>` destinations registered; the discovery protocol that uses them is not implemented |
+| PART | Network identities (6.5) | `network_identity` file (created 0600 if absent, reference file format), reported as `network_id` and over the admin `NETWORK` command, with the `rnstransport.network` and `rnstransport.network.instance.<hash>` destinations registered; used for encrypted discovery announces |
 | N/A | AES-128 link modes, Python pickle | By design; MessagePack RPC only |
 
 ## 3. API reference (manual ch16)
@@ -130,7 +130,7 @@ Largest gaps, in priority order:
 | IMPL | Blackhole publishing (`rnstransport.info.blackhole`, `/list`, open to all) | Daemon `publish_blackhole`; verified with the reference `rnpath -p` |
 | IMPL | Blackhole sources: `blackhole_sources`, `blackhole_update_interval` (minutes, default 60), first-run wait 20 s | Daemon `BlackholeUpdater` equivalent on `rnc_requester`; lists persist as `<state>.blackhole.<source hash>`; verified against a reference publisher |
 | IMPL | `remote_management_enabled` | `rnstransport.remote.management` with `/status` and `/path` (table; rates is empty), identity allow list |
-| MISS | `discovered_interfaces`, discovery sources | |
+| IMPL | `discovered_interfaces`, `interface_discovery_sources` | Daemon keeps the reference's record files (`<state>.discovery`, or `discovery_storage`) and lists them with the admin `DISCOVERED` command; the reference's own `rnstatus -d` reads files written either way |
 
 ## 4. Interfaces (manual ch7, ch8)
 
@@ -163,7 +163,9 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | KISS | IMPL | Framing, port nibble, `flow_control` |
 | KISS | IMPL | preamble, txtail, persistence, slottime, ready flow control, `id_callsign` / `id_interval` beacon |
 | AX.25 KISS | IMPL | `AX25KISSInterface`: UI frames (APZRNS to callsign-SSID), TNC preamble/txtail/persistence/slottime, flow control with 5s unlock |
-| Discoverable interfaces (8.14) | MISS | All options and autoconnect |
+| Discoverable interfaces (8.14) | IMPL | `discoverable`, `discovery_name`, `announce_interval`, `discovery_stamp_value`, `discovery_encrypt`, `reachable_on` (or an executable), `publish_ifac`, `latitude` / `longitude` / `height` or `location_cmd`, `discovery_lxmf_address`, `discovery_frequency` / `bandwidth` / `modulation`; announced for Backbone, TCP server, RNode, KISS and kiss-framed TCP client interfaces |
+| Discoverable interfaces (8.14) | IMPL | Listening (`discover_interfaces`, `required_discovery_value`, `interface_discovery_sources`) and auto-connect of Backbone announcements (`autoconnect_discovered_interfaces`, `autoconnect_unverified_implementations`, `autoconnect_interface_mode`, `bootstrap_only`) |
+| Discoverable interfaces (8.14) | MISS | I2P and Weave announcements (those interface types do not exist here); `autoconnect_interface_gravity` and `autoconnect_announces_to_internal` are accepted but have no effect |
 | Custom interfaces (8.1) | PART | No plugin API, but hosts can call `rnc_node_add_interface` directly |
 
 ### Common options and policy (8.15-8.20)
@@ -194,7 +196,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
 | IMPL | `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval` | |
 | IMPL | `network_identity` | |
-| MISS | `discover_interfaces` and related | |
+| IMPL | `discover_interfaces` and related | |
 | MISS | `~/.reticulum` config/storage layout | Daemon uses `--identity` and `--state` |
 
 ### Utilities (lower priority for an SDK)
@@ -205,7 +207,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | PART | `rnstatus`, `rnpath` | Backends via RPC exist; no CLI; RPC is GET-only (no drop path / drop announce queues, no blackhole mutation) |
 | IMPL | `rnprobe` target | Reference `rnprobe` gets valid replies from the daemon; the SDK has no `rnprobe` client tool of its own |
 | MISS | `rncp`, `rnx`, `rnsh`, `rnid`, `rnodeconf` | Library primitives exist for `rncp`, `rnid`, `rnx` |
-| PART | Remote management, blackhole publishing and subscribing done; interface discovery missing | |
+| IMPL | Remote management, blackhole publishing and subscribing, interface discovery | |
 
 ## 6. Examples (manual ch13)
 
@@ -237,6 +239,6 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 
 1. Blackhole table with filtering, then publish/subscribe.
 2. Remote management destination and ACL; mutating admin calls.
-3. Interface discovery and network identities; logging hook.
+3. Logging hook.
 
 **Phase D:** transport packet cache, tunnels, Resource window growth, examples, CLI tools.

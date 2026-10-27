@@ -3,6 +3,7 @@
  * listening for other nodes' announces. Included by node_daemon.c after
  * node_mgmt.h. */
 #include <reticulum_c/rnc_discovery.h>
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <poll.h>
 #include <sys/wait.h>
@@ -36,6 +37,16 @@ typedef struct discovery_state {
   discovered_entry table[DISCOVERED_MAX];
   uint8_t invalid[DISCOVERED_INVALID_CACHE][32];
   size_t invalid_next;
+  /* auto-connect */
+  struct {
+    int used;
+    uint32_t id;
+    uint8_t endpoint[32];
+    uint64_t down_since;
+  } ac[16];
+  uint32_t ac_next_id;
+  uint64_t ac_monitor_next;
+  int ac_initial_ran, bootstrap_off[CONFIG_INTERFACES];
   rnc_identity identity; /* network identity if configured, else transport's */
   rnc_identity network;  /* the network identity (for encryption) */
   int has_network;
@@ -209,6 +220,7 @@ static int discovery_describe(const interface_config *f, rnc_discovery_info *inf
   return 1;
 }
 static int discovered_load(void);
+static void autoconnect_initial(void);
 static int discovery_start(const config *c, const rnc_identity *transport,
                            const rnc_identity *network, rnc_node *node) {
   size_t i;
@@ -230,6 +242,8 @@ static int discovery_start(const config *c, const rnc_identity *transport,
     discovery_stop();
     return 0;
   }
+  if (disc.listening)
+    autoconnect_initial();
   if (!any)
     return 1;
   disc.identity = network ? *network : *transport;
@@ -299,11 +313,14 @@ static void discovery_finish(const uint8_t stamp[RNC_STAMP_SIZE],
   printf("discovery announce interface=%s bytes=%zu\n",
          mgmt.settings.interfaces[j->iface].name, n);
 }
+static void autoconnect_monitor(uint64_t unix_seconds, uint64_t now);
 static void discovery_step(uint64_t unix_seconds, uint64_t now) {
   const config *c = &mgmt.settings;
   discovery_job *j = &disc.job;
   size_t i, best = c->count;
   uint64_t oldest = 0;
+  if (disc.listening)
+    autoconnect_monitor(unix_seconds, now);
   if (!disc.announcing)
     return;
   if (j->active) {
@@ -452,6 +469,7 @@ static void discovered_prune(uint64_t unix_seconds) {
 }
 /* Handles an announce event from the node: stores it if it is a valid, stamped
  * discovery announce from an authorised network. */
+static void autoconnect(const rnc_discovery_record *rec);
 static void discovery_heard(const rnc_node_event *event, uint64_t unix_seconds) {
   const rnc_announce *a = &event->route.announce;
   const config *c = &mgmt.settings;
@@ -515,6 +533,7 @@ static void discovery_heard(const rnc_node_event *event, uint64_t unix_seconds) 
   discovered_save(&rec);
   printf("discovered %s \"%s\" value=%u hops=%u\n", rec.info.type,
          rec.info.name, value, rec.hops);
+  autoconnect(&rec);
 }
 /* Admin listing, most available and best-stamped first. */
 static void discovery_list(admin_client *c, uint64_t unix_seconds) {
@@ -556,5 +575,217 @@ static void discovery_list(admin_client *c, uint64_t unix_seconds) {
     if (r->info.has_port)
       append(c, " port=%u", (unsigned)r->info.port);
     append(c, "\n");
+  }
+}
+
+/* ---- auto-connect (BackboneInterface announcements only) ---- */
+#define AUTOCONNECT_ID_BASE 0x7ffd0000u
+#define AUTOCONNECT_MIN_VERSION "1.5.2"
+static size_t autoconnect_count(void) {
+  size_t i, n = 0;
+  for (i = 0; i < 16; ++i)
+    n += disc.ac[i].used;
+  return n;
+}
+/* components of a dotted version, as RNS.Discovery.version_tuple */
+static int version_parts(const char *text, unsigned out[4]) {
+  size_t n = 0;
+  while (*text && n < 4) {
+    char *end;
+    unsigned long v;
+    if (!isdigit((unsigned char)*text))
+      break;
+    v = strtoul(text, &end, 10);
+    out[n++] = (unsigned)v;
+    text = *end == '.' ? end + 1 : end;
+    if (*end != '.')
+      break;
+  }
+  return (int)n;
+}
+static int autoconnect_qualified(const rnc_discovery_info *info) {
+  unsigned have[4] = {0}, need[4] = {0};
+  int hn, nn, i;
+  if (mgmt.settings.autoconnect_unverified)
+    return 1;
+  if (strcmp(info->impl_name, "RNS") || !info->version[0])
+    return 0;
+  hn = version_parts(info->version, have);
+  nn = version_parts(AUTOCONNECT_MIN_VERSION, need);
+  if (!hn)
+    return 0;
+  for (i = 0; i < 4 && (i < hn || i < nn); ++i) {
+    unsigned h = i < hn ? have[i] : 0, n = i < nn ? need[i] : 0;
+    if (h != n)
+      return h > n;
+  }
+  return 1;
+}
+static int autoconnect_exists(const rnc_discovery_info *info) {
+  uint8_t endpoint[32];
+  size_t i;
+  (void)rnc_discovery_endpoint_hash(info, endpoint);
+  for (i = 0; i < 16; ++i)
+    if (disc.ac[i].used && !memcmp(disc.ac[i].endpoint, endpoint, 32))
+      return 1;
+  for (i = 0; i < mgmt.settings.count; ++i) {
+    const interface_config *f = &mgmt.settings.interfaces[i];
+    if (f->enabled && !disc.bootstrap_off[i] &&
+        f->host.kind == RNC_HOST_TCP_CONNECT && f->host.address &&
+        !strcmp(f->host.address, info->reachable_on) &&
+        (!info->has_port || f->host.port == info->port))
+      return 1;
+  }
+  return 0;
+}
+/* Yggdrasil addresses (200::/7) need that network; the reference leaves them. */
+static int is_yggdrasil(const char *address) {
+  struct in6_addr a;
+  return inet_pton(AF_INET6, address, &a) == 1 && (a.s6_addr[0] & 0xfe) == 0x02;
+}
+static int autoconnect_name_taken(const char *name) {
+  size_t i;
+  rnc_host_status st;
+  for (i = 0; rnc_host_status_at(mgmt.host, i, &st) == RNC_OK; ++i)
+    if (!strcmp(st.name, name))
+      return 1;
+  return 0;
+}
+static void autoconnect(const rnc_discovery_record *rec) {
+  const config *c = &mgmt.settings;
+  const rnc_discovery_info *info = &rec->info;
+  rnc_host_config cfg;
+  rnc_ifac ifac;
+  char name[96];
+  size_t slot;
+  unsigned seq = 2;
+  if (!c->autoconnect_max || autoconnect_count() >= c->autoconnect_max)
+    return;
+  if (strcmp(info->type, "BackboneInterface") || !info->has_port ||
+      !info->reachable_on[0] || !autoconnect_qualified(info))
+    return;
+  if (autoconnect_exists(info))
+    return;
+  if (is_yggdrasil(info->reachable_on))
+    return;
+  if (info->reachable_on[strlen(info->reachable_on) - 1] != '.' &&
+      strlen(info->reachable_on) > 6 &&
+      !strcmp(info->reachable_on + strlen(info->reachable_on) - 6, ".onion"))
+    return; /* would need Tor */
+  if (!c->autoconnect_allow_local &&
+      (!strcmp(info->reachable_on, "127.0.0.1") ||
+       !strcmp(info->reachable_on, "0.0.0.0")))
+    return; /* the reference refuses these as invalid targets */
+  for (slot = 0; slot < 16 && disc.ac[slot].used; ++slot) {
+  }
+  if (slot == 16)
+    return;
+  (void)snprintf(name, sizeof(name), "%s", info->name);
+  while (autoconnect_name_taken(name))
+    (void)snprintf(name, sizeof(name), "%.80s (%u)", info->name, seq++);
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  cfg.name = name;
+  cfg.address = info->reachable_on;
+  cfg.port = (uint16_t)info->port;
+  cfg.bitrate = 5000000u; /* the reference configures 5 Mbit/s */
+  cfg.mode = c->has_autoconnect_mode ? c->autoconnect_mode
+             : c->transport          ? RNC_MODE_GATEWAY
+                                     : RNC_MODE_FULL;
+  if (info->ifac_netname[0] || info->ifac_netkey[0]) {
+    if (rnc_ifac_init(&ifac, info->ifac_netname, strlen(info->ifac_netname),
+                      info->ifac_netkey, strlen(info->ifac_netkey), 16) != RNC_OK)
+      return;
+    cfg.ifac = &ifac;
+  }
+  if (rnc_host_add(mgmt.host, AUTOCONNECT_ID_BASE + disc.ac_next_id, &cfg) !=
+      RNC_OK) {
+    fprintf(stderr, "discovery: cannot auto-connect %s\n", name);
+    return;
+  }
+  disc.ac[slot].used = 1;
+  disc.ac[slot].id = AUTOCONNECT_ID_BASE + disc.ac_next_id++;
+  disc.ac[slot].down_since = 0;
+  (void)rnc_discovery_endpoint_hash(info, disc.ac[slot].endpoint);
+  printf("auto-connecting %s to %s:%u\n", name, info->reachable_on,
+         (unsigned)info->port);
+}
+/* Connects to what is already known, best first, up to the configured count. */
+static void autoconnect_initial(void) {
+  size_t i;
+  if (!mgmt.settings.autoconnect_max)
+    return;
+  for (i = 0; i < DISCOVERED_MAX; ++i)
+    if (disc.table[i].used && disc.table[i].record.info.transport &&
+        !discovered_remove_reason(&disc.table[i], (double)time(NULL), &mgmt.settings,
+                                  mgmt.node, (uint64_t)time(NULL)))
+      autoconnect(&disc.table[i].record);
+  disc.ac_initial_ran = 1;
+}
+static void autoconnect_monitor(uint64_t unix_seconds, uint64_t now) {
+  const config *c = &mgmt.settings;
+  uint64_t every = (c->autoconnect_monitor_seconds ? c->autoconnect_monitor_seconds : 5u) * 1000u;
+  uint64_t detach = (c->autoconnect_detach_seconds ? c->autoconnect_detach_seconds : 12u) * 1000u;
+  size_t i, online = 0, bootstraps_active = 0, free_slots, reserved;
+  if (!c->autoconnect_max || now < disc.ac_monitor_next)
+    return;
+  disc.ac_monitor_next = now + every;
+  for (i = 0; i < 16; ++i) {
+    rnc_host_status st;
+    if (!disc.ac[i].used)
+      continue;
+    if (rnc_host_get_status(mgmt.host, disc.ac[i].id, &st) != RNC_OK) {
+      disc.ac[i].used = 0; /* removed from under us */
+      continue;
+    }
+    if (st.online) {
+      online++;
+      disc.ac[i].down_since = 0;
+    } else if (!disc.ac[i].down_since)
+      disc.ac[i].down_since = now;
+    else if (now - disc.ac[i].down_since >= detach) {
+      printf("auto-discovered interface %s down, detaching\n", st.name);
+      (void)rnc_host_remove(mgmt.host, disc.ac[i].id);
+      disc.ac[i].used = 0;
+    }
+  }
+  for (i = 0; i < c->count; ++i)
+    bootstraps_active += c->interfaces[i].enabled &&
+                         c->interfaces[i].bootstrap_only && !disc.bootstrap_off[i];
+  if (online >= c->autoconnect_max) {
+    for (i = 0; i < c->count; ++i)
+      if (c->interfaces[i].enabled && c->interfaces[i].bootstrap_only &&
+          !disc.bootstrap_off[i]) {
+        printf("tearing down bootstrap interface %s\n", c->interfaces[i].name);
+        (void)rnc_host_remove(mgmt.host, c->interfaces[i].interface_id);
+        disc.bootstrap_off[i] = 1;
+      }
+  }
+  if (!online && !bootstraps_active) {
+    for (i = 0; i < c->count; ++i)
+      if (c->interfaces[i].enabled && c->interfaces[i].bootstrap_only &&
+          disc.bootstrap_off[i] &&
+          rnc_host_add(mgmt.host, c->interfaces[i].interface_id,
+                       &c->interfaces[i].host) == RNC_OK) {
+        printf("no auto-discovered interfaces connected, re-enabling bootstrap "
+               "interface %s\n", c->interfaces[i].name);
+        disc.bootstrap_off[i] = 0;
+      }
+  }
+  free_slots = c->autoconnect_max > autoconnect_count()
+                   ? c->autoconnect_max - autoconnect_count() : 0;
+  reserved = c->autoconnect_max / 4u;
+  if (disc.ac_initial_ran && free_slots > reserved) {
+    /* try a random available transport node we are not connected to */
+    size_t candidates[DISCOVERED_MAX], count = 0;
+    uint8_t pick[2];
+    for (i = 0; i < DISCOVERED_MAX; ++i)
+      if (disc.table[i].used && disc.table[i].record.info.transport &&
+          rnc_discovery_status((double)unix_seconds - disc.table[i].record.last_heard) ==
+              RNC_DISCOVERY_STATUS_AVAILABLE &&
+          !autoconnect_exists(&disc.table[i].record.info))
+        candidates[count++] = i;
+    if (count && secure_random(NULL, pick, sizeof(pick)) == RNC_OK)
+      autoconnect(&disc.table[candidates[(pick[0] | (pick[1] << 8)) % count]].record);
   }
 }

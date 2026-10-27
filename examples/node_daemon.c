@@ -80,7 +80,9 @@ typedef struct config {
   char network_identity[512]; /* identity file path, empty = none */
   /* interface discovery: listening, authorised sources, auto-connect */
   int discover_interfaces, autoconnect_unverified, has_autoconnect_mode;
-  unsigned required_discovery_value, autoconnect_max, discovery_job_interval;
+  unsigned required_discovery_value, autoconnect_max, discovery_job_interval,
+      autoconnect_monitor_seconds, autoconnect_detach_seconds;
+  int autoconnect_allow_local;
   rnc_interface_mode autoconnect_mode;
   uint8_t disc_sources[RNC_SERVICE_ALLOWLIST][16];
   size_t disc_source_count;
@@ -642,23 +644,30 @@ static int interface_id(interface_config *f) {
   OPENSSL_cleanse(digest, sizeof(digest));
   return f->interface_id != 0x7fff0001u;
 }
+/* Points the host config's strings at the interface's own buffers (also needed
+ * for copies of the config, whose pointers still reference the original). */
+static void interface_bind(interface_config *f) {
+  f->host.name = f->name;
+  f->host.address = f->address[0] ? f->address
+                                  : (f->host.kind == RNC_HOST_TCP_LISTEN ||
+                                             f->host.kind == RNC_HOST_UDP
+                                         ? "127.0.0.1"
+                                         : NULL);
+  f->host.target = f->target[0] ? f->target : NULL;
+  f->host.device = f->device[0] ? f->device : NULL;
+  f->host.group = f->group[0] ? f->group : NULL;
+  f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
+  f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
+  if (f->host.ifac)
+    f->host.ifac = &f->ifac;
+}
 static int finish_config(config *c) {
   size_t i, enabled = 0;
   for (i = 0; i < c->count; ++i) {
     interface_config *f = &c->interfaces[i];
     if (!f->has_type)
       return 0;
-    f->host.name = f->name;
-    f->host.address = f->address[0] ? f->address
-                                    : (f->host.kind == RNC_HOST_TCP_LISTEN ||
-                                               f->host.kind == RNC_HOST_UDP
-                                           ? "127.0.0.1"
-                                           : NULL);
-    f->host.target = f->target[0] ? f->target : NULL;
-    f->host.device = f->device[0] ? f->device : NULL;
-    f->host.group = f->group[0] ? f->group : NULL;
-    f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
-    f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
+    interface_bind(f);
     if (f->backbone && !f->host.bitrate)
       f->host.bitrate = 100000000u; /* reference BITRATE_GUESS */
     if (!f->enabled)
@@ -819,6 +828,25 @@ static int read_config(const char *path, config *c) {
           valid = 0;
           break;
         }
+      } else if (!strcmp(s, "autoconnect_monitor_seconds") ||
+                 !strcmp(s, "autoconnect_detach_seconds")) {
+        if (!number(value, 3600, &n) || !n) {
+          valid = 0;
+          break;
+        }
+        if (s[12] == 'm')
+          c->autoconnect_monitor_seconds = (unsigned)n;
+        else
+          c->autoconnect_detach_seconds = (unsigned)n;
+      } else if (!strcmp(s, "autoconnect_interface_gravity") ||
+                 !strcmp(s, "autoconnect_announces_to_internal")) {
+        /* accepted for compatibility; path gravity is not implemented */
+        char *end;
+        (void)strtod(value, &end);
+        if (end == value || *end) {
+          valid = 0;
+          break;
+        }
       } else if (!strcmp(s, "required_discovery_value") ||
                  !strcmp(s, "autoconnect_discovered_interfaces") ||
                  !strcmp(s, "discovery_job_interval")) {
@@ -920,6 +948,8 @@ static int read_config(const char *path, config *c) {
           c->discover_interfaces = b;
         else if (!strcmp(s, "autoconnect_unverified_implementations"))
           c->autoconnect_unverified = b;
+        else if (!strcmp(s, "autoconnect_allow_local"))
+          c->autoconnect_allow_local = b;
         else {
           valid = 0;
           break;

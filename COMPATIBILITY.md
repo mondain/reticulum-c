@@ -261,3 +261,38 @@ As in the reference, the first request of a transfer waits only about 0.4 s
 because its formula mixes SDU bytes with a bits-per-second rate, so links with
 a round trip above that see a duplicate first request; rates settle after the
 first round.
+
+## Interface discovery (`feature/interface-discovery`)
+
+New library pieces: `rnc_stamp` (LXMF-compatible proof-of-work stamps, with a
+resumable search for event loops), `rnc_discovery` (announce payloads: pack,
+stamp, encrypt, parse and validate; the reference's on-disk record layout;
+configuration entries; status classification) and
+`rnc_node_set_destination_data`. The daemon uses them to announce its
+discoverable interfaces, to listen for others', and to auto-connect to Backbone
+announcements.
+
+Daemon behaviour that differs from the reference:
+- Stamp generation runs in slices between event-loop iterations rather than
+  blocking a thread, and the announce job interval can be changed with
+  `discovery_job_interval` (reference: fixed 60 s); `announce_interval_seconds`
+  and `autoconnect_monitor_seconds` / `autoconnect_detach_seconds` exist so tests
+  need not wait (reference: minutes, 5 s, 12 s).
+- Announces carry the implementation name `reticulum-c`, so reference nodes
+  auto-connect to them only with `autoconnect_unverified_implementations`.
+- The reference refuses to auto-connect to 127.0.0.1 and 0.0.0.0; the daemon does
+  too unless `autoconnect_allow_local` is set.
+- Auto-connected interface IDs start at 0x7ffd0000.
+
+Verification: stamp workblocks of 1, 3, 20 and 200 rounds, stamp values, packed
+announce maps (three interface types) and the three record layouts match bytes
+produced by the reference (`umsgpack`, `LXStamper`); an encrypted announce made
+by the reference decrypts here, and ours validates in the reference. End to end
+with the unmodified reference (which needs LXMF; CI installs `lxmf==1.2.1` with
+`--no-deps`): the reference discovers and lists this daemon's interface
+(`rnstatus -d -D`), and this daemon discovers the reference's interface
+announce. Native: two-daemon listening (stored, restart, stamp requirement,
+authorised sources, encryption with and without the key) and auto-connect with
+bootstrap teardown and fallback.
+
+Not implemented: I2P and Weave announcements, path gravity.

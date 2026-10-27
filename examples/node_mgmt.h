@@ -154,6 +154,11 @@ static int mgmt_start(const config *c, const rnc_identity *id, rnc_node *node,
     }
   }
   mgmt.settings = *c;
+  {
+    size_t k;
+    for (k = 0; k < mgmt.settings.count; ++k)
+      interface_bind(&mgmt.settings.interfaces[k]);
+  }
   mgmt.node = node;
   mgmt.host = host;
   mgmt.identity = id;
