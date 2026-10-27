@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
+#include <reticulum_c/rnc_discovery.h>
 #include <reticulum_c/rnc_ipc.h>
 #include <reticulum_c/rnc_link.h>
 #include <reticulum_c/rnc_service.h>
@@ -950,6 +951,121 @@ static void network_identity(const char *exe) {
   remove_tree(dir);
   puts("node network identity tests passed");
 }
+/* Interface discovery announces: a daemon with a discoverable interface
+ * announces rnstransport.discovery.interface; a C client over TCP receives and
+ * validates it. */
+static int collect_announce(unsigned port, const uint8_t destination[16],
+                            rnc_announce *out, unsigned seconds) {
+  mgmt_client c = {0};
+  rnc_host_config tcp = {0};
+  uint64_t now = 1000, deadline;
+  int found = 0;
+  c.seed = 11;
+  CHECK(rnc_identity_generate(&c.id, mgmt_rng, &c.seed) == RNC_OK);
+  c.node = rnc_node_new(&c.id, 0, mgmt_rng, &c.seed);
+  c.host = c.node ? rnc_host_new(c.node) : NULL;
+  CHECK(c.host);
+  tcp.kind = RNC_HOST_TCP_CONNECT;
+  tcp.address = "127.0.0.1";
+  tcp.port = (uint16_t)port;
+  CHECK(rnc_host_add(c.host, 1, &tcp) == RNC_OK);
+  deadline = now + seconds * 1000u;
+  while (!found && now < deadline) {
+    rnc_host_event he;
+    now += 10;
+    CHECK(rnc_host_step(c.host, 5, (uint64_t)time(NULL), now) == RNC_OK);
+    while (rnc_host_poll(c.host, &he) == RNC_OK)
+      if (he.type == RNC_HOST_NODE && he.node.type == RNC_NODE_ANNOUNCE &&
+          !memcmp(he.node.route.destination, destination, 16)) {
+        *out = he.node.route.announce;
+        found = 1;
+      }
+  }
+  rnc_host_free(c.host);
+  rnc_node_free(c.node);
+  return found;
+}
+static void discovery_announce(const char *exe) {
+  char dir[] = "/tmp/rnc-node-disc-XXXXXX", cfg[256], key[256], admin[256],
+       netid[256], text[2048], id[33];
+  unsigned port = unused_port();
+  uint8_t private_key[64], network_key[64], destination[16], name_hash[10],
+      stamp[32];
+  rnc_identity daemon = {0}, network = {0};
+  rnc_announce announce;
+  rnc_discovery_info info;
+  unsigned value;
+  size_t k;
+  int fd, keyfd;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(netid, sizeof(netid), "%s/network", dir) > 0);
+  /* plain announce on the transport identity */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "discovery_job_interval = 1\n[interfaces]\n[[Public]]\n"
+                 "type = BackboneInterface\nlisten_ip = 127.0.0.1\n"
+                 "port = %u\ndiscoverable = yes\ndiscovery_name = "
+                 "Test  Node  (EU)\ndiscovery_stamp_value = 8\nreachable_on = "
+                 "127.0.0.1\nannounce_interval_seconds = 3600\nlatitude = "
+                 "48.8584\nlongitude = 2.2945\nheight = 35\n",
+                 port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  keyfd = open(key, O_RDONLY);
+  CHECK(keyfd >= 0 && read(keyfd, private_key, 64) == 64);
+  close(keyfd);
+  CHECK(rnc_identity_from_private(&daemon, private_key) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.discovery.interface", &daemon,
+                             name_hash, destination) == RNC_OK);
+  CHECK(collect_announce(port, destination, &announce, 20));
+  CHECK(!memcmp(announce.identity.hash, daemon.hash, 16));
+  CHECK(rnc_discovery_parse(announce.app_data, announce.app_size, 8, NULL,
+                            &info, stamp, &value) == RNC_OK);
+  CHECK(!strcmp(info.type, "BackboneInterface") && info.transport &&
+        !memcmp(info.transport_id, daemon.hash, 16) &&
+        !strcmp(info.name, "Test Node (EU)") &&
+        !strcmp(info.reachable_on, "127.0.0.1") && info.has_port &&
+        info.port == port && info.has_latitude && info.latitude == 48.8584 &&
+        info.longitude == 2.2945 && info.height == 35.0 && value >= 8);
+  stop(p, fd);
+  /* encrypted to a network identity, which also owns the destination */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "network_identity = %s\ndiscovery_job_interval = 1\n"
+                 "[interfaces]\n[[Public]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\ndiscoverable = "
+                 "yes\ndiscovery_name = Secret Node\ndiscovery_stamp_value = "
+                 "8\ndiscovery_encrypt = yes\nreachable_on = example.org\n",
+                 netid, port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  keyfd = open(netid, O_RDONLY);
+  CHECK(keyfd >= 0 && read(keyfd, network_key, 64) == 64);
+  close(keyfd);
+  CHECK(rnc_identity_from_private(&network, network_key) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.discovery.interface", &network,
+                             name_hash, destination) == RNC_OK);
+  CHECK(collect_announce(port, destination, &announce, 20));
+  CHECK(!memcmp(announce.identity.hash, network.hash, 16));
+  CHECK(announce.app_data[0] == RNC_DISCOVERY_FLAG_ENCRYPTED);
+  CHECK(rnc_discovery_parse(announce.app_data, announce.app_size, 8, NULL,
+                            &info, stamp, &value) == RNC_STATE);
+  CHECK(rnc_discovery_parse(announce.app_data, announce.app_size, 8, &network,
+                            &info, stamp, &value) == RNC_OK);
+  CHECK(!strcmp(info.type, "TCPServerInterface") && info.port == port &&
+        !strcmp(info.reachable_on, "example.org") && !info.transport);
+  for (k = 0; k < 1; ++k)
+    CHECK(info.name[0]);
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node discovery announce tests passed");
+}
 static void shared(const char *exe, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-node-shared-XXXXXX", cfg[256], keypath[256],
        admin[256], storage[256], text[2048], identity[33];
@@ -1488,6 +1604,8 @@ int main(int argc, char **argv) {
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+  else if (!strcmp(argv[2], "disc_announce") && argc == 3)
+    discovery_announce(argv[1]);
   else if (!strcmp(argv[2], "netid") && argc == 3)
     network_identity(argv[1]);
   else if (!strcmp(argv[2], "probe") && argc == 3)

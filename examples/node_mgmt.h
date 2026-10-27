@@ -28,7 +28,13 @@ static const uint8_t *network_identity_hash(void) {
 static const uint8_t *probe_responder_hash(void) {
   return mgmt.probing ? mgmt.probe : NULL;
 }
+/* defined in node_discovery.h */
+static void discovery_stop(void);
+static int discovery_start(const config *c, const rnc_identity *transport,
+                           const rnc_identity *network, rnc_node *node);
+static void discovery_step(uint64_t unix_seconds, uint64_t now);
 static void mgmt_stop(void) {
+  discovery_stop();
   rnc_identity_clear(&mgmt.network);
   rnc_responder_free(mgmt.responder);
   rnc_requester_free(mgmt.requester);
@@ -146,6 +152,14 @@ static int mgmt_start(const config *c, const rnc_identity *id, rnc_node *node,
       mgmt_stop();
       return 0;
     }
+  }
+  mgmt.settings = *c;
+  mgmt.node = node;
+  mgmt.host = host;
+  mgmt.identity = id;
+  if (!discovery_start(c, id, mgmt.has_network ? &mgmt.network : NULL, node)) {
+    mgmt_stop();
+    return 0;
   }
   if (c->respond_to_probes) {
     /* rnstransport.probe proves every packet it receives (PROVE_ALL) and takes
@@ -293,6 +307,7 @@ static void blackhole_updates(uint64_t unix_seconds, uint64_t now) {
   }
 }
 static void mgmt_step(uint64_t unix_seconds, uint64_t now) {
+  discovery_step(unix_seconds, now);
   if (mgmt.responder)
     (void)rnc_responder_tick(mgmt.responder, unix_seconds, now);
   if (mgmt.requester) {

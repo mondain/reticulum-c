@@ -63,6 +63,14 @@ typedef struct interface_config {
   uint32_t interface_id;
   int enabled, has_type, backbone;
   rnc_ifac ifac;
+  /* interface discovery (announcing); see node_discovery.h */
+  char type_name[32], disc_name[64], reachable_on[128], location_cmd[256],
+      disc_modulation[32];
+  int discoverable, disc_encrypt, publish_ifac, has_lat, has_lon, has_height,
+      has_lxmf, bootstrap_only;
+  unsigned announce_interval_s, stamp_value, disc_frequency, disc_bandwidth;
+  double lat, lon, height;
+  uint8_t lxmf[16];
 } interface_config;
 typedef struct config {
   int transport, share, share_tcp, remote_management, publish_blackhole,
@@ -70,6 +78,13 @@ typedef struct config {
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
   char network_identity[512]; /* identity file path, empty = none */
+  /* interface discovery: listening, authorised sources, auto-connect */
+  int discover_interfaces, autoconnect_unverified, has_autoconnect_mode;
+  unsigned required_discovery_value, autoconnect_max, discovery_job_interval;
+  rnc_interface_mode autoconnect_mode;
+  uint8_t disc_sources[RNC_SERVICE_ALLOWLIST][16];
+  size_t disc_source_count;
+  char discovery_storage[512];
   /* blackhole subscriptions: sources, update interval and first-run delay */
   uint8_t bh_sources[RNC_SERVICE_ALLOWLIST][16];
   size_t bh_source_count;
@@ -160,6 +175,7 @@ static int set_type(interface_config *f, const char *value) {
     if (!strcmp(value, types[i].name)) {
       f->host.kind = types[i].kind;
       f->has_type = 1;
+      (void)snprintf(f->type_name, sizeof(f->type_name), "%s", value);
       f->backbone = !strncmp(value, "Backbone", 8);
       /* wire-compatible with TCP (HDLC); reference defaults differ */
       if (f->backbone && types[i].kind == RNC_HOST_TCP_LISTEN)
@@ -168,12 +184,100 @@ static int set_type(interface_config *f, const char *value) {
     }
   return 0;
 }
+/* Discovery announce options of an interface; -1 when `key` is not one. */
+static int discovery_key(interface_config *f, const char *key,
+                         const char *value) {
+  char *end;
+  double d;
+  unsigned long n;
+  int b;
+  if (!strcmp(key, "discoverable")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->discoverable = b;
+    return 1;
+  }
+  if (!strcmp(key, "discovery_encrypt") || !strcmp(key, "publish_ifac") ||
+      !strcmp(key, "bootstrap_only")) {
+    if (!boolean(value, &b))
+      return 0;
+    if (key[0] == 'd')
+      f->disc_encrypt = b;
+    else if (key[0] == 'p')
+      f->publish_ifac = b;
+    else
+      f->bootstrap_only = b;
+    return 1;
+  }
+  if (!strcmp(key, "discovery_name"))
+    return text_copy(f->disc_name, sizeof(f->disc_name), value);
+  if (!strcmp(key, "reachable_on"))
+    return text_copy(f->reachable_on, sizeof(f->reachable_on), value);
+  if (!strcmp(key, "location_cmd"))
+    return text_copy(f->location_cmd, sizeof(f->location_cmd), value);
+  if (!strcmp(key, "discovery_modulation"))
+    return text_copy(f->disc_modulation, sizeof(f->disc_modulation), value);
+  if (!strcmp(key, "announce_interval") ||
+      !strcmp(key, "announce_interval_seconds")) {
+    if (!number(value, 100000000ul, &n) || !n)
+      return 0;
+    /* minutes in the reference, never below five; the seconds form exists so
+     * tests need not wait */
+    f->announce_interval_s =
+        key[17] == '_' ? (unsigned)n : (unsigned)(n < 5 ? 5 : n) * 60u;
+    return 1;
+  }
+  if (!strcmp(key, "discovery_stamp_value") ||
+      !strcmp(key, "discovery_frequency") ||
+      !strcmp(key, "discovery_bandwidth")) {
+    if (!number(value, UINT32_MAX, &n))
+      return 0;
+    if (key[10] == 's') {
+      if (n > 64)
+        return 0;
+      f->stamp_value = (unsigned)n;
+    } else if (key[10] == 'f')
+      f->disc_frequency = (unsigned)n;
+    else
+      f->disc_bandwidth = (unsigned)n;
+    return 1;
+  }
+  if (!strcmp(key, "latitude") || !strcmp(key, "longitude") ||
+      !strcmp(key, "height")) {
+    d = strtod(value, &end);
+    if (end == value || *end || d != d)
+      return 0;
+    if (key[1] == 'a' && (d < -90 || d > 90))
+      return 0;
+    if (key[1] == 'o' && (d < -180 || d > 180))
+      return 0;
+    if (key[0] == 'l' && key[1] == 'a')
+      f->lat = d, f->has_lat = 1;
+    else if (key[0] == 'l')
+      f->lon = d, f->has_lon = 1;
+    else
+      f->height = d, f->has_height = 1;
+    return 1;
+  }
+  if (!strcmp(key, "discovery_lxmf_address")) {
+    if (strlen(value) != 32 || !decode_hex(value, f->lxmf))
+      return 0;
+    f->has_lxmf = 1;
+    return 1;
+  }
+  return -1;
+}
 static int interface_key(interface_config *f, const char *key,
                          const char *value) {
   unsigned long n;
   int b;
   if (!strcmp(key, "type"))
     return set_type(f, value);
+  {
+    int d = discovery_key(f, key, value);
+    if (d >= 0)
+      return d;
+  }
   if (!strcmp(key, "enabled")) {
     if (!boolean(value, &b))
       return 0;
@@ -704,6 +808,52 @@ static int read_config(const char *path, config *c) {
           valid = 0;
           break;
         }
+      } else if (!strcmp(s, "interface_discovery_sources")) {
+        if (!parse_hash_list(value, c->disc_sources, &c->disc_source_count)) {
+          valid = 0;
+          break;
+        }
+      } else if (!strcmp(s, "discovery_storage")) {
+        if (!text_copy(c->discovery_storage, sizeof(c->discovery_storage),
+                       value)) {
+          valid = 0;
+          break;
+        }
+      } else if (!strcmp(s, "required_discovery_value") ||
+                 !strcmp(s, "autoconnect_discovered_interfaces") ||
+                 !strcmp(s, "discovery_job_interval")) {
+        if (!number(value, 100000, &n)) {
+          valid = 0;
+          break;
+        }
+        if (s[0] == 'r')
+          c->required_discovery_value = (unsigned)n;
+        else if (s[0] == 'a')
+          c->autoconnect_max = (unsigned)n;
+        else
+          c->discovery_job_interval = (unsigned)n;
+      } else if (!strcmp(s, "autoconnect_interface_mode")) {
+        static const struct {
+          const char *name;
+          rnc_interface_mode mode;
+        } modes[] = {{"full", RNC_MODE_FULL},
+                     {"gateway", RNC_MODE_GATEWAY},
+                     {"gw", RNC_MODE_GATEWAY},
+                     {"access_point", RNC_MODE_ACCESS_POINT},
+                     {"ap", RNC_MODE_ACCESS_POINT},
+                     {"roaming", RNC_MODE_ROAMING},
+                     {"boundary", RNC_MODE_BOUNDARY}};
+        size_t k;
+        int found = 0;
+        for (k = 0; k < sizeof(modes) / sizeof(*modes); k++)
+          if (!strcasecmp(value, modes[k].name)) {
+            c->autoconnect_mode = modes[k].mode;
+            c->has_autoconnect_mode = found = 1;
+          }
+        if (!found) {
+          valid = 0;
+          break;
+        }
       } else if (!strcmp(s, "network_identity")) {
         const char *home = getenv("HOME");
         int n;
@@ -766,6 +916,10 @@ static int read_config(const char *path, config *c) {
           c->publish_blackhole = b;
         else if (!strcmp(s, "respond_to_probes"))
           c->respond_to_probes = b;
+        else if (!strcmp(s, "discover_interfaces"))
+          c->discover_interfaces = b;
+        else if (!strcmp(s, "autoconnect_unverified_implementations"))
+          c->autoconnect_unverified = b;
         else {
           valid = 0;
           break;
@@ -1332,6 +1486,7 @@ static void admin_step(int listener, admin_client clients[4], rnc_host *host,
 }
 #include "node_rpc.h"
 #include "node_mgmt.h"
+#include "node_discovery.h"
 
 int main(int argc, char **argv) {
   const char *config_path = NULL, *key_path = NULL, *admin_path = NULL,
