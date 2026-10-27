@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
@@ -18,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -3051,6 +3053,334 @@ static void x_reference(const char *exe, const char *x, const char *python) {
   remove_tree(dir);
   puts("x reference tests passed");
 }
+
+/* ---- reticulum-c-sh (rnsh compatible remote shell) ----------------------- */
+/* Like run_cp, but feeds `input` to the command's standard input. */
+static int run_cp_input(const char *cp, char *out, size_t size, char *const *args,
+                        const char *input) {
+  int out_fds[2], in_fds[2], status;
+  size_t n = 0;
+  pid_t p;
+  unsigned tries;
+  CHECK(!pipe(out_fds) && !pipe(in_fds));
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    close(out_fds[0]);
+    close(in_fds[1]);
+    CHECK(dup2(out_fds[1], STDOUT_FILENO) >= 0 &&
+          dup2(out_fds[1], STDERR_FILENO) >= 0 && dup2(in_fds[0], STDIN_FILENO) >= 0);
+    close(out_fds[1]);
+    close(in_fds[0]);
+    execv(cp, args);
+    _exit(127);
+  }
+  close(out_fds[1]);
+  close(in_fds[0]);
+  if (input && *input)
+    CHECK(write(in_fds[1], input, strlen(input)) == (ssize_t)strlen(input));
+  close(in_fds[1]);
+  for (tries = 0; tries < 900; ++tries) {
+    struct pollfd pf = {out_fds[0], POLLIN, 0};
+    int r = poll(&pf, 1, 100);
+    CHECK(r >= 0);
+    if (r > 0) {
+      ssize_t got = read(out_fds[0], out + n, size - 1 - n);
+      if (got <= 0)
+        break;
+      n += (size_t)got;
+      CHECK(n < size - 1);
+    }
+  }
+  CHECK(tries < 900);
+  out[n] = 0;
+  close(out_fds[0]);
+  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  return WEXITSTATUS(status);
+}
+/* Runs a command with a real terminal on stdin, stdout and stderr and returns
+ * what it wrote to the terminal. */
+static int run_in_pty(const char *cp, char *out, size_t size, char *const *args,
+                      const char *typed) {
+  int master = posix_openpt(O_RDWR | O_NOCTTY), status = 0;
+  size_t n = 0;
+  pid_t p;
+  unsigned tries;
+  int reaped = 0;
+  CHECK(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    int slave = open(ptsname(master), O_RDWR);
+    CHECK(slave >= 0);
+    CHECK(setsid() >= 0);
+    CHECK(ioctl(slave, TIOCSCTTY, 0) == 0);
+    CHECK(dup2(slave, 0) >= 0 && dup2(slave, 1) >= 0 && dup2(slave, 2) >= 0);
+    close(slave);
+    close(master);
+    execv(cp, args);
+    _exit(127);
+  }
+  if (typed && *typed) {
+    struct timespec t = {1, 0};
+    nanosleep(&t, NULL); /* let the client reach raw mode */
+    CHECK(write(master, typed, strlen(typed)) == (ssize_t)strlen(typed));
+  }
+  for (tries = 0; tries < 900 && !reaped; ++tries) {
+    struct pollfd pf = {master, POLLIN, 0};
+    int r = poll(&pf, 1, 100);
+    CHECK(r >= 0);
+    if (r > 0) {
+      ssize_t got = read(master, out + n, size - 1 - n);
+      if (got > 0)
+        n += (size_t)got;
+    }
+    if (waitpid(p, &status, WNOHANG) == p)
+      reaped = 1;
+  }
+  CHECK(reaped);
+  /* anything the client wrote just before exiting */
+  {
+    struct pollfd pf = {master, POLLIN, 0};
+    while (poll(&pf, 1, 100) > 0) {
+      ssize_t got = read(master, out + n, size - 1 - n);
+      if (got <= 0)
+        break;
+      n += (size_t)got;
+    }
+  }
+  out[n] = 0;
+  close(master);
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 255;
+}
+static int sh_run(const char *sh, const char *connect, char *out, size_t size,
+                  const char *input, const char *identity, ...) {
+  char *args[40];
+  size_t n = 0;
+  va_list ap;
+  const char *a;
+  args[n++] = (char *)sh;
+  args[n++] = "--connect";
+  args[n++] = (char *)connect;
+  args[n++] = "--identity";
+  args[n++] = (char *)identity;
+  va_start(ap, identity);
+  while ((a = va_arg(ap, const char *)) != NULL && n < 39)
+    args[n++] = (char *)a;
+  va_end(ap);
+  args[n] = NULL;
+  return run_cp_input(sh, out, size, args, input);
+}
+static void sh_tools(const char *exe, const char *sh) {
+  char dir[] = "/tmp/rnc-node-sh-XXXXXX", cfg[256], key[256], admin[256],
+       idb[300], idc[300], idl[300], connect[64], hash_b[33], hash_c[33],
+       dest[33], out[262144], listen_out[8192], text[2048], identity[33];
+  unsigned port = unused_port();
+  int dfd, lfd;
+  pid_t daemon, listener;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(idb, sizeof(idb), "%s/id_b", dir) > 0);
+  CHECK(snprintf(idc, sizeof(idc), "%s/id_c", dir) > 0);
+  CHECK(snprintf(idl, sizeof(idl), "%s/id_l", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  write_identity(idb, 41, hash_b);
+  write_identity(idc, 88, hash_c);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  {
+    char *listen_args[] = {(char *)sh, "--connect", connect, "--identity", idl,
+                           "-l", "-a", hash_b, "-b", "0", NULL};
+    listener = spawn_cp(sh, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rnsh listening for commands on <", listen_out,
+               sizeof(listen_out), 10);
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_after(listen_out, "rnsh listening for commands on <", dest);
+  }
+  /* pipes: a command, its exit code, stdin and stderr */
+  CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "echo",
+               "hello", "shell", NULL) == 0 && strstr(out, "hello shell"));
+  CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, "-m", dest, "--", "sh",
+               "-c", "exit 5", NULL) == 5);
+  CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "sh", "-c",
+               "exit 5", NULL) == 0);
+  CHECK(sh_run(sh, connect, out, sizeof(out), "piped input\n", idb, dest, "--",
+               "cat", NULL) == 0 && strstr(out, "piped input"));
+  CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "sh", "-c",
+               "echo to-stderr 1>&2", NULL) == 0 && strstr(out, "to-stderr"));
+  /* the default program takes commands from stdin; the remote identity is set */
+  CHECK(sh_run(sh, connect, out, sizeof(out), "echo id=$RNS_REMOTE_IDENTITY\n",
+               idb, dest, NULL) == 0 && strstr(out, hash_b));
+  /* a lot of output goes through the channel flow control intact */
+  CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "seq", "1",
+               "30000", NULL) == 0 && strstr(out, "\n30000\n") &&
+        strstr(out, "\n15000\n"));
+  /* a terminal on the initiator gives the command a terminal too */
+  {
+    char *args[] = {(char *)sh, "--connect", connect, "--identity", idb, dest,
+                    "--", "sh", "-c", "tty; echo cols=$(stty size)", NULL};
+    CHECK(run_in_pty(sh, out, sizeof(out), args, NULL) == 0);
+    CHECK(strstr(out, "/dev/") && strstr(out, "cols="));
+  }
+  /* typing into the default shell, then leaving with exit */
+  {
+    char *args[] = {(char *)sh, "--connect", connect, "--identity", idb, "-m",
+                    dest, NULL};
+    CHECK(run_in_pty(sh, out, sizeof(out), args,
+                     "echo typed-$((6*7))\rexit 4\r") == 4);
+    CHECK(strstr(out, "typed-42"));
+  }
+  /* "~." after a newline ends the session even though the command runs on */
+  {
+    char *args[] = {(char *)sh, "--connect", connect, "--identity", idb, dest,
+                    "--", "sleep", "60", NULL};
+    time_t t0 = time(NULL);
+    CHECK(run_in_pty(sh, out, sizeof(out), args, "\r~.") == 0);
+    CHECK(time(NULL) - t0 < 20);
+  }
+  /* a command that ignores HUP and TERM is still stopped when the session ends */
+  {
+    char pidfile[300], script[600], pidtext[32];
+    char *args[] = {(char *)sh, "--connect", connect, "--identity", idb, dest,
+                    "--", "sh", "-c", script, NULL};
+    pid_t victim;
+    CHECK(snprintf(pidfile, sizeof(pidfile), "%s/victim.pid", dir) > 0);
+    CHECK(snprintf(script, sizeof(script),
+                   "echo $$ > %s; trap '' HUP TERM; while :; do sleep 1; done",
+                   pidfile) > 0);
+    CHECK(run_in_pty(sh, out, sizeof(out), args, "\r~.") == 0);
+    CHECK(file_read(pidfile, pidtext, sizeof(pidtext) - 1) > 0);
+    victim = (pid_t)atoi(pidtext);
+    CHECK(victim > 1);
+    {
+      unsigned w;
+      int gone = 0;
+      for (w = 0; w < 50 && !gone; ++w) {
+        struct timespec t = {0, 100000000};
+        gone = kill(victim, 0) != 0;
+        if (!gone)
+          nanosleep(&t, NULL);
+      }
+      CHECK(gone);
+    }
+    /* and the listener is still serving */
+    CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "echo",
+                 "still-up", NULL) == 0 && strstr(out, "still-up"));
+  }
+  /* an unlisted identity is turned away and runs nothing */
+  CHECK(sh_run(sh, connect, out, sizeof(out), "", idc, dest, "--", "echo",
+               "intruder", NULL) != 0 && !strstr(out, "intruder") &&
+        strstr(out, "Identity not allowed"));
+  (void)hash_c;
+  /* a listener may refuse remote command lines */
+  stop_cp(listener, lfd);
+  {
+    char *listen_args[] = {(char *)sh, "--connect", connect, "--identity", idl,
+                           "-l", "-a", hash_b, "-b", "0", "-C", "--", "echo",
+                           "fixed program", NULL};
+    listener = spawn_cp(sh, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, NULL) == 0 &&
+          strstr(out, "fixed program"));
+    CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "echo",
+                 "custom", NULL) != 0 &&
+          strstr(out, "not allowed by listener"));
+    stop_cp(listener, lfd);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("sh tool tests passed");
+}
+/* The reference rnsh against ours, both directions. */
+static void sh_reference(const char *exe, const char *sh, const char *python) {
+  char dir[] = "/tmp/rnc-sh-ref-XXXXXX", cfg[256], key[256], admin[256],
+       refcfg[300], refconf[320], shcfg[300], idl[300], ref_l[300], ref_c[300],
+       connect[64], hash_ours[33], hash_ref[33], dest[33], out[16384],
+       listen_out[16384], text[2048], identity[33];
+  unsigned port = unused_port();
+  int dfd, lfd;
+  pid_t daemon, listener;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(refcfg, sizeof(refcfg), "%s/refcfg", dir) > 0 &&
+        !mkdir(refcfg, 0700));
+  CHECK(snprintf(refconf, sizeof(refconf), "%s/config", refcfg) > 0);
+  CHECK(snprintf(shcfg, sizeof(shcfg), "%s/shcfg", dir) > 0 &&
+        !mkdir(shcfg, 0700));
+  CHECK(snprintf(idl, sizeof(idl), "%s/id_ours", dir) > 0);
+  CHECK(snprintf(ref_l, sizeof(ref_l), "%s/id_ref_l", dir) > 0);
+  CHECK(snprintf(ref_c, sizeof(ref_c), "%s/id_ref_c", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  write_identity(idl, 55, hash_ours);
+  write_identity(ref_c, 66, hash_ref);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = No\n"
+                 "[interfaces]\n[[Daemon]]\ntype = TCPClientInterface\n"
+                 "enabled = yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+                 port) > 0);
+  config_file(refconf, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+
+  /* ours connects to the reference listener */
+  {
+    char *ref_listen[] = {(char *)python, "-u", "-m", "RNS.Utilities.rnsh.rnsh",
+                          "--config", shcfg, "--rnsconfig", refcfg, "-l", "-a",
+                          hash_ours, "-b", "0", "-i", ref_l, "-v", NULL};
+    listener = spawn_cp(python, &lfd, ref_listen);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rnsh listening for commands on <", listen_out,
+               sizeof(listen_out), 60);
+    read_until(lfd, ">", listen_out, sizeof(listen_out), 5);
+    parse_after(listen_out, "rnsh listening for commands on <", dest);
+    /* the reference listener's pipe mode fails in this setup, so the client
+     * runs on a terminal and the command gets a pty on both sides */
+    {
+      char *args[] = {(char *)sh, "--connect", connect, "--identity", idl, "-w",
+                      "30", dest, "--", "echo", "hi-from-ref-listener", NULL};
+      CHECK(run_in_pty(sh, out, sizeof(out), args, NULL) == 0 &&
+            strstr(out, "hi-from-ref-listener"));
+    }
+    stop_cp(listener, lfd);
+  }
+  /* the reference initiator, on a terminal, connects to ours */
+  {
+    char *our_listen[] = {(char *)sh, "--connect", connect, "--identity", idl,
+                          "-l", "-a", hash_ref, "-b", "0", NULL};
+    char *ref_run[] = {(char *)python, "-m", "RNS.Utilities.rnsh.rnsh",
+                       "--config", shcfg, "--rnsconfig", refcfg, "-i", ref_c,
+                       "-w", "30", "-m", dest, "--", "sh", "-c",
+                       "echo from-ours; exit 6", NULL};
+    listener = spawn_cp(sh, &lfd, our_listen);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_after(listen_out, "rnsh listening for commands on <", dest);
+    CHECK(run_in_pty(python, out, sizeof(out), ref_run, NULL) == 6);
+    CHECK(strstr(out, "from-ours"));
+    stop_cp(listener, lfd);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("sh reference tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 4 || argc == 5 || argc == 6);
   if (!strcmp(argv[2], "cli"))
@@ -3058,8 +3388,12 @@ int main(int argc, char **argv) {
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
 
+  else if (!strcmp(argv[2], "sh_ref") && argc == 6)
+    sh_reference(argv[1], argv[3], argv[5]);
   else if (!strcmp(argv[2], "x_ref") && argc == 6)
     x_reference(argv[1], argv[3], argv[5]);
+  else if (!strcmp(argv[2], "sh_tools") && argc == 4)
+    sh_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "x_tools") && argc == 4)
     x_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "cp_ref") && argc == 6)
