@@ -856,6 +856,40 @@ static int accept_within(rnc_host *host, int listener, uint64_t *now,
   }
   return -1;
 }
+/* A client added before the first step, on a clock far from zero (a real
+ * monotonic clock), must connect at once, not after a reconnect wait. */
+static void connect_late_clock_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  uint64_t now = 3000000;
+  uint16_t port = 0;
+  int listener, accepted;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  host = node ? rnc_host_new(node) : NULL;
+  listener = tcp_listener(AF_INET, &port);
+  CHECK(host && listener >= 0);
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  cfg.address = "127.0.0.1";
+  cfg.port = port;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 50);
+  CHECK(accepted >= 0);
+  for (i = 0; i < 20; ++i)
+    CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && status.online &&
+        status.last_errno == 0);
+  close(accepted);
+  close(listener);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host late clock connect test passed");
+}
 static void tcp_options_test(void) {
   uint8_t key[64] = {0};
   unsigned rng = 0, i;
@@ -1251,6 +1285,8 @@ int main(int argc, char **argv) {
     ax25_test();
   else if (!strcmp(argv[1], "fast_flap"))
     fast_flap_test();
+  else if (!strcmp(argv[1], "connect_late_clock"))
+    connect_late_clock_test();
   else if (!strcmp(argv[1], "tcp_options"))
     tcp_options_test();
   else if (!strcmp(argv[1], "serial_params"))

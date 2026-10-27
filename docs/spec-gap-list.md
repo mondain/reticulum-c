@@ -209,7 +209,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | PART | `rnstatus`, `rnpath` | `reticulum-c-ctl status` and `path` (examples/reticulum_ctl.c): interface statistics, path table, hop filter, blackhole list/add/remove, JSON output, over the authenticated RPC port. Not implemented: remote (`-R`) queries, path request / drop (`-d`, `-D`, `-x`), rate and link tables, sorting, filtering by name |
 | IMPL | `rnprobe` target | Reference `rnprobe` gets valid replies from the daemon; the SDK has no `rnprobe` client tool of its own |
 | PART | `rnid` | `reticulum-c-ctl id`: generate, print, export hex, aspect hashes, raw sign/validate (`--raw`), chunked file encrypt/decrypt; interoperates with the reference. Not implemented: the signed-envelope `.rsg` format, embedded messages and metadata, base32/64/256 formats, import, announce, network identity requests |
-| MISS | `rncp`, `rnx`, `rnsh`, `rnodeconf` | Library primitives exist for `rncp`, `rnx` |
+| PART | `rncp` | `reticulum-c-cp` (examples/reticulum_cp.c) over the new `rnc_transfer` library: listen (`-l`, `-a`, `-n`, `-s`, `-O`, `-F`, `-j`, `-b`), push and fetch (`-f`), compatible with the reference in all four directions. Not implemented: identity allow-list files, `-p`, `-P`, `-C`, `-S`, files over 16 MiB (held in memory), the reference's `--config` (it attaches over `--connect HOST:PORT`) |
+| MISS | `rnx`, `rnsh`, `rnodeconf` | Library primitives exist for `rnx` |
 | IMPL | Remote management, blackhole publishing and subscribing, interface discovery | |
 
 ## 6. Examples (manual ch13)

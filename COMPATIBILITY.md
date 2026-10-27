@@ -415,3 +415,41 @@ Evidence: unit tests drive an inline echo (SENT, READY only), a 3 kB echo whose
 request and response both travel as Resources (SENT, DELIVERED, RECEIVING with
 a fractional, non-decreasing progress, READY at 1.0), and a silent handler
 (FAILED).
+
+## File transfer: rnc_transfer and reticulum-c-cp (`feature/rncp`)
+
+`rnc_transfer.h` is the library side of rncp. A listener owns a `rncp.receive`
+destination, accepts links, and receives a file pushed as a Resource whose
+metadata is `{"name": <bytes>}`; with a fetch callback it also serves the
+`fetch_file` request (response True, False for not found, or 240 for not
+allowed, the file following as a Resource). A client pushes or fetches. Access
+follows rncp: with an allow list a sender must identify and be listed, otherwise
+the link is closed; `allow_all` accepts anyone; an unauthorised fetch gets no
+answer. Files are held in memory, at most `RNC_TRANSFER_MAX_SIZE` (16 MiB less
+4 KiB, the Resource limit).
+
+`reticulum-c-cp` is the command line: `-l` listen (`-a` allowed identity hash,
+`-n` no authentication, `-s` save directory, `-O` overwrite instead of adding
+`.1`, `.2`, `-F` allow fetch, `-j` jail, `-b` announce interval), `FILE
+DESTINATION` to push, `-f REMOTE DESTINATION` to fetch. It attaches to a node
+over TCP (`--connect HOST:PORT`, for instance a daemon's server interface or
+shared-instance port) with its own identity file (`--identity`). Received names
+are reduced to their last path component, and a fetch jail is enforced on the
+normalised path and again on the resolved path so a symlink cannot leave it.
+
+Not implemented: allowed-identity files, announce-time identity printing
+(`-p`), compression control (`-C`), silent mode, the reference's `--config`.
+
+Also fixed: a TCP client interface added before the host's first step took its
+connect deadline from an unset clock, so on a real monotonic clock the first
+attempt timed out immediately and the connection waited a full reconnect
+interval (5 s). The deadline is now taken at the first step.
+
+Evidence: library tests for send, a 150 kB send with non-decreasing progress,
+allow-list denial (verified by disabling the checks, which fails the tests),
+fetch found, not found, not allowed, fetch disabled and unlisted fetchers;
+process tests with the real binaries (push with duplicate naming, allow list,
+jailed fetch with an escape attempt and a missing file); a host test for the
+connect deadline; and differential tests against the unmodified reference
+`rncp` in all four directions (ours pushes to and fetches from the reference
+listener; the reference pushes to and fetches from ours).

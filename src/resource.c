@@ -1392,6 +1392,11 @@ rnc_result rnc_resource_read(const rnc_resource *r, void *data, size_t cap,
   *written = n;
   return RNC_OK;
 }
+size_t rnc_resource_data_size(const rnc_resource *r) {
+  if (!r || r->outgoing || r->state != RES_DONE)
+    return 0;
+  return r->data_size - r->metadata_prefix;
+}
 rnc_result rnc_resource_metadata(const rnc_resource *r, void *data, size_t cap,
                                  size_t *written) {
   if (written)

@@ -2561,13 +2561,329 @@ static void tunnel_persistence(const char *exe) {
   remove_tree(dir);
   puts("node tunnel persistence tests passed");
 }
+
+/* ---- reticulum-c-cp (rncp compatible file transfer) --------------------- */
+static pid_t spawn_cp(const char *cp, int *out, char *const *args) {
+  int fds[2];
+  pid_t p;
+  CHECK(!pipe(fds));
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+    close(fds[1]);
+    execv(cp, args);
+    _exit(127);
+  }
+  close(fds[1]);
+  *out = fds[0];
+  return p;
+}
+/* Reads from fd until needle shows up in what has accumulated. */
+static void read_until(int fd, const char *needle, char *buf, size_t size,
+                       unsigned seconds) {
+  size_t n = strlen(buf);
+  unsigned tries;
+  for (tries = 0; tries < seconds * 10; ++tries) {
+    struct pollfd p = {fd, POLLIN, 0};
+    if (strstr(buf, needle))
+      return;
+    CHECK(poll(&p, 1, 100) >= 0);
+    if (p.revents & POLLIN) {
+      ssize_t got = read(fd, buf + n, size - 1 - n);
+      CHECK(got > 0);
+      n += (size_t)got;
+      buf[n] = 0;
+    }
+  }
+  fprintf(stderr, "never saw \"%s\"; output:\n%s\n", needle, buf);
+  CHECK(0);
+}
+/* Runs a short-lived cp command to completion; returns its exit status. */
+static int run_cp(const char *cp, char *out, size_t size, char *const *args) {
+  int fd, status;
+  size_t n = 0;
+  pid_t p = spawn_cp(cp, &fd, args);
+  unsigned tries;
+  for (tries = 0; tries < 900; ++tries) {
+    struct pollfd pf = {fd, POLLIN, 0};
+    int r = poll(&pf, 1, 100);
+    CHECK(r >= 0);
+    if (r > 0) {
+      ssize_t got = read(fd, out + n, size - 1 - n);
+      if (got <= 0)
+        break;
+      n += (size_t)got;
+    }
+  }
+  CHECK(tries < 900);
+  out[n] = 0;
+  close(fd);
+  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  return WEXITSTATUS(status);
+}
+static void stop_cp(pid_t pid, int fd) {
+  int status;
+  CHECK(!kill(pid, SIGTERM));
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status));
+  close(fd);
+}
+static void parse_listening(const char *text, char hash[33]) {
+  const char *at = strstr(text, "rncp listening on <");
+  CHECK(at);
+  memcpy(hash, at + 19, 32);
+  hash[32] = 0;
+}
+static void write_identity(const char *path, uint8_t fill, char hash[33]) {
+  uint8_t key[64];
+  rnc_identity id;
+  size_t i;
+  for (i = 0; i < 64; ++i)
+    key[i] = (uint8_t)(fill + i * 3u);
+  file_bytes(path, (const char *)key, 64);
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  hex_of(id.hash, 16, hash);
+  rnc_identity_clear(&id);
+}
+static void cp_tools(const char *exe, const char *cp) {
+  char dir[] = "/tmp/rnc-node-cp-XXXXXX", cfg[256], key[256], admin[256],
+       recv[300], jail[300], fetched[300], idb[300], idc[300], listener_id[300],
+       connect[64], hash_b[33], hash_c[33], dest[33], out[4096], listen_out[4096],
+       payload[300], path[400], jailed[400], outside[300], text[2048],
+       identity[33];
+  unsigned port = unused_port();
+  int dfd, lfd;
+  pid_t daemon, listener;
+  uint8_t bytes[3000];
+  char buf[3000];
+  size_t i;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(recv, sizeof(recv), "%s/recv", dir) > 0 && !mkdir(recv, 0700));
+  CHECK(snprintf(jail, sizeof(jail), "%s/jail", dir) > 0 && !mkdir(jail, 0700));
+  CHECK(snprintf(fetched, sizeof(fetched), "%s/fetched", dir) > 0 &&
+        !mkdir(fetched, 0700));
+  CHECK(snprintf(idb, sizeof(idb), "%s/id_b", dir) > 0);
+  CHECK(snprintf(idc, sizeof(idc), "%s/id_c", dir) > 0);
+  CHECK(snprintf(listener_id, sizeof(listener_id), "%s/id_l", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(payload, sizeof(payload), "%s/payload.bin", dir) > 0);
+  CHECK(snprintf(jailed, sizeof(jailed), "%s/hello.txt", jail) > 0);
+  CHECK(snprintf(outside, sizeof(outside), "%s/outside.txt", dir) > 0);
+  write_identity(idb, 11, hash_b);
+  write_identity(idc, 99, hash_c);
+  for (i = 0; i < sizeof(bytes); ++i)
+    bytes[i] = (uint8_t)(i * 13u + 5u);
+  file_bytes(payload, (const char *)bytes, sizeof(bytes));
+  file_bytes(jailed, "inside the jail", 15);
+  file_bytes(outside, "secret", 6);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+
+  /* anyone may push: a file arrives, a second copy gets a numeric suffix */
+  {
+    char *listen_args[] = {(char *)cp, "--connect", connect, "--identity",
+                           listener_id, "-l", "-n", "-s", recv, "-b", "0", NULL};
+    char *send_args[] = {(char *)cp, "--connect", connect, "--identity", idb,
+                         payload, dest, NULL};
+    listener = spawn_cp(cp, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rncp listening on <", listen_out, sizeof(listen_out), 10);
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_listening(listen_out, dest);
+    CHECK(run_cp(cp, out, sizeof(out), send_args) == 0);
+    CHECK(strstr(out, "Transfer complete"));
+    CHECK(snprintf(path, sizeof(path), "%s/payload.bin", recv) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == sizeof(bytes) &&
+          !memcmp(buf, bytes, sizeof(bytes)));
+    CHECK(run_cp(cp, out, sizeof(out), send_args) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/payload.bin.1", recv) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == sizeof(bytes));
+    read_until(lfd, "Saved received file to", listen_out, sizeof(listen_out), 5);
+    stop_cp(listener, lfd);
+  }
+
+  /* allow list: B may push, C is turned away and nothing is saved */
+  {
+    char *listen_args[] = {(char *)cp, "--connect", connect, "--identity",
+                           listener_id, "-l", "-a", hash_b, "-s", jail, "-b",
+                           "0", NULL};
+    char *send_b[] = {(char *)cp, "--connect", connect, "--identity", idb,
+                      outside, dest, NULL};
+    char *send_c[] = {(char *)cp, "--connect", connect, "--identity", idc,
+                      payload, dest, NULL};
+    listener = spawn_cp(cp, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    CHECK(run_cp(cp, out, sizeof(out), send_c) != 0);
+    CHECK(snprintf(path, sizeof(path), "%s/payload.bin", jail) > 0);
+    CHECK(access(path, F_OK) != 0);
+    CHECK(run_cp(cp, out, sizeof(out), send_b) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/outside.txt", jail) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == 6 && !memcmp(buf, "secret", 6));
+    stop_cp(listener, lfd);
+    CHECK(!unlink(path));
+  }
+
+  /* fetch from a jail: a file inside comes back, escapes and misses do not */
+  {
+    char *listen_args[] = {(char *)cp, "--connect", connect, "--identity",
+                           listener_id, "-l", "-n", "-F", "-j", jail, "-s",
+                           recv, "-b", "0", NULL};
+    char *fetch_in[] = {(char *)cp, "--connect", connect, "--identity", idb,
+                        "-f", "hello.txt", dest, "-s", fetched, NULL};
+    char *fetch_up[] = {(char *)cp, "--connect", connect, "--identity", idb,
+                        "-f", "../outside.txt", dest, "-s", fetched, NULL};
+    char *fetch_none[] = {(char *)cp, "--connect", connect, "--identity", idb,
+                          "-f", "nothing.txt", dest, "-s", fetched, NULL};
+    listener = spawn_cp(cp, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    CHECK(run_cp(cp, out, sizeof(out), fetch_in) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/hello.txt", fetched) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == 15 &&
+          !memcmp(buf, "inside the jail", 15));
+    CHECK(run_cp(cp, out, sizeof(out), fetch_up) != 0 &&
+          strstr(out, "not allowed"));
+    CHECK(run_cp(cp, out, sizeof(out), fetch_none) != 0 &&
+          strstr(out, "does not have"));
+    CHECK(snprintf(path, sizeof(path), "%s/outside.txt", fetched) > 0);
+    CHECK(access(path, F_OK) != 0);
+    stop_cp(listener, lfd);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("cp tool tests passed");
+}
+/* Both directions of push and fetch against the unmodified reference rncp. */
+static void cp_reference(const char *exe, const char *cp, const char *python) {
+  char dir[] = "/tmp/rnc-cp-ref-XXXXXX", cfg[256], key[256], admin[256],
+       refcfg[300], refconf[320], jail[300], r1[300], r2[300], fetched[300],
+       idl[300], ref_l[300], ref_c[300], connect[64], dest[33], out[8192],
+       listen_out[8192], payload[300], jailed[300], outside[300], path[400],
+       text[2048], identity[33], buf[3000];
+  unsigned port = unused_port();
+  int dfd, lfd;
+  pid_t daemon, listener;
+  uint8_t bytes[3000];
+  size_t i;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(refcfg, sizeof(refcfg), "%s/refcfg", dir) > 0 &&
+        !mkdir(refcfg, 0700));
+  CHECK(snprintf(refconf, sizeof(refconf), "%s/config", refcfg) > 0);
+  CHECK(snprintf(jail, sizeof(jail), "%s/jail", dir) > 0 && !mkdir(jail, 0700));
+  CHECK(snprintf(r1, sizeof(r1), "%s/r1", dir) > 0 && !mkdir(r1, 0700));
+  CHECK(snprintf(r2, sizeof(r2), "%s/r2", dir) > 0 && !mkdir(r2, 0700));
+  CHECK(snprintf(fetched, sizeof(fetched), "%s/fetched", dir) > 0 &&
+        !mkdir(fetched, 0700));
+  CHECK(snprintf(idl, sizeof(idl), "%s/id_ours", dir) > 0);
+  CHECK(snprintf(ref_l, sizeof(ref_l), "%s/id_ref_l", dir) > 0);
+  CHECK(snprintf(ref_c, sizeof(ref_c), "%s/id_ref_c", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(payload, sizeof(payload), "%s/payload.bin", dir) > 0);
+  CHECK(snprintf(jailed, sizeof(jailed), "%s/hello.txt", jail) > 0);
+  CHECK(snprintf(outside, sizeof(outside), "%s/outside.txt", dir) > 0);
+  for (i = 0; i < sizeof(bytes); ++i)
+    bytes[i] = (uint8_t)(i * 17u + 3u);
+  file_bytes(payload, (const char *)bytes, sizeof(bytes));
+  file_bytes(jailed, "inside the jail", 15);
+  file_bytes(outside, "secret", 6);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = No\n"
+                 "[interfaces]\n[[Daemon]]\ntype = TCPClientInterface\n"
+                 "enabled = yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+                 port) > 0);
+  config_file(refconf, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+
+  /* reference listens and fetches are served; ours pushes and pulls */
+  {
+    char *ref_listen[] = {(char *)python, "-u", "-m", "RNS.Utilities.rncp",
+                          "--config", refcfg, "-l", "-n", "-F", "-j", jail,
+                          "-s", r1, "-b", "0", "-i", ref_l, "-v", NULL};
+    char *push[] = {(char *)cp, "--connect", connect, "--identity", idl, payload,
+                    dest, "-w", "30", NULL};
+    char *pull[] = {(char *)cp, "--connect", connect, "--identity", idl, "-f",
+                    "hello.txt", dest, "-s", fetched, "-w", "30", NULL};
+    char *pull_up[] = {(char *)cp, "--connect", connect, "--identity", idl, "-f",
+                       "../outside.txt", dest, "-s", fetched, "-w", "30", NULL};
+    listener = spawn_cp(python, &lfd, ref_listen);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rncp listening on <", listen_out, sizeof(listen_out), 60);
+    read_until(lfd, ">", listen_out, sizeof(listen_out), 5);
+    parse_listening(listen_out, dest);
+    CHECK(run_cp(cp, out, sizeof(out), push) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/payload.bin", r1) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == sizeof(bytes) &&
+          !memcmp(buf, bytes, sizeof(bytes)));
+    CHECK(run_cp(cp, out, sizeof(out), pull) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/hello.txt", fetched) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == 15 &&
+          !memcmp(buf, "inside the jail", 15));
+    CHECK(run_cp(cp, out, sizeof(out), pull_up) != 0);
+    stop_cp(listener, lfd);
+  }
+
+  /* ours listens and serves; the reference pushes and pulls */
+  {
+    char *our_listen[] = {(char *)cp, "--connect", connect, "--identity", idl,
+                          "-l", "-n", "-F", "-j", jail, "-s", r2, "-b", "0",
+                          NULL};
+    char *ref_push[] = {(char *)python, "-u", "-m", "RNS.Utilities.rncp",
+                        "--config", refcfg, "-i", ref_c, "-w", "30", payload,
+                        dest, NULL};
+    char *ref_pull[] = {(char *)python, "-u", "-m", "RNS.Utilities.rncp",
+                        "--config", refcfg, "-i", ref_c, "-w", "30", "-f",
+                        "hello.txt", dest, "-s", fetched, "-O", NULL};
+    listener = spawn_cp(cp, &lfd, our_listen);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_listening(listen_out, dest);
+    CHECK(unlink(path) == 0);
+    CHECK(run_cp(python, out, sizeof(out), ref_push) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/payload.bin", r2) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == sizeof(bytes) &&
+          !memcmp(buf, bytes, sizeof(bytes)));
+    CHECK(run_cp(python, out, sizeof(out), ref_pull) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/hello.txt", fetched) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == 15 &&
+          !memcmp(buf, "inside the jail", 15));
+    stop_cp(listener, lfd);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("cp reference tests passed");
+}
 int main(int argc, char **argv) {
-  CHECK(argc == 3 || argc == 4 || argc == 5);
+  CHECK(argc == 3 || argc == 4 || argc == 5 || argc == 6);
   if (!strcmp(argv[2], "cli"))
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
 
+  else if (!strcmp(argv[2], "cp_ref") && argc == 6)
+    cp_reference(argv[1], argv[3], argv[5]);
+  else if (!strcmp(argv[2], "cp_tools") && argc == 4)
+    cp_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "cli_id_ref") && argc == 5)
     cli_id_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "cli_tools") && argc == 4)

@@ -53,6 +53,8 @@ rnc_result rnc_resource_poll(rnc_resource *resource, rnc_resource_event *event);
  * released before full stream authentication, decompression and hash checks. */
 rnc_result rnc_resource_read(const rnc_resource *resource, void *data, size_t capacity,
                              size_t *written);
+/* Size of the completed incoming data (excluding metadata); 0 otherwise. */
+size_t rnc_resource_data_size(const rnc_resource *resource);
 rnc_result rnc_resource_metadata(const rnc_resource *resource, void *data, size_t capacity,
                                  size_t *written);
 int rnc_resource_is_complete(const rnc_resource *resource);
