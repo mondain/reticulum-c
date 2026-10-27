@@ -69,6 +69,39 @@ rnc_result rnc_discovery_hash(const rnc_discovery_info *info, uint8_t hash[32]);
 /* SHA256 of "<reachable_on>:<port>": identifies the endpoint to connect to. */
 rnc_result rnc_discovery_endpoint_hash(const rnc_discovery_info *info,
                                        uint8_t hash[32]);
+/* ---- discovered interface records ---- */
+#define RNC_DISCOVERY_THRESHOLD_UNKNOWN (24u * 60u * 60u)
+#define RNC_DISCOVERY_THRESHOLD_STALE (3u * 24u * 60u * 60u)
+#define RNC_DISCOVERY_THRESHOLD_REMOVE (7u * 24u * 60u * 60u)
+#define RNC_DISCOVERY_STATUS_AVAILABLE 1000
+#define RNC_DISCOVERY_STATUS_UNKNOWN 100
+#define RNC_DISCOVERY_STATUS_STALE 0
+#define RNC_DISCOVERY_RECORD_MAX 4096u
+typedef struct rnc_discovery_record {
+  rnc_discovery_info info;
+  uint8_t stamp[RNC_STAMP_SIZE];
+  unsigned value;
+  uint8_t network_id[16]; /* hash of the announcing (network) identity */
+  unsigned hops;
+  double received, discovered, last_heard; /* unix seconds */
+  uint32_t heard_count;
+  char config_entry[768];
+} rnc_discovery_record;
+/* Configuration entry a user can paste to connect to the interface, worded as
+ * the reference writes it. use_backbone selects BackboneInterface over
+ * TCPClientInterface for TCP announcements. */
+rnc_result rnc_discovery_config_entry(const rnc_discovery_info *info,
+                                      int use_backbone, char *output,
+                                      size_t capacity);
+/* The reference's on-disk record (one MessagePack map per interface). */
+rnc_result rnc_discovery_record_pack(const rnc_discovery_record *record,
+                                     uint8_t *output, size_t capacity,
+                                     size_t *written);
+rnc_result rnc_discovery_record_unpack(const uint8_t *data, size_t size,
+                                       rnc_discovery_record *record);
+/* AVAILABLE, UNKNOWN or STALE from the seconds since the interface was last
+ * heard; returns -1 when it is old enough to be removed. */
+int rnc_discovery_status(double heard_delta_seconds);
 #ifdef __cplusplus
 }
 #endif

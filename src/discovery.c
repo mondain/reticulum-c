@@ -680,3 +680,412 @@ rnc_result rnc_discovery_endpoint_hash(const rnc_discovery_info *info,
     return RNC_INVALID;
   return rnc_hash(material, (size_t)n, hash);
 }
+
+/* ---- records ---- */
+static void hex_text(const uint8_t *in, size_t n, char *out) {
+  size_t i;
+  for (i = 0; i < n; i++)
+    (void)snprintf(out + 2 * i, 3, "%02x", in[i]);
+}
+rnc_result rnc_discovery_config_entry(const rnc_discovery_info *info,
+                                      int use_backbone, char *out,
+                                      size_t capacity) {
+  char identity[16 * 2 + 1], network[96], passphrase[96], text[768];
+  kind_t kind;
+  int n;
+  if (!info || !out || !capacity)
+    return RNC_INVALID;
+  kind = kind_of(info->type);
+  hex_text(info->transport_id, 16, identity);
+  network[0] = passphrase[0] = 0;
+  if (info->ifac_netname[0])
+    (void)snprintf(network, sizeof(network), "\n  network_name = %s",
+                   info->ifac_netname);
+  if (info->ifac_netkey[0])
+    (void)snprintf(passphrase, sizeof(passphrase), "\n  passphrase = %s",
+                   info->ifac_netkey);
+  switch (kind) {
+  case T_TCP:
+    n = snprintf(text, sizeof(text),
+                 "[[%s]]\n  type = %s\n  enabled = yes\n  %s = %s\n  "
+                 "target_port = %u\n  transport_identity = %s%s%s",
+                 info->name, use_backbone ? "BackboneInterface" : "TCPClientInterface",
+                 use_backbone ? "remote" : "target_host", info->reachable_on,
+                 (unsigned)info->port, identity, network, passphrase);
+    break;
+  case T_I2P:
+    n = snprintf(text, sizeof(text),
+                 "[[%s]]\n  type = I2PInterface\n  enabled = yes\n  peers = "
+                 "%s.b32.i2p\n  transport_identity = %s%s%s",
+                 info->name, info->reachable_on, identity, network, passphrase);
+    break;
+  case T_RNODE:
+    n = snprintf(text, sizeof(text),
+                 "[[%s]]\n  type = RNodeInterface\n  enabled = yes\n  port = "
+                 "\n  frequency = %u\n  bandwidth = %u\n  spreadingfactor = "
+                 "%u\n  codingrate = %u\n  txpower = %s%s",
+                 info->name, (unsigned)info->frequency,
+                 (unsigned)info->bandwidth, info->spreading_factor,
+                 info->coding_rate, network, passphrase);
+    break;
+  case T_WEAVE:
+    n = snprintf(text, sizeof(text),
+                 "[[%s]]\n  type = WeaveInterface\n  enabled = yes\n  port = "
+                 "%s%s",
+                 info->name, network, passphrase);
+    break;
+  case T_KISS:
+    n = snprintf(text, sizeof(text),
+                 "[[%s]]\n  type = KISSInterface\n  enabled = yes\n  port = "
+                 "\n  # Frequency: %u\n  # Bandwidth: %u\n  # Modulation: "
+                 "%s\n  transport_identity = %s%s%s",
+                 info->name, (unsigned)info->frequency,
+                 (unsigned)info->bandwidth, info->modulation, identity,
+                 network, passphrase);
+    /* the reference writes the identity line without a newline before it */
+    break;
+  default:
+    return RNC_INVALID;
+  }
+  if (n < 0 || (size_t)n >= sizeof(text) || (size_t)n >= capacity)
+    return RNC_NO_SPACE;
+  memcpy(out, text, (size_t)n + 1);
+  return RNC_OK;
+}
+static void put_key(rnc_rpc_writer *w, const char *k) { (void)rnc_rpc_write_string(w, k); }
+static void put_text_or_nil(rnc_rpc_writer *w, const char *k, const char *v) {
+  put_key(w, k);
+  if (v[0])
+    (void)rnc_rpc_write_string(w, v);
+  else
+    (void)rnc_rpc_write_nil(w);
+}
+static void put_real_or_nil(rnc_rpc_writer *w, const char *k, int has, double v) {
+  put_key(w, k);
+  if (has)
+    (void)rnc_rpc_write_real(w, v);
+  else
+    (void)rnc_rpc_write_nil(w);
+}
+static void put_uint(rnc_rpc_writer *w, const char *k, uint64_t v) {
+  put_key(w, k);
+  (void)rnc_rpc_write_uint(w, v);
+}
+rnc_result rnc_discovery_record_pack(const rnc_discovery_record *rec,
+                                     uint8_t *output, size_t capacity,
+                                     size_t *written) {
+  rnc_rpc_writer w;
+  const rnc_discovery_info *i;
+  char tid[33], nid[33], operator_hex[33];
+  uint8_t dhash[32];
+  kind_t kind;
+  size_t pairs = 16; /* common keys, see below */
+  rnc_result r;
+  if (written)
+    *written = 0;
+  if (!rec || !output || !written)
+    return RNC_INVALID;
+  i = &rec->info;
+  kind = kind_of(i->type);
+  if (kind == T_NONE || kind == T_OTHER)
+    return RNC_INVALID;
+  if (rnc_discovery_hash(i, dhash) != RNC_OK)
+    return RNC_CRYPTO;
+  hex_text(i->transport_id, 16, tid);
+  hex_text(rec->network_id, 16, nid);
+  /* type, impl_name, version, transport, name, received, stamp, value,
+   * transport_id, network_id, hops, latitude, longitude, height,
+   * config_entry, discovery_hash */
+  pairs += 3; /* discovered, last_heard, heard_count */
+  pairs += i->ifac_netname[0] ? 1u : 0u;
+  pairs += i->ifac_netkey[0] ? 1u : 0u;
+  pairs += i->has_operator ? 1u : 0u;
+  pairs += kind == T_TCP ? 2u : kind == T_I2P ? 1u : kind == T_RNODE ? 4u
+         : kind == T_WEAVE ? 4u : kind == T_KISS ? 3u : 0u;
+  rnc_rpc_writer_init(&w, output, capacity);
+  (void)rnc_rpc_write_map(&w, pairs);
+  put_key(&w, "type");
+  (void)rnc_rpc_write_string(&w, i->type);
+  put_text_or_nil(&w, "impl_name", i->impl_name);
+  put_text_or_nil(&w, "version", i->version);
+  put_key(&w, "transport");
+  (void)rnc_rpc_write_bool(&w, i->transport);
+  put_key(&w, "name");
+  (void)rnc_rpc_write_string(&w, i->name);
+  put_key(&w, "received");
+  (void)rnc_rpc_write_real(&w, rec->received);
+  put_key(&w, "stamp");
+  (void)rnc_rpc_write_bin(&w, rec->stamp, RNC_STAMP_SIZE);
+  put_uint(&w, "value", rec->value);
+  put_key(&w, "transport_id");
+  (void)rnc_rpc_write_string(&w, tid);
+  put_key(&w, "network_id");
+  (void)rnc_rpc_write_string(&w, nid);
+  put_uint(&w, "hops", rec->hops);
+  put_real_or_nil(&w, "latitude", i->has_latitude, i->latitude);
+  put_real_or_nil(&w, "longitude", i->has_longitude, i->longitude);
+  put_real_or_nil(&w, "height", i->has_height, i->height);
+  if (i->ifac_netname[0]) {
+    put_key(&w, "ifac_netname");
+    (void)rnc_rpc_write_string(&w, i->ifac_netname);
+  }
+  if (i->ifac_netkey[0]) {
+    put_key(&w, "ifac_netkey");
+    (void)rnc_rpc_write_string(&w, i->ifac_netkey);
+  }
+  switch (kind) {
+  case T_TCP:
+    put_key(&w, "reachable_on");
+    (void)rnc_rpc_write_string(&w, i->reachable_on);
+    put_uint(&w, "port", i->port);
+    break;
+  case T_I2P:
+    put_key(&w, "reachable_on");
+    (void)rnc_rpc_write_string(&w, i->reachable_on);
+    break;
+  case T_RNODE:
+    put_uint(&w, "frequency", i->frequency);
+    put_uint(&w, "bandwidth", i->bandwidth);
+    put_uint(&w, "sf", i->spreading_factor);
+    put_uint(&w, "cr", i->coding_rate);
+    break;
+  case T_WEAVE:
+    put_key(&w, "frequency");
+    (void)rnc_rpc_write_uint(&w, i->frequency);
+    put_key(&w, "bandwidth");
+    (void)rnc_rpc_write_uint(&w, i->bandwidth);
+    put_key(&w, "channel");
+    (void)rnc_rpc_write_uint(&w, i->channel);
+    put_key(&w, "modulation");
+    (void)rnc_rpc_write_uint(&w, (uint64_t)strtoull(i->modulation, NULL, 10));
+    break;
+  case T_KISS:
+    put_uint(&w, "frequency", i->frequency);
+    put_uint(&w, "bandwidth", i->bandwidth);
+    put_key(&w, "modulation");
+    (void)rnc_rpc_write_string(&w, i->modulation);
+    break;
+  default:
+    break;
+  }
+  put_key(&w, "config_entry");
+  (void)rnc_rpc_write_string(&w, rec->config_entry);
+  put_key(&w, "discovery_hash");
+  (void)rnc_rpc_write_bin(&w, dhash, 32);
+  if (i->has_operator) {
+    hex_text(i->operator_address, 16, operator_hex);
+    put_key(&w, "operator_lxmf_address");
+    (void)rnc_rpc_write_string(&w, operator_hex);
+  }
+  put_key(&w, "discovered");
+  (void)rnc_rpc_write_real(&w, rec->discovered);
+  put_key(&w, "last_heard");
+  (void)rnc_rpc_write_real(&w, rec->last_heard);
+  put_uint(&w, "heard_count", rec->heard_count);
+  r = rnc_rpc_writer_finish(&w, written);
+  if (r != RNC_OK) {
+    *written = 0;
+    return r == RNC_NO_SPACE || r == RNC_INVALID ? RNC_NO_SPACE : r;
+  }
+  return RNC_OK;
+}
+static int number_value(rmp *r, double *value) {
+  uint64_t bits;
+  if (r->i >= r->n)
+    return 0;
+  if (r->p[r->i] == 0xcb) {
+    r->i++;
+    if (!rmp_num(r, 8, &bits))
+      return 0;
+    memcpy(value, &bits, 8);
+    return *value == *value;
+  }
+  if (r->p[r->i] == 0xca) {
+    uint32_t b32;
+    float f;
+    r->i++;
+    if (!rmp_num(r, 4, &bits))
+      return 0;
+    b32 = (uint32_t)bits;
+    memcpy(&f, &b32, 4);
+    *value = f;
+    return 1;
+  }
+  if (rmp_uint(r, &bits)) {
+    *value = (double)bits;
+    return 1;
+  }
+  return 0;
+}
+static int hex_bytes(const char *text, uint8_t *out, size_t n) {
+  size_t i;
+  if (strlen(text) != 2 * n)
+    return 0;
+  for (i = 0; i < n; i++) {
+    unsigned v;
+    if (!isxdigit((unsigned char)text[2 * i]) ||
+        !isxdigit((unsigned char)text[2 * i + 1]) ||
+        sscanf(text + 2 * i, "%2x", &v) != 1)
+      return 0;
+    out[i] = (uint8_t)v;
+  }
+  return 1;
+}
+rnc_result rnc_discovery_record_unpack(const uint8_t *data, size_t size,
+                                       rnc_discovery_record *out) {
+  rmp r = {data, size, 0};
+  rnc_discovery_record rec;
+  size_t pairs, i, n;
+  uint64_t v;
+  const uint8_t *p;
+  char name[40], text[8];
+  if (!data || !out || !size)
+    return RNC_INVALID;
+  memset(&rec, 0, sizeof(rec));
+  if ((data[0] & 0xf0) == 0x80) {
+    pairs = data[0] & 15u;
+    r.i = 1;
+  } else if (data[0] == 0xde) {
+    r.i = 1;
+    if (!rmp_num(&r, 2, &v))
+      return RNC_PROTOCOL;
+    pairs = (size_t)v;
+  } else
+    return RNC_PROTOCOL;
+  (void)text;
+  for (i = 0; i < pairs; i++) {
+    int has, t;
+    double d;
+    if (!take_text(&r, name, sizeof(name)))
+      return RNC_PROTOCOL;
+    if (!strcmp(name, "type")) {
+      if (!take_text(&r, rec.info.type, sizeof(rec.info.type)))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "impl_name") || !strcmp(name, "version")) {
+      char *dst = name[0] == 'i' ? rec.info.impl_name : rec.info.version;
+      size_t cap = name[0] == 'i' ? sizeof(rec.info.impl_name)
+                                  : sizeof(rec.info.version);
+      if (r.i < r.n && r.p[r.i] == 0xc0)
+        r.i++;
+      else if (!take_text(&r, dst, cap))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "transport")) {
+      if (!take_bool(&r, &t))
+        return RNC_PROTOCOL;
+      rec.info.transport = t;
+    } else if (!strcmp(name, "name")) {
+      if (!take_text(&r, rec.info.name, sizeof(rec.info.name)))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "received")) {
+      if (!number_value(&r, &rec.received))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "discovered")) {
+      if (!number_value(&r, &rec.discovered))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "last_heard")) {
+      if (!number_value(&r, &rec.last_heard))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "stamp")) {
+      if (!rmp_bin(&r, &p, &n) || n != RNC_STAMP_SIZE)
+        return RNC_PROTOCOL;
+      memcpy(rec.stamp, p, n);
+    } else if (!strcmp(name, "value") || !strcmp(name, "hops") ||
+               !strcmp(name, "heard_count") || !strcmp(name, "port") ||
+               !strcmp(name, "frequency") || !strcmp(name, "bandwidth") ||
+               !strcmp(name, "channel") || !strcmp(name, "sf") ||
+               !strcmp(name, "cr")) {
+      if (!take_uint_or_nil(&r, &has, &v) || v > UINT32_MAX)
+        return RNC_PROTOCOL;
+      if (!strcmp(name, "value"))
+        rec.value = (unsigned)v;
+      else if (!strcmp(name, "hops"))
+        rec.hops = (unsigned)v;
+      else if (!strcmp(name, "heard_count"))
+        rec.heard_count = (uint32_t)v;
+      else if (!strcmp(name, "port")) {
+        rec.info.has_port = has;
+        rec.info.port = (uint32_t)v;
+      } else if (!strcmp(name, "frequency")) {
+        rec.info.has_frequency = has;
+        rec.info.frequency = (uint32_t)v;
+      } else if (!strcmp(name, "bandwidth")) {
+        rec.info.has_bandwidth = has;
+        rec.info.bandwidth = (uint32_t)v;
+      } else if (!strcmp(name, "channel")) {
+        rec.info.has_channel = has;
+        rec.info.channel = (uint32_t)v;
+      } else if (!strcmp(name, "sf"))
+        rec.info.spreading_factor = (unsigned)v;
+      else
+        rec.info.coding_rate = (unsigned)v;
+    } else if (!strcmp(name, "transport_id") || !strcmp(name, "network_id") ||
+               !strcmp(name, "operator_lxmf_address")) {
+      char hex[40];
+      if (!take_text(&r, hex, sizeof(hex)))
+        return RNC_PROTOCOL;
+      if (name[0] == 't') {
+        if (!hex_bytes(hex, rec.info.transport_id, 16))
+          return RNC_PROTOCOL;
+      } else if (name[0] == 'n') {
+        if (!hex_bytes(hex, rec.network_id, 16))
+          return RNC_PROTOCOL;
+      } else if (hex_bytes(hex, rec.info.operator_address, 16))
+        rec.info.has_operator = 1;
+    } else if (!strcmp(name, "latitude")) {
+      if (!take_real_or_nil(&r, &rec.info.has_latitude, &d) && rec.info.has_latitude)
+        return RNC_PROTOCOL;
+      rec.info.latitude = d;
+    } else if (!strcmp(name, "longitude")) {
+      if (!take_real_or_nil(&r, &rec.info.has_longitude, &d) && rec.info.has_longitude)
+        return RNC_PROTOCOL;
+      rec.info.longitude = d;
+    } else if (!strcmp(name, "height")) {
+      if (!take_real_or_nil(&r, &rec.info.has_height, &d) && rec.info.has_height)
+        return RNC_PROTOCOL;
+      rec.info.height = d;
+    } else if (!strcmp(name, "ifac_netname") || !strcmp(name, "ifac_netkey")) {
+      char *dst = !strcmp(name, "ifac_netname") ? rec.info.ifac_netname
+                                                 : rec.info.ifac_netkey;
+      if (r.i < r.n && r.p[r.i] == 0xc0)
+        r.i++;
+      else if (!take_text(&r, dst, 64))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "reachable_on")) {
+      if (!take_text(&r, rec.info.reachable_on, sizeof(rec.info.reachable_on)))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "config_entry")) {
+      if (!take_text(&r, rec.config_entry, sizeof(rec.config_entry)))
+        return RNC_PROTOCOL;
+    } else if (!strcmp(name, "modulation")) {
+      if (r.i < r.n && r.p[r.i] == 0xc0)
+        r.i++;
+      else if (r.i < r.n && ((r.p[r.i] & 0xe0) == 0xa0 ||
+                             (r.p[r.i] >= 0xd9 && r.p[r.i] <= 0xdb))) {
+        if (!take_text(&r, rec.info.modulation, sizeof(rec.info.modulation)))
+          return RNC_PROTOCOL;
+        rec.info.has_modulation = 1;
+      } else if (rmp_uint(&r, &v)) {
+        (void)snprintf(rec.info.modulation, sizeof(rec.info.modulation), "%llu",
+                       (unsigned long long)v);
+        rec.info.has_modulation = 1;
+      } else
+        return RNC_PROTOCOL;
+    } else if (!rmp_skip_depth(&r, 0))
+      return RNC_PROTOCOL;
+  }
+  if (r.i != r.n || kind_of(rec.info.type) == T_NONE || !rec.info.name[0])
+    return RNC_PROTOCOL;
+  rec.info.has_frequency |= rec.info.frequency != 0;
+  rec.info.has_bandwidth |= rec.info.bandwidth != 0;
+  *out = rec;
+  return RNC_OK;
+}
+int rnc_discovery_status(double delta) {
+  if (delta > RNC_DISCOVERY_THRESHOLD_REMOVE)
+    return -1;
+  if (delta > RNC_DISCOVERY_THRESHOLD_STALE)
+    return RNC_DISCOVERY_STATUS_STALE;
+  if (delta > RNC_DISCOVERY_THRESHOLD_UNKNOWN)
+    return RNC_DISCOVERY_STATUS_UNKNOWN;
+  return RNC_DISCOVERY_STATUS_AVAILABLE;
+}

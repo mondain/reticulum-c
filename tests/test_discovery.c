@@ -1,3 +1,4 @@
+#include "discovery_records.h"
 #include "discovery_vectors.h"
 #include <reticulum_c/rnc_discovery.h>
 #include <stdio.h>
@@ -216,6 +217,108 @@ static void helpers(void) {
           !memcmp(hash, expect, 32));
   }
 }
+static void record_for(const char *which, rnc_discovery_record *r) {
+  size_t k;
+  memset(r, 0, sizeof(*r));
+  if (!strcmp(which, "backbone")) {
+    backbone_info(&r->info);
+    strcpy(r->info.ifac_netname, "mynet");
+    strcpy(r->info.ifac_netkey, "secret");
+  } else if (!strcmp(which, "rnode")) {
+    rnode_info(&r->info);
+    r->info.ifac_netname[0] = r->info.ifac_netkey[0] = 0;
+  } else
+    kiss_info(&r->info);
+  for (k = 0; k < 32; k++)
+    r->stamp[k] = (uint8_t)k;
+  for (k = 0; k < 16; k++)
+    r->network_id[k] = (uint8_t)(200 + k);
+  r->value = 12;
+  r->hops = 2;
+  r->received = 1700000000.5;
+  r->discovered = 1699990000.25;
+  r->last_heard = 1700000000.5;
+  r->heard_count = 3;
+}
+static void record_pack(void) {
+  static const char *names[] = {"backbone", "rnode", "kiss"};
+  const char *vectors[3] = {rec_backbone, rec_rnode, rec_kiss};
+  unsigned k;
+  for (k = 0; k < 3; k++) {
+    rnc_discovery_record r;
+    uint8_t out[RNC_DISCOVERY_RECORD_MAX], want[RNC_DISCOVERY_RECORD_MAX];
+    size_t n, m;
+    record_for(names[k], &r);
+    CHECK(rnc_discovery_config_entry(&r.info, 1, r.config_entry,
+                                     sizeof(r.config_entry)) == RNC_OK);
+    CHECK(rnc_discovery_record_pack(&r, out, sizeof(out), &n) == RNC_OK);
+    m = unhex(vectors[k], want);
+    if (n != m || memcmp(out, want, n)) {
+      size_t i;
+      for (i = 0; i < n && i < m && out[i] == want[i]; i++) {
+      }
+      fprintf(stderr, "%s differs at byte %zu (ours %zu bytes, reference %zu)\n",
+              names[k], i, n, m);
+      CHECK(0);
+    }
+    CHECK(rnc_discovery_record_pack(&r, out, 40, &n) == RNC_NO_SPACE && n == 0);
+  }
+}
+static void record_unpack(void) {
+  const char *vectors[3] = {rec_backbone, rec_rnode, rec_kiss};
+  unsigned k;
+  for (k = 0; k < 3; k++) {
+    rnc_discovery_record r, again;
+    uint8_t data[RNC_DISCOVERY_RECORD_MAX], out[RNC_DISCOVERY_RECORD_MAX];
+    size_t n = unhex(vectors[k], data), m;
+    CHECK(rnc_discovery_record_unpack(data, n, &r) == RNC_OK);
+    CHECK(r.value == 12 && r.hops == 2 && r.heard_count == 3 &&
+          r.received == 1700000000.5 && r.discovered == 1699990000.25 &&
+          r.last_heard == 1700000000.5 && r.network_id[0] == 200 &&
+          r.stamp[31] == 31 && r.config_entry[0] == '[');
+    /* re-packing a record read from the reference reproduces it exactly */
+    CHECK(rnc_discovery_record_pack(&r, out, sizeof(out), &m) == RNC_OK);
+    if (m != n || memcmp(out, data, n)) {
+      size_t d;
+      for (d = 0; d < n && d < m && out[d] == data[d]; d++) {
+      }
+      fprintf(stderr, "vector %u: repack differs at byte %zu (%zu vs %zu bytes)\n", k, d, m, n);
+      CHECK(0);
+    }
+    CHECK(rnc_discovery_record_unpack(out, m, &again) == RNC_OK);
+    data[0] = 0x92; /* not a map */
+    CHECK(rnc_discovery_record_unpack(data, n, &r) == RNC_PROTOCOL);
+  }
+  {
+    rnc_discovery_record r;
+    uint8_t data[RNC_DISCOVERY_RECORD_MAX];
+    size_t n = unhex(rec_rnode, data);
+    CHECK(rnc_discovery_record_unpack(data, n, &r) == RNC_OK);
+    CHECK(!strcmp(r.info.type, "RNodeInterface") && r.info.has_operator &&
+          r.info.operator_address[0] == 100 && r.info.frequency == 868000000 &&
+          r.info.spreading_factor == 8 && !r.info.has_latitude);
+  }
+}
+static void record_status(void) {
+  CHECK(rnc_discovery_status(0) == RNC_DISCOVERY_STATUS_AVAILABLE);
+  CHECK(rnc_discovery_status(24.0 * 3600) == RNC_DISCOVERY_STATUS_AVAILABLE);
+  CHECK(rnc_discovery_status(24.0 * 3600 + 1) == RNC_DISCOVERY_STATUS_UNKNOWN);
+  CHECK(rnc_discovery_status(3.0 * 86400) == RNC_DISCOVERY_STATUS_UNKNOWN);
+  CHECK(rnc_discovery_status(3.0 * 86400 + 1) == RNC_DISCOVERY_STATUS_STALE);
+  CHECK(rnc_discovery_status(7.0 * 86400) == RNC_DISCOVERY_STATUS_STALE);
+  CHECK(rnc_discovery_status(7.0 * 86400 + 1) == -1);
+}
+static void config_entries(void) {
+  rnc_discovery_info i;
+  char out[768];
+  backbone_info(&i);
+  CHECK(rnc_discovery_config_entry(&i, 1, out, sizeof(out)) == RNC_OK);
+  CHECK(!strncmp(out, "[[My Backbone]]\n  type = BackboneInterface\n  enabled = yes\n  remote = example.org\n  target_port = 4242\n  transport_identity = 000102", 118));
+  CHECK(rnc_discovery_config_entry(&i, 0, out, sizeof(out)) == RNC_OK);
+  CHECK(strstr(out, "type = TCPClientInterface") &&
+        strstr(out, "target_host = example.org"));
+  CHECK(rnc_discovery_config_entry(&i, 1, out, 20) == RNC_NO_SPACE);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "packing"))
@@ -226,6 +329,14 @@ int main(int argc, char **argv) {
     encryption();
   else if (!strcmp(argv[1], "helpers"))
     helpers();
+  else if (!strcmp(argv[1], "record_pack"))
+    record_pack();
+  else if (!strcmp(argv[1], "record_unpack"))
+    record_unpack();
+  else if (!strcmp(argv[1], "record_status"))
+    record_status();
+  else if (!strcmp(argv[1], "config_entries"))
+    config_entries();
   else
     CHECK(0);
   puts("discovery test passed");
