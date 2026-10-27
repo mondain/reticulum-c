@@ -572,6 +572,40 @@ sizes), a transfer test with incompressible 60 kB over both settings, a test of
 the node helpers, daemon tests for the key and the per-interface defaults, and
 the reference differential tests, which now negotiate larger links.
 
+## RNode detection and reticulum-c-rnodeconf (`feature/rnodeconf`)
+
+Detection: like the reference RNodeInterface, the host now asks an RNode to
+identify itself (DETECT, then firmware version, platform and MCU) and only
+configures the radio once the device answers the detection. Silence for five
+seconds drops the interface (and it is retried like any serial device). A
+firmware older than 1.52 is refused: the reference calls `RNS.panic()`, which
+would exit a daemon, so here the interface is logged as an error and not
+retried, and the other interfaces keep running.
+
+`reticulum-c-rnodeconf PORT` is the part of rnodeconf that talks to a running
+device, built on the same KISS protocol: `-i` reads the device and its EEPROM
+(checksum, product, model, signature checked against the vendor's two public
+keys, or a key given with `--trust-key`, with the information the reference
+prints), `-c` prints the stored configuration, `-T` with `--freq --bw --txp
+--sf --cr` stores TNC mode and `-N` returns to normal mode, and `-b -B -p -D -t
+-R --display-addr --recondition-display --np -x -X -w --channel --ssid --psk
+--ip --nm` set Bluetooth, display, NeoPixel, interference avoidance and WiFi.
+Values are range-checked before anything is sent. What it does not do needs the
+vendor toolchain or the hardware and cannot be tested here: firmware download,
+flashing, update and extraction, autoinstall, EEPROM provisioning, backup, dump
+and wipe, signing keys and hash commands.
+
+Evidence: an emulated RNode on a pty (device side of the KISS protocol: detect,
+firmware, platform, MCU, ROM and configuration reads, all the setters, TNC save
+and delete) logs every frame, so the tests check the bytes each option sends;
+signature validation against a locally generated RSA key; an unprovisioned and a
+damaged EEPROM; refused values. The unmodified reference rnodeconf runs against
+the same emulator: it prints the same device information and configuration
+lines as this tool, reads back what this tool wrote (Bluetooth, WiFi, display,
+interference avoidance, NeoPixel, TNC mode) and this tool reads back what the
+reference wrote, in both directions. Host tests cover detection, silence, the
+1.52 boundary, a newer major version and the refusal of old firmware.
+
 ## Smaller gaps (`feature/small-gaps`)
 
 Identity: `rnc_truncated_hash` and `rnc_random_hash` (`truncated_hash`,

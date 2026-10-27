@@ -351,6 +351,18 @@ static void radio_test(void) {
       if (rnc_host_frame_feed(&parser, RNC_HOST_KISS_FRAMING, bytes[k],
                               &command, decoded, sizeof(decoded),
                               &size) == RNC_OK) {
+        if (command == 0x08 || command == 0x50 || command == 0x48 ||
+            command == 0x49) { /* detection: answer detect and firmware */
+          uint8_t reply[2] = {command == 0x08 ? 0x46 : 1, 74}, out[32];
+          size_t out_size;
+          if (command == 0x08 || command == 0x50) {
+            CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, command, reply,
+                                        command == 0x08 ? 1 : 2, out,
+                                        sizeof(out), &out_size) == RNC_OK);
+            CHECK(write(master, out, out_size) == (ssize_t)out_size);
+          }
+          continue;
+        }
         CHECK(commands < 6 && command == expected_commands[commands]);
         if (command == 1) {
           uint8_t expected[] = {0x36, 0x89, 0xca, 0xc0};
@@ -639,7 +651,13 @@ static void radio_drain(radio_tap *t) {
                             &size) == RNC_OK) {
       uint8_t ack[RNC_HOST_FRAME_MAX];
       size_t ack_size;
-      if (command == 0) {
+      if (command == 0x08 || command == 0x50) { /* detect, firmware version */
+        uint8_t reply[2] = {command == 0x08 ? 0x46 : 1, 74};
+        CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, command, reply,
+                                    command == 0x08 ? 1 : 2, ack, sizeof(ack),
+                                    &ack_size) == RNC_OK);
+        CHECK(write(t->master, ack, ack_size) == (ssize_t)ack_size);
+      } else if (command == 0) {
         if (size == 6 && !memcmp(decoded, "N0CALL", 6))
           ++t->beacons;
         else
@@ -659,6 +677,117 @@ static void radio_drain(radio_tap *t) {
         CHECK(write(t->master, ack, ack_size) == (ssize_t)ack_size);
       }
     }
+}
+/* The reference detects the RNode and checks its firmware (at least 1.52)
+ * before configuring the radio. */
+typedef struct detect_tap {
+  int master, mode; /* 0 silent, 1 answers detect, 2 also the firmware version */
+  uint8_t fw[2];
+  rnc_host_framer parser;
+  unsigned detects, versions, platforms, mcus, config_frames;
+} detect_tap;
+static void detect_drain(detect_tap *t) {
+  uint8_t bytes[256], decoded[RNC_IFAC_FRAME_MAX], command, out[64];
+  size_t size, k, out_size;
+  ssize_t n = read(t->master, bytes, sizeof(bytes));
+  if (n <= 0)
+    return;
+  for (k = 0; k < (size_t)n; ++k)
+    if (rnc_host_frame_feed(&t->parser, RNC_HOST_KISS_FRAMING, bytes[k],
+                            &command, decoded, sizeof(decoded),
+                            &size) == RNC_OK) {
+      if (command == 0x08) {
+        CHECK(size == 1 && decoded[0] == 0x73);
+        ++t->detects;
+        if (t->mode >= 1) {
+          uint8_t resp = 0x46;
+          CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0x08, &resp, 1,
+                                      out, sizeof(out), &out_size) == RNC_OK);
+          CHECK(write(t->master, out, out_size) == (ssize_t)out_size);
+        }
+      } else if (command == 0x50) {
+        ++t->versions;
+        if (t->mode >= 2) {
+          CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0x50, t->fw, 2,
+                                      out, sizeof(out), &out_size) == RNC_OK);
+          CHECK(write(t->master, out, out_size) == (ssize_t)out_size);
+        }
+      } else if (command == 0x48) {
+        ++t->platforms;
+      } else if (command == 0x49) {
+        ++t->mcus;
+      } else if (command >= 1 && command <= 6) {
+        ++t->config_frames;
+        if (command == 1)
+          decoded[3] = (uint8_t)(decoded[3] + 50u);
+        CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, command, decoded,
+                                    size, out, sizeof(out),
+                                    &out_size) == RNC_OK);
+        CHECK(write(t->master, out, out_size) == (ssize_t)out_size);
+      }
+    }
+}
+static void rnode_detect_run(int mode, uint8_t major, uint8_t minor,
+                             uint64_t duration, detect_tap *tap,
+                             rnc_host_status *status) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0;
+  uint64_t now = 100;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  memset(tap, 0, sizeof(*tap));
+  tap->mode = mode;
+  tap->fw[0] = major;
+  tap->fw[1] = minor;
+  tap->master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  CHECK(tap->master >= 0 && !grantpt(tap->master) && !unlockpt(tap->master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  host = node ? rnc_host_new(node) : NULL;
+  CHECK(host);
+  cfg.kind = RNC_HOST_RNODE;
+  cfg.address = ptsname(tap->master);
+  cfg.serial_baud = 115200;
+  cfg.frequency = 915000000;
+  cfg.bandwidth = 125000;
+  cfg.tx_power = 10;
+  cfg.spreading_factor = 7;
+  cfg.coding_rate = 5;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  while (now < 100 + duration) {
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 10) == RNC_OK);
+    detect_drain(tap);
+  }
+  CHECK(rnc_host_get_status(host, 1, status) == RNC_OK);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(tap->master);
+}
+static void rnode_detect_test(void) {
+  detect_tap tap;
+  rnc_host_status status;
+  /* detected, firmware 1.74: the radio is configured */
+  rnode_detect_run(2, 1, 74, 3000, &tap, &status);
+  CHECK(tap.detects == 1 && tap.versions == 1 && tap.platforms == 1 &&
+        tap.mcus == 1 && tap.config_frames >= 6 && status.radio_ready);
+  /* the oldest firmware accepted, and a newer major version */
+  rnode_detect_run(2, 1, 52, 3000, &tap, &status);
+  CHECK(status.radio_ready);
+  rnode_detect_run(2, 2, 0, 3000, &tap, &status);
+  CHECK(status.radio_ready);
+  /* nothing answers: the radio is never configured and the interface drops */
+  rnode_detect_run(0, 0, 0, 5700, &tap, &status); /* dropped at 5 s, not yet retried */
+  CHECK(tap.detects >= 1 && tap.config_frames == 0 && !status.radio_ready &&
+        !status.online);
+  /* firmware too old: refused, and not retried */
+  rnode_detect_run(2, 1, 51, 70000, &tap, &status);
+  CHECK(!status.radio_ready && !status.online && status.reconnects == 0 &&
+        tap.detects == 1);
+  rnode_detect_run(2, 0, 99, 20000, &tap, &status);
+  CHECK(!status.radio_ready && !status.online);
+  puts("host RNode detection tests passed");
 }
 static void radio_extras_test(void) {
   radio_tap tap = {0};
@@ -1515,6 +1644,8 @@ int main(int argc, char **argv) {
     keys();
   else if (!strcmp(argv[1], "rnode"))
     radio_test();
+  else if (!strcmp(argv[1], "rnode_detect"))
+    rnode_detect_test();
   else if (!strcmp(argv[1], "rnode_extras"))
     radio_extras_test();
   else if (!strcmp(argv[1], "pipe"))

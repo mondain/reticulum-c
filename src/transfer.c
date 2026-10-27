@@ -1,5 +1,6 @@
 #include "service_msgpack.h"
 #include <openssl/crypto.h>
+#include <reticulum_c/rnc_buffer.h>
 #include <reticulum_c/rnc_link.h>
 #include <reticulum_c/rnc_resource.h>
 #include <reticulum_c/rnc_service.h>
@@ -278,7 +279,7 @@ static void listener_requests(rnc_transfer_listener *l, listener_slot *s,
                name_size <= RNC_TRANSFER_NAME_MAX) {
       uint8_t meta[RNC_TRANSFER_NAME_MAX + 16];
       rnc_resource_options o = {0};
-      o.compress = 1;
+      o.compress = rnc_stream_compression_available();
       o.metadata = meta;
       o.metadata_size = metadata_encode(name, name_size, meta);
       if (rnc_resource_send(s->c.tx, data, size, &o, now) == RNC_OK)
@@ -630,7 +631,7 @@ rnc_result rnc_transfer_client_tick(rnc_transfer_client *c,
       if (j->kind == JOB_SEND) {
         uint8_t meta[RNC_TRANSFER_NAME_MAX + 16];
         rnc_resource_options o = {0};
-        o.compress = 1;
+        o.compress = rnc_stream_compression_available();
         o.metadata = meta;
         o.metadata_size = metadata_encode(j->name, j->name_size, meta);
         if (rnc_resource_send(j->c.tx, j->input, j->input_size, &o, now_ms) ==
