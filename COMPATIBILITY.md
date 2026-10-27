@@ -646,3 +646,23 @@ files with modes and overwrite rules, request path options and the recursive
 wait, hops, accepts_links, the request size limit, destination data clearing)
 and a host test of `rnc_host_await_path` with a peer that creates its
 destination mid-wait, a timeout, an immediate return and an interrupt.
+
+## Ratchet file (`feature/ratchet-file`)
+
+`rnc_ratchets_export_reference` and `rnc_ratchets_import_reference` encode and
+decode the file `Destination.enable_ratchets` keeps: a MessagePack map with the
+owner's Ed25519 signature over the packed key list and that list, the 32 byte
+private ratchet keys newest first (a fixarray, or array16 above 15 keys). The
+library does no file I/O; the host writes the bytes where it likes (atomically
+and at mode 0600, like `rnc_host_identity_save`). The file carries no
+timestamps, so an imported store has every key at time 0 and its next rotation
+is due at once, as after a restart of the reference. Import checks the owner,
+the signature and every byte of framing before it replaces anything, and a
+store too small for the keys is refused. The library's own checkpoint format
+(`rnc_ratchets_export`, with timestamps and an interval) is unchanged.
+
+Evidence: unit tests (exact byte layout, round trip, empty list, array16, every
+single byte flipped, wrong owner, too little room, store too small) and a
+differential test: a file the unmodified reference wrote after three rotations
+loads with the same public keys in the same order, and a file written here (four
+rotations) loads in the reference with the same keys.
