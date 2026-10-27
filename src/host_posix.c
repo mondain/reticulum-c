@@ -244,7 +244,7 @@ typedef struct host_interface {
   unsigned radio_ack_mask;
   uint64_t radio_deadline;
   pid_t child;
-  int kiss, gave_up, connect_failed;
+  int kiss, gave_up, connect_failed, rnode_detected;
   unsigned tries;
   uint64_t connect_deadline;
   char ax_call[7];
@@ -779,6 +779,26 @@ static void put32(uint8_t out[4], uint32_t x) {
 static uint8_t tnc_units(unsigned ms) {
   return ms / 10u > 255u ? 255u : (uint8_t)(ms / 10u);
 }
+/* The reference detects the RNode and checks its firmware before it configures
+ * the radio: DETECT, then the firmware version, platform and MCU are asked
+ * for, and configure_radio() runs when the device answers the detection. */
+static rnc_result begin_rnode(host_interface *f) {
+  static const uint8_t detect = 0x73, zero = 0;
+  rnc_result r;
+  f->radio_ack_mask = 0;
+  f->status.radio_ready = 0;
+  f->radio_deadline = 0;
+  f->ready = 0;
+  f->rnode_detected = 0;
+  r = queue_command(f, 0x08, &detect, 1);
+  if (r == RNC_OK)
+    r = queue_command(f, 0x50, &zero, 1);
+  if (r == RNC_OK)
+    r = queue_command(f, 0x48, &zero, 1);
+  if (r == RNC_OK)
+    r = queue_command(f, 0x49, &zero, 1);
+  return r;
+}
 static rnc_result configure_ax25(host_interface *f, const rnc_host_config *c) {
   uint8_t b[1];
   rnc_result r;
@@ -1172,7 +1192,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     if (r != RNC_OK)
       goto fail;
     if (c->kind == RNC_HOST_RNODE) {
-      r = configure_radio(f, c);
+      r = begin_rnode(f);
       if (r != RNC_OK)
         goto fail;
     } else if (TNC_KIND(c->kind)) {
@@ -1607,7 +1627,22 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
                             &command, raw, sizeof(raw), &n);
     if (r == RNC_OK) {
       if (f->status.kind == RNC_HOST_RNODE && command) {
-        if (command >= 1 && command <= 6) {
+        if (command == 0x08) {
+          if (n >= 1 && raw[0] == 0x46 && !f->rnode_detected) {
+            f->rnode_detected = 1;
+            (void)configure_radio(f, &f->radio);
+          }
+        } else if (command == 0x50) {
+          if (n >= 2 && !(raw[0] > 1 || (raw[0] == 1 && raw[1] >= 52))) {
+            rnc_logf(RNC_LOG_ERROR, "host",
+                     "RNode %s reports firmware %u.%u, at least 1.52 is "
+                     "required",
+                     f->status.name, (unsigned)raw[0], (unsigned)raw[1]);
+            f->gave_up = 1; /* a firmware that is too old does not fix itself */
+            disconnect_interface(h, f, EPROTONOSUPPORT);
+            return RNC_OK;
+          }
+        } else if (command >= 1 && command <= 6) {
           uint8_t expected[4];
           size_t expected_size = 1;
           switch (command) {
@@ -1863,7 +1898,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         if (f->fd >= 0 && activate(h, f) == RNC_OK) {
           ++f->status.reconnects;
           if (f->status.kind == RNC_HOST_RNODE)
-            (void)configure_radio(f, &f->radio);
+            (void)begin_rnode(f);
           else if (TNC_KIND(f->status.kind))
             (void)configure_ax25(f, &f->radio);
         } else {

@@ -18,7 +18,7 @@ Largest gaps, in priority order:
 2. Interface policy: interface modes, configurable `announce_cap`, per-destination announce rate limiting, new-destination rate limiting, path request burst control, ingress control.
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
 4. Missing interface types: I2P, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
-5. RNode correctness (bitrate from SF/BW/CR, airtime limits and callsign beacon done; remaining): detection/firmware check.
+5. RNode correctness (bitrate from SF/BW/CR, airtime limits, callsign beacon, detection and the firmware check are done).
 6. Management plane: blackhole management, remote management destination, probe responder, network identities and interface discovery are done (see sections 3 and 4).
 7. Persistent known-destination store (`Identity.recall`) and tunnels are done. The transport packet cache is deliberately not built: see section 3.
 8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
@@ -155,7 +155,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | UDP | MISS | Broadcast, multiple targets |
 | I2P | MISS | Entire type |
 | RNode LoRa | IMPL | Radio setup over KISS, `radio_ready` ack, flow control, serial reopen |
-| RNode LoRa | MISS | Detection and firmware check, BLE/TCP RNode, RSSI/SNR/battery stats |
+| RNode LoRa | IMPL | Detection (DETECT, firmware version, platform and MCU asked first; the radio is configured when the device answers, and the interface drops after 5 s of silence) and the firmware check (at least 1.52, otherwise the interface is refused and not retried) |
+| RNode LoRa | MISS | BLE/TCP RNode, RSSI/SNR/battery stats |
 | RNode Multi | MISS | Sub-interfaces (only `kiss_port` in the command byte) |
 | Serial | IMPL | HDLC over termios, speed |
 | Serial | IMPL | databits, parity, stopbits (daemon `databits` / `parity` / `stopbits`) |
@@ -212,7 +213,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | PART | `rncp` | `reticulum-c-cp` (examples/reticulum_cp.c) over the new `rnc_transfer` library: listen (`-l`, `-a`, `-n`, `-s`, `-O`, `-F`, `-j`, `-b`), push and fetch (`-f`), compatible with the reference in all four directions. Not implemented: identity allow-list files, `-p`, `-P`, `-C`, `-S`, files over 16 MiB (held in memory), the reference's `--config` (it attaches over `--connect HOST:PORT`) |
 | PART | `rnx` | `reticulum-c-x` (examples/reticulum_x.c): listener with an allow list and client (`-w`, `-m`, `-d`, `-N`, `--stdin`, `--stdout`, `--stderr`), compatible with the reference in both directions. Not implemented: accept-anyone (`-n`, deliberately), interactive mode (`-x`), `-W`, `-p`, allowed-identity files, `--config`; a command is stopped after 25 s and requests/responses are limited to about 64 kB |
 | PART | `rnsh` | `reticulum-c-sh` (examples/reticulum_sh.c): listener (allow list, `-C`, `-A`, default program) and initiator (`-m`, `-N`, `-w`, terminal raw mode, window size, `~.`) speaking protocol 1, compatible with the reference rnsh in both directions. Not implemented: accept-anyone (`-n`, deliberately), line-interactive mode, allowed-identities file, `-p`, `-s`, compression of sent stream data, terminal attribute application on the pty |
-| MISS | `rnodeconf` | Needs RNode hardware to test |
+| PART | `rnodeconf` | `reticulum-c-rnodeconf` (examples/reticulum_rnodeconf.c): `-i` device information (product, signature against the vendor keys and `--trust-key`, firmware, modem, TNC settings), `-c` stored configuration, TNC and normal mode with radio parameters, Bluetooth, display, NeoPixel, interference avoidance and WiFi settings, read back by and compared with the reference against an emulated RNode. Not implemented: firmware download, flashing, update and extraction, autoinstall, EEPROM provisioning, backup, dump and wipe, signing keys, hash commands, the trusted-keys directory |
 | N/A | `rnir`, `rnpkg`, `RNS.Resolver` | Stubs in the pinned reference: they only start Reticulum or `pass`, so there is nothing to implement |
 | MISS | `rngit` | Git over Reticulum (about 10,000 lines of Python with pages, media and highlighting); not started |
 | IMPL | Remote management, blackhole publishing and subscribing, interface discovery | |
@@ -239,7 +240,7 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 
 **Phase B: host interfaces**
 
-1. RNode detection and firmware check (bitrate, airtime limits, beacon done).
+1. RNode detection and firmware check: done (with bitrate, airtime limits, beacon).
 2. Backbone, TCP hardening, KISS TNC parameters, serial parameters, UDP broadcast.
 3. Pipe, AX.25 KISS, RNode Multi, I2P; Auto allow/ignore lists.
 
