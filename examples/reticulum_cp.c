@@ -334,6 +334,14 @@ static int pump(app *a) {
   return 1;
 }
 
+/* Keeps the node running briefly so the link close and any queued packets
+ * actually leave the socket before the process exits; otherwise the listener
+ * keeps a link slot until its timeout. */
+static void flush_out(app *a) {
+  uint64_t start = monotonic_ms();
+  while (monotonic_ms() - start < 300u && pump(a)) {
+  }
+}
 static int listen_mode(rnc_identity *id, app *a) {
   uint8_t destination[16];
   uint64_t next_announce = 0;
@@ -498,6 +506,7 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
       break;
     }
   }
+  flush_out(a);
   free(data);
   OPENSSL_cleanse(result_data, capacity);
   free(result_data);
