@@ -17,7 +17,7 @@ Largest gaps, in priority order:
 1. Endpoint packet delivery proofs and `PacketReceipt` (PROVE_NONE/APP/ALL, implicit/explicit proofs, timeouts). Blocks the Echo and rnprobe patterns.
 2. Interface policy: interface modes, configurable `announce_cap`, per-destination announce rate limiting, new-destination rate limiting, path request burst control, ingress control.
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
-4. Missing interface types: Backbone, I2P, AX.25 KISS, Pipe, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
+4. Missing interface types: Backbone, I2P, AX.25 KISS, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits and callsign beacon done; remaining): detection/firmware check.
 6. Management plane: blackhole management, remote management destination, interface discovery, network identities, probe responder.
 7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
@@ -151,7 +151,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | RNode Multi | MISS | Sub-interfaces (only `kiss_port` in the command byte) |
 | Serial | IMPL | HDLC over termios, speed |
 | Serial | MISS | databits, parity, stopbits, hardware flow control, port locking |
-| Pipe | MISS | Entire type |
+| Pipe | IMPL | `PipeInterface`: command on a socketpair, HDLC, respawn delay, 1 Mb/s pacing |
 | KISS | IMPL | Framing, port nibble, `flow_control` |
 | KISS | MISS | preamble, txtail, persistence, slottime, beacon |
 | AX.25 KISS | MISS | Entire type |

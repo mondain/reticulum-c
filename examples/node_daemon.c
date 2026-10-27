@@ -111,7 +111,8 @@ static int set_type(interface_config *f, const char *value) {
                {"AutoInterface", RNC_HOST_AUTO},
                {"SerialInterface", RNC_HOST_SERIAL},
                {"KISSInterface", RNC_HOST_KISS},
-               {"RNodeInterface", RNC_HOST_RNODE}};
+               {"RNodeInterface", RNC_HOST_RNODE},
+               {"PipeInterface", RNC_HOST_PIPE}};
   size_t i;
   for (i = 0; i < sizeof(types) / sizeof(*types); ++i)
     if (!strcmp(value, types[i].name)) {
@@ -134,7 +135,8 @@ static int interface_key(interface_config *f, const char *key,
     return 1;
   }
   if (!strcmp(key, "listen_ip") || !strcmp(key, "listen_address") ||
-      !strcmp(key, "target_host") || !strcmp(key, "port"))
+      !strcmp(key, "target_host") || !strcmp(key, "port") ||
+      !strcmp(key, "command"))
     return text_copy(f->address, sizeof(f->address), value);
   if (!strcmp(key, "forward_ip") || !strcmp(key, "target"))
     return text_copy(f->target, sizeof(f->target), value);
@@ -190,6 +192,14 @@ static int interface_key(interface_config *f, const char *key,
       f->host.airtime_limit_short = percent;
     else
       f->host.airtime_limit_long = percent;
+    return 1;
+  }
+  if (!strcmp(key, "respawn_delay")) {
+    char *end;
+    double seconds = strtod(value, &end);
+    if (end == value || *end || !(seconds >= 0.0) || seconds > 3600.0)
+      return 0;
+    f->host.respawn_delay_ms = (unsigned)(seconds * 1000.0 + 0.5);
     return 1;
   }
   if (!strcmp(key, "id_callsign")) {

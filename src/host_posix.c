@@ -11,11 +11,13 @@
 #include <openssl/crypto.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -230,6 +232,7 @@ typedef struct host_interface {
   int flow_control;
   unsigned radio_ack_mask;
   uint64_t radio_deadline;
+  pid_t child;
   rnc_host_config radio;
   char callsign[RNC_HOST_CALLSIGN_MAX + 1u];
   size_t callsign_size;
@@ -353,6 +356,11 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
     close(f->fd);
     f->fd = -1;
   }
+  if (f->status.kind == RNC_HOST_PIPE && f->child > 0) {
+    (void)kill(f->child, SIGKILL);
+    (void)waitpid(f->child, NULL, 0);
+    f->child = 0;
+  }
   if (f->node_added) {
     (void)rnc_node_remove_interface(h->node, f->status.interface_id);
     f->node_added = 0;
@@ -369,6 +377,10 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
   f->status.last_errno = error;
   f->connecting = 0;
   f->queue_count = 0;
+  if (f->status.kind == RNC_HOST_PIPE)
+    f->retry_at = h->now + (f->radio.respawn_delay_ms
+                                ? f->radio.respawn_delay_ms
+                                : 5000u);
   f->input_offset = f->input_size = 0;
   f->pending = 0;
   memset(&f->framer, 0, sizeof(f->framer));
@@ -471,6 +483,89 @@ static speed_t baud_value(unsigned value) {
   default:
     return (speed_t)0;
   }
+}
+/* Splits a command line on blanks; single and double quotes group words. */
+static int split_command(char *line, char *argv[], size_t max) {
+  size_t n = 0;
+  char *r = line, *w = line, quote = 0;
+  int in_word = 0;
+  for (;; ++r) {
+    if (!*r || (!quote && (*r == ' ' || *r == '\t'))) {
+      if (in_word) {
+        *w++ = 0;
+        in_word = 0;
+      }
+      if (!*r)
+        break;
+      continue;
+    }
+    if (!in_word) {
+      if (n + 1u >= max)
+        return -1;
+      argv[n++] = w;
+      in_word = 1;
+    }
+    if (quote ? *r == quote : (*r == '"' || *r == '\'')) {
+      quote = quote ? 0 : *r;
+      continue;
+    }
+    *w++ = *r;
+  }
+  if (quote)
+    return -1;
+  argv[n] = NULL;
+  return (int)n;
+}
+/* Runs the command with both stdio streams on one end of a socketpair and
+ * returns the other end, non-blocking. */
+static int pipe_open(const char *command, pid_t *child) {
+  char line[256], *argv[32];
+  int sv[2], flags;
+  pid_t pid;
+  if (strlen(command) >= sizeof(line)) {
+    errno = EINVAL;
+    return -1;
+  }
+  strcpy(line, command);
+  if (split_command(line, argv, sizeof(argv) / sizeof(*argv)) < 1) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
+    return -1;
+  (void)fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+  (void)fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+  pid = fork();
+  if (pid < 0) {
+    close(sv[0]);
+    close(sv[1]);
+    return -1;
+  }
+  if (!pid) {
+    long fd, max = sysconf(_SC_OPEN_MAX);
+    if (dup2(sv[1], 0) < 0 || dup2(sv[1], 1) < 0)
+      _exit(126);
+    for (fd = 3; fd < (max > 0 && max < 4096 ? max : 4096); ++fd)
+      close((int)fd);
+    execvp(argv[0], argv);
+    _exit(127);
+  }
+  close(sv[1]);
+  flags = fcntl(sv[0], F_GETFL);
+  if (flags < 0 || fcntl(sv[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+    close(sv[0]);
+    (void)kill(pid, SIGKILL);
+    (void)waitpid(pid, NULL, 0);
+    return -1;
+  }
+  *child = pid;
+  return sv[0];
+}
+static int serial_open(const char *path, unsigned baud);
+static int device_open(host_interface *f) {
+  if (f->status.kind == RNC_HOST_PIPE)
+    return pipe_open(f->address, &f->child);
+  return serial_open(f->address, f->baud);
 }
 static int serial_open(const char *path, unsigned baud) {
   int fd;
@@ -700,7 +795,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   socklen_t bind_size;
   rnc_result r = RNC_STATE;
   if (!h || !c || !id || id >= 0x80000000u || c->kind < RNC_HOST_TCP_LISTEN ||
-      c->kind > RNC_HOST_RNODE || c->kiss_port > 15 || find_interface(h, id))
+      c->kind > RNC_HOST_PIPE || c->kiss_port > 15 || find_interface(h, id))
     return RNC_INVALID;
   if (c->kind == RNC_HOST_RNODE &&
       (!c->frequency || !c->bandwidth || c->spreading_factor < 5 ||
@@ -764,7 +859,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     if (!f->bitrate)
       f->bitrate = 1u;
   } else
-    f->bitrate = 10000000u;
+    f->bitrate = c->kind == RNC_HOST_PIPE ? 1000000u : 10000000u;
   f->status.bitrate = f->bitrate;
   f->status.local = c->local;
   if (c->name) {
@@ -843,7 +938,11 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     if (f->discovery_port == 65535 || setup_auto(f) < 0)
       goto fail;
   } else {
-    f->fd = serial_open(f->address, f->baud);
+    if (c->kind == RNC_HOST_PIPE && !*f->address) {
+      r = RNC_INVALID;
+      goto fail;
+    }
+    f->fd = device_open(f);
     if (f->fd < 0)
       goto fail;
     r = activate(h, f);
@@ -927,7 +1026,8 @@ static rnc_result queue_packet(host_interface *f, const rnc_packet *p) {
   } else {
     r = rnc_host_frame_encode(f->status.kind == RNC_HOST_TCP_LISTEN ||
                                       f->status.kind == RNC_HOST_TCP_CONNECT ||
-                                      f->status.kind == RNC_HOST_SERIAL
+                                      f->status.kind == RNC_HOST_SERIAL ||
+                                      f->status.kind == RNC_HOST_PIPE
                                   ? RNC_HOST_HDLC
                                   : RNC_HOST_KISS_FRAMING,
                               (uint8_t)(f->kiss_port << 4), wire, m, q->data,
@@ -1215,7 +1315,8 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
     if (!got) {
       /* VMIN=VTIME=0 serial reads can return zero while idle. Only TCP zero
        * is EOF; actual serial hangup is handled from POLLHUP in the pump. */
-      if (f->status.kind == RNC_HOST_TCP_CONNECT)
+      if (f->status.kind == RNC_HOST_TCP_CONNECT ||
+          f->status.kind == RNC_HOST_PIPE)
         disconnect_interface(h, f, 0);
       return RNC_OK;
     }
@@ -1349,7 +1450,8 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
     } else
       sent = sendto(fd, q->data, q->size, 0, (struct sockaddr *)&f->peer,
                     f->peer_size);
-  } else if (f->status.kind == RNC_HOST_TCP_CONNECT) {
+  } else if (f->status.kind == RNC_HOST_TCP_CONNECT ||
+             f->status.kind == RNC_HOST_PIPE) {
 #ifdef MSG_NOSIGNAL
     sent = send(fd, q->data + q->offset, q->size - q->offset, MSG_NOSIGNAL);
 #else
@@ -1455,7 +1557,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         } else
           ++f->status.reconnects;
       } else if (f->status.kind >= RNC_HOST_SERIAL) {
-        f->fd = serial_open(f->address, f->baud);
+        f->fd = device_open(f);
         if (f->fd >= 0 && activate(h, f) == RNC_OK) {
           ++f->status.reconnects;
           if (f->status.kind == RNC_HOST_RNODE)

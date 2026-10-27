@@ -17,7 +17,8 @@ typedef enum rnc_host_kind {
   RNC_HOST_AUTO,
   RNC_HOST_SERIAL,
   RNC_HOST_KISS,
-  RNC_HOST_RNODE
+  RNC_HOST_RNODE,
+  RNC_HOST_PIPE /* address = command line; HDLC over the child's stdio */
 } rnc_host_kind;
 typedef enum rnc_host_framing {
   RNC_HOST_HDLC = 1,
@@ -70,6 +71,7 @@ typedef struct rnc_host_config {
   double airtime_limit_short, airtime_limit_long;
   const char *id_callsign;
   unsigned id_interval;
+  unsigned respawn_delay_ms; /* PIPE: wait before restarting; 0 = 5000 */
   rnc_interface_mode mode;        /* default FULL; inherited by child ifaces */
   uint32_t announce_cap_permille; /* 0 = 20 (2%) */
   /* Per-destination announce rate control; see rnc_interface_policy. */

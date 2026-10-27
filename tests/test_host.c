@@ -583,6 +583,57 @@ static void radio_extras_test(void) {
   close(tap.master);
   puts("host RNode airtime and beacon tests passed");
 }
+static void pipe_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_packet plain = {0};
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_PIPE;
+  cfg.address = "";
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+  cfg.address = "cat";
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  CHECK(rnc_node_send(node, &plain, 1700000000, 100) == RNC_OK);
+  for (i = 0; i < 300; ++i) {
+    CHECK(rnc_host_step(host, 10, 1700000000, 100 + i) == RNC_OK);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    if (status.rx_packets)
+      break;
+  }
+  /* cat echoes the HDLC frame back, so it arrives as input */
+  CHECK(status.online && status.kind == RNC_HOST_PIPE);
+  CHECK(status.tx_packets == 1 && status.rx_packets == 1);
+  CHECK(status.bitrate == 1000000u);
+  rnc_host_free(host);
+  /* a command that exits is restarted after respawn_delay_ms */
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.address = "true";
+  cfg.respawn_delay_ms = 50;
+  CHECK(rnc_host_add(host, 2, &cfg) == RNC_OK);
+  for (i = 0; i < 400; ++i) {
+    CHECK(rnc_host_step(host, 10, 1700000001, 1000 + 10u * i) == RNC_OK);
+    CHECK(rnc_host_get_status(host, 2, &status) == RNC_OK);
+    if (status.reconnects)
+      break;
+  }
+  CHECK(status.reconnects >= 1);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host pipe tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -597,6 +648,8 @@ int main(int argc, char **argv) {
     radio_test();
   else if (!strcmp(argv[1], "rnode_extras"))
     radio_extras_test();
+  else if (!strcmp(argv[1], "pipe"))
+    pipe_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))
