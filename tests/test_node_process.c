@@ -2029,6 +2029,319 @@ static void discovery_listen_reference(const char *exe, const char *reference,
   remove_tree(dir);
   puts("this daemon discovered an unmodified RNS interface announce");
 }
+
+
+/* Runs the CLI tool with NULL-terminated arguments; returns its exit status
+ * and captures stdout and stderr together. */
+static int ctl_run(const char *ctl, char *out, size_t size, ...) {
+  const char *argv[32];
+  int fds[2], status, argc = 1;
+  size_t n = 0;
+  pid_t p;
+  va_list args;
+  const char *a;
+  argv[0] = ctl;
+  va_start(args, size);
+  while ((a = va_arg(args, const char *)) != NULL && argc < 31)
+    argv[argc++] = a;
+  va_end(args);
+  argv[argc] = NULL;
+  CHECK(!pipe(fds));
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+    close(fds[1]);
+    execv(ctl, (char *const *)argv);
+    _exit(127);
+  }
+  close(fds[1]);
+  for (;;) {
+    ssize_t got = read(fds[0], out + n, size - 1 - n);
+    if (got <= 0)
+      break;
+    n += (size_t)got;
+    if (n >= size - 1)
+      break;
+  }
+  out[n] = 0;
+  close(fds[0]);
+  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  return WEXITSTATUS(status);
+}
+static void hex_of(const uint8_t *data, size_t size, char *out) {
+  size_t i;
+  for (i = 0; i < size; ++i)
+    sprintf(out + 2 * i, "%02x", data[i]);
+}
+static void file_bytes(const char *path, const char *data, size_t size) {
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  CHECK(fd >= 0 && write(fd, data, size) == (ssize_t)size);
+  close(fd);
+}
+static size_t file_read(const char *path, char *out, size_t size) {
+  int fd = open(path, O_RDONLY);
+  ssize_t n;
+  CHECK(fd >= 0);
+  n = read(fd, out, size);
+  CHECK(n >= 0);
+  close(fd);
+  return (size_t)n;
+}
+static void cli_tools_id(const char *ctl, const char *dir) {
+  char out[4096], idfile[300], data[300], sig[320], enc[320], dec[320],
+      buf[256], hex[40];
+  const char *text = "reticulum-c identity tool test payload";
+  rnc_identity id;
+  uint8_t private_key[64];
+  CHECK(snprintf(idfile, sizeof(idfile), "%s/tool.id", dir) > 0);
+  CHECK(snprintf(data, sizeof(data), "%s/payload", dir) > 0);
+  CHECK(snprintf(sig, sizeof(sig), "%s.rsg", data) > 0);
+  CHECK(snprintf(enc, sizeof(enc), "%s.rfe", data) > 0);
+  CHECK(snprintf(dec, sizeof(dec), "%s/decrypted", dir) > 0);
+  file_bytes(data, text, strlen(text));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-g", idfile, NULL) == 0);
+  CHECK(file_read(idfile, buf, sizeof(buf)) == 64);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-g", idfile, NULL) != 0);
+  memcpy(private_key, buf, 64);
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK);
+  hex_of(id.hash, 16, hex);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-p", NULL) == 0 &&
+        strstr(out, hex) && strstr(out, "Private Key   : Hidden"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-p", "-P", NULL) ==
+            0 &&
+        !strstr(out, "Hidden"));
+  {
+    uint8_t name_hash[10], dest[16];
+    char want[40];
+    CHECK(rnc_destination_hash("example.aspect", &id, name_hash, dest) ==
+          RNC_OK);
+    hex_of(dest, 16, want);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-H",
+                  "example.aspect", NULL) == 0 &&
+          strstr(out, want));
+  }
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-s", data, "--raw",
+                NULL) == 0);
+  CHECK(file_read(sig, buf, sizeof(buf)) == 64 &&
+        rnc_identity_verify(&id, text, strlen(text), (uint8_t *)buf) == RNC_OK);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-V", sig, "-r",
+                data, "--raw", NULL) == 0);
+  file_bytes(data, "tampered", 8);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-V", sig, "-r",
+                data, "--raw", NULL) == 10);
+  file_bytes(data, text, strlen(text));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-e", data, NULL) ==
+        0);
+  CHECK(file_read(enc, buf, sizeof(buf)) > strlen(text) + 80);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-d", enc, "-w",
+                dec, NULL) == 0);
+  CHECK(file_read(dec, buf, sizeof(buf)) == strlen(text) &&
+        !memcmp(buf, text, strlen(text)));
+  /* flipping a ciphertext byte must fail with the decrypt error code */
+  {
+    char raw[512];
+    size_t n = file_read(enc, raw, sizeof(raw));
+    raw[n - 1] ^= 1;
+    file_bytes(enc, raw, n);
+  }
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-d", enc, "-w",
+                dec, "-f", NULL) == 12);
+  rnc_identity_clear(&id);
+}
+/* The operator tools talk to a running daemon over its authenticated RPC port
+ * and manage identities offline. */
+static void cli_tools(const char *exe, const char *ctl) {
+  char dir[] = "/tmp/rnc-node-ctl-XXXXXX", cfg[256], keypath[256], admin[256],
+       text[2048], identity[33], out[16384], reply[4096], hash[33], port_arg[16],
+       control_arg[16];
+  unsigned port = unused_port(), control = unused_port();
+  pid_t process;
+  int fd, local;
+  uint8_t private_key[64] = {9}, raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX],
+          zero_key[65];
+  size_t n, m;
+  unsigned random = 41;
+  rnc_identity id;
+  rnc_packet packet;
+  CHECK(port != control && mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(keypath, sizeof(keypath), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = "
+                 "Yes\nshared_instance_type = tcp\nshared_instance_port = "
+                 "%u\ninstance_control_port = %u\n[interfaces]\n[[External "
+                 "TCP]]\ntype = TCPServerInterface\nlisten_ip = "
+                 "127.0.0.1\nlisten_port = 0\nmode = gateway\n",
+                 port, control) > 0);
+  config_file(cfg, text);
+  CHECK(snprintf(port_arg, sizeof(port_arg), "%u", control) > 0);
+  process = start(exe, cfg, keypath, admin, &fd);
+  ready_line(fd, identity);
+
+  /* status: text, JSON, and authentication failure */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "--port", port_arg,
+                "--identity", keypath, NULL) == 0);
+  CHECK(strstr(out, "Shared Instance") && strstr(out, "Up") &&
+        strstr(out, "Traffic") && strstr(out, "Mode      : Gateway") &&
+        strstr(out, "Mode      : Internal"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-j", "--port", port_arg,
+                "--identity", keypath, NULL) == 0);
+  CHECK(out[0] == '{' && strstr(out, "\"interfaces\"") && strstr(out, "\"rxb\"") &&
+        strstr(out, "\"hash\": \""));
+  memset(zero_key, '0', 64);
+  zero_key[64] = 0;
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "--port", port_arg,
+                "--rpc-key", (char *)zero_key, NULL) != 0);
+  (void)control_arg;
+
+  /* path: feed one announce through the shared instance */
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-t", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 &&
+        !strstr(out, "hop"));
+  local = tcp_connect(port);
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK &&
+        rnc_announce_create(&id, "reticulum_c.ctl.test", NULL, 0,
+                            (uint64_t)time(NULL), rng, &random,
+                            &packet) == RNC_OK);
+  hex_of(packet.destination, 16, hash);
+  CHECK(rnc_packet_encode(&packet, raw, sizeof(raw), &n) == RNC_OK &&
+        rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed),
+                              &m) == RNC_OK);
+  CHECK(write(local, framed, m) == (ssize_t)m);
+  wait_for(admin, "ROUTES", hash, 5, reply, sizeof(reply));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-t", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 &&
+        strstr(out, hash) && strstr(out, "hop"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", hash, "--port", port_arg,
+                "--identity", keypath, NULL) == 0 &&
+        strstr(out, hash) && strstr(out, "hop"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-j", "-t", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 &&
+        out[0] == '[' && strstr(out, "\"hops\""));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-t", "-m", "5", "--port",
+                port_arg, "--identity", keypath, NULL) == 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "path",
+                "00000000000000000000000000000000", "--port", port_arg,
+                "--identity", keypath, NULL) == 1 &&
+        strstr(out, "No path"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "nothex", "--port", port_arg,
+                "--identity", keypath, NULL) != 0);
+
+  /* blackhole list/add/remove through the RPC */
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-b", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 &&
+        !strstr(out, "22222222"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-B",
+                "22222222222222222222222222222222", "--reason", "ctl test",
+                "--port", port_arg, "--identity", keypath, NULL) == 0);
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, "22222222222222222222222222222222") &&
+        strstr(reply, "reason=ctl test"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-b", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 &&
+        strstr(out, "22222222222222222222222222222222") &&
+        strstr(out, "ctl test"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-U",
+                "22222222222222222222222222222222", "--port", port_arg,
+                "--identity", keypath, NULL) == 0);
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "EMPTY", 5));
+
+  /* usage errors */
+  CHECK(ctl_run(ctl, out, sizeof(out), NULL) != 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "frobnicate", NULL) != 0);
+  close(local);
+  stop(process, fd);
+  cli_tools_id(ctl, dir);
+  rnc_identity_clear(&id);
+  remove_tree(dir);
+  puts("cli tool tests passed");
+}
+
+/* The identity commands interoperate with the reference rnid: same hashes,
+ * our raw signature validates there, and encrypted files cross both ways. */
+static void cli_id_reference(const char *ctl, const char *reference,
+                             const char *python) {
+  char dir[] = "/tmp/rnc-ctl-ref-XXXXXX", cfgdir[300], cfgfile[320], idfile[300],
+       data[300], sig[320], enc[320], dec[320], out[8192], ours[8192], buf[256],
+       hex[40];
+  const char *text = "cross-implementation payload";
+  rnc_identity id;
+  uint8_t private_key[64];
+  char *ref_args[16];
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfgdir, sizeof(cfgdir), "%s/cfg", dir) > 0 && !mkdir(cfgdir, 0700));
+  CHECK(snprintf(cfgfile, sizeof(cfgfile), "%s/config", cfgdir) > 0);
+  config_file(cfgfile, "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                       "[interfaces]\n");
+  CHECK(snprintf(idfile, sizeof(idfile), "%s/tool.id", dir) > 0);
+  CHECK(snprintf(data, sizeof(data), "%s/payload", dir) > 0);
+  CHECK(snprintf(sig, sizeof(sig), "%s.rsg", data) > 0);
+  CHECK(snprintf(enc, sizeof(enc), "%s.rfe", data) > 0);
+  CHECK(snprintf(dec, sizeof(dec), "%s/decrypted", dir) > 0);
+  file_bytes(data, text, strlen(text));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-g", idfile, NULL) == 0);
+  CHECK(file_read(idfile, buf, sizeof(buf)) == 64);
+  memcpy(private_key, buf, 64);
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK);
+  hex_of(id.hash, 16, hex);
+  /* reference reads our identity file and agrees on the hash and aspect hash */
+  ref_args[0] = "--config"; ref_args[1] = cfgdir; ref_args[2] = "-i";
+  ref_args[3] = idfile; ref_args[4] = "-p"; ref_args[5] = "-H";
+  ref_args[6] = "example.aspect"; ref_args[7] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out,
+                 sizeof(out));
+  CHECK(strstr(out, hex));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-H",
+                "example.aspect", NULL) == 0);
+  {
+    uint8_t name_hash[10], dest[16];
+    char want[40];
+    CHECK(rnc_destination_hash("example.aspect", &id, name_hash, dest) == RNC_OK);
+    hex_of(dest, 16, want);
+    CHECK(strstr(out, want) && strstr(ours, want));
+  }
+  /* reference validates our raw signature */
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-s", data, "--raw",
+                NULL) == 0);
+  ref_args[4] = "-V"; ref_args[5] = sig; ref_args[6] = "-r"; ref_args[7] = data;
+  ref_args[8] = "--raw"; ref_args[9] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out,
+                 sizeof(out));
+  CHECK(strstr(out, "Signature is valid"));
+  /* reference signs, ours validates */
+  CHECK(!unlink(sig));
+  ref_args[4] = "-s"; ref_args[5] = data; ref_args[6] = "--raw"; ref_args[7] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out,
+                 sizeof(out));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-V", sig, "-r",
+                data, "--raw", NULL) == 0 &&
+        strstr(ours, "is valid"));
+  /* ours encrypts, reference decrypts */
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-e", data, NULL) == 0);
+  ref_args[4] = "-d"; ref_args[5] = enc; ref_args[6] = "-w"; ref_args[7] = dec;
+  ref_args[8] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out,
+                 sizeof(out));
+  CHECK(file_read(dec, buf, sizeof(buf)) == strlen(text) &&
+        !memcmp(buf, text, strlen(text)));
+  /* reference encrypts, ours decrypts */
+  CHECK(!unlink(enc) && !unlink(dec));
+  ref_args[4] = "-e"; ref_args[5] = data; ref_args[6] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out,
+                 sizeof(out));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-d", enc, "-w",
+                dec, NULL) == 0);
+  CHECK(file_read(dec, buf, sizeof(buf)) == strlen(text) &&
+        !memcmp(buf, text, strlen(text)));
+  rnc_identity_clear(&id);
+  remove_tree(dir);
+  puts("cli id reference tests passed");
+}
+
 /* The reference's TCP client names a tunnel when it connects. After it leaves
  * and comes back (same identity, same interface) this daemon restores the path
  * it had learned, without a new announce. */
@@ -2249,13 +2562,20 @@ static void tunnel_persistence(const char *exe) {
   puts("node tunnel persistence tests passed");
 }
 int main(int argc, char **argv) {
-  CHECK(argc == 3 || argc == 5);
+  CHECK(argc == 3 || argc == 4 || argc == 5);
   if (!strcmp(argv[2], "cli"))
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+
+  else if (!strcmp(argv[2], "cli_id_ref") && argc == 5)
+    cli_id_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "cli_tools") && argc == 4)
+    cli_tools(argv[1], argv[3]);
+
   else if (!strcmp(argv[2], "tunnel_persist") && argc == 3)
     tunnel_persistence(argv[1]);
+
   else if (!strcmp(argv[2], "logging") && argc == 3)
     logging_config(argv[1]);
   else if (!strcmp(argv[2], "disc_autoconnect") && argc == 3)
