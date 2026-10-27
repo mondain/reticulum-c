@@ -187,3 +187,14 @@ Differences from the reference updater: the daemon re-asks for a missing path
 every 5 s for up to 25 s instead of one blocking wait; the first-run delay can
 be set with `blackhole_initial_wait` (seconds, reference fixed at 20); lists are
 stored as `<state>.blackhole.<hex>` beside `--state`.
+
+## Management plane: probe responder (`feature/management-plane`)
+
+`respond_to_probes = Yes` registers `rnstransport.probe` on the transport
+identity with PROVE_ALL and no link acceptance, and reports its hash as
+`probe_responder` in RPC interface stats.
+
+Local Linux evidence: 155/155 with the pinned RNS oracle, 125/125 without it,
+122/122 under sanitizers (differential cases excluded). Differential: the
+unmodified reference `rnprobe` (two probes) receives valid replies. Native: a C
+client's tracked packet is proved when enabled and gets no proof when disabled.

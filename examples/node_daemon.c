@@ -63,7 +63,8 @@ typedef struct interface_config {
   rnc_ifac ifac;
 } interface_config;
 typedef struct config {
-  int transport, share, share_tcp, remote_management, publish_blackhole;
+  int transport, share, share_tcp, remote_management, publish_blackhole,
+      respond_to_probes;
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
   /* blackhole subscriptions: sources, update interval and first-run delay */
@@ -747,6 +748,8 @@ static int read_config(const char *path, config *c) {
           c->remote_management = b;
         else if (!strcmp(s, "publish_blackhole"))
           c->publish_blackhole = b;
+        else if (!strcmp(s, "respond_to_probes"))
+          c->respond_to_probes = b;
         else {
           valid = 0;
           break;

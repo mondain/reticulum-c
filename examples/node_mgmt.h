@@ -5,6 +5,8 @@
 #include <reticulum_c/rnc_requester.h>
 #include <reticulum_c/rnc_responder.h>
 typedef struct management {
+  uint8_t probe[16];
+  int probing;
   rnc_responder *responder;
   rnc_requester *requester; /* blackhole source updates */
   uint64_t source_last[RNC_SERVICE_ALLOWLIST], source_retry[RNC_SERVICE_ALLOWLIST],
@@ -18,6 +20,9 @@ typedef struct management {
   uint64_t started;
 } management;
 static management mgmt;
+static const uint8_t *probe_responder_hash(void) {
+  return mgmt.probing ? mgmt.probe : NULL;
+}
 static void mgmt_stop(void) {
   rnc_responder_free(mgmt.responder);
   rnc_requester_free(mgmt.requester);
@@ -116,6 +121,17 @@ static int mgmt_start(const config *c, const rnc_identity *id, rnc_node *node,
                       rnc_host *host) {
   uint8_t destination[16];
   mgmt_stop();
+  if (c->respond_to_probes) {
+    /* rnstransport.probe proves every packet it receives (PROVE_ALL) and takes
+     * no links, as Transport registers it */
+    if (rnc_node_add_destination(node, id, "rnstransport.probe", NULL, 0,
+                                 destination) != RNC_OK ||
+        rnc_node_set_proof_strategy(node, destination, RNC_PROVE_ALL) !=
+            RNC_OK)
+      return 0;
+    memcpy(mgmt.probe, destination, 16);
+    mgmt.probing = 1;
+  }
   if (!c->remote_management && !c->publish_blackhole && !c->bh_source_count)
     return 1;
   if (c->remote_management || c->publish_blackhole) {

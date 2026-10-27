@@ -19,7 +19,7 @@ Largest gaps, in priority order:
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
 4. Missing interface types: I2P, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits and callsign beacon done; remaining): detection/firmware check.
-6. Management plane: blackhole management, remote management destination, interface discovery, network identities, probe responder.
+6. Management plane: blackhole management, remote management destination and probe responder are done; interface discovery and network identities remain.
 7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
 8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
 9. Resource window cap of 10 parts (reference grows to 75).
@@ -188,7 +188,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | --- | --- | --- |
 | IMPL | `enable_transport`, `share_instance`, `shared_instance_type` / `shared_instance_port`, `instance_control_port`, `rpc_key` | |
 | MISS | `instance_name`, `loglevel` | No logging subsystem |
-| MISS | `panic_on_interface_error`, `use_implicit_proof`, `respond_to_probes`, `link_mtu_discovery` | |
+| IMPL | `respond_to_probes` | Daemon registers `rnstransport.probe` with PROVE_ALL, takes no links; reported as `probe_responder` in interface stats |
+| MISS | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | |
 | IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
 | IMPL | `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval` | |
 | MISS | `discover_interfaces` and related, `network_identity` | |
@@ -200,7 +201,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | --- | --- | --- |
 | PART | `rnsd` | `examples/node_daemon.c`: config, `--check`, SIGHUP reload, checkpoints, shared instance, RPC |
 | PART | `rnstatus`, `rnpath` | Backends via RPC exist; no CLI; RPC is GET-only (no drop path / drop announce queues, no blackhole mutation) |
-| MISS | `rnprobe` | Needs proofs |
+| IMPL | `rnprobe` target | Reference `rnprobe` gets valid replies from the daemon; the SDK has no `rnprobe` client tool of its own |
 | MISS | `rncp`, `rnx`, `rnsh`, `rnid`, `rnodeconf` | Library primitives exist for `rncp`, `rnid`, `rnx` |
 | PART | Remote management, blackhole publishing and subscribing done; interface discovery missing | |
 

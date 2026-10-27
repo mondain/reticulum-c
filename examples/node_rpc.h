@@ -17,6 +17,8 @@ typedef struct rpc_server {
   uint64_t started;
   rpc_client clients[4];
 } rpc_server;
+/* the management module (node_mgmt.h) owns the probe destination */
+static const uint8_t *probe_responder_hash(void);
 static void rpc_close_client(rpc_client *c) {
   if (c->fd >= 0)
     close(c->fd);
@@ -240,7 +242,11 @@ static void all_stats(rnc_rpc_writer *w, rnc_host *h, const config *c,
     (void)rnc_rpc_write_bin(w, id->hash, 16);
     key_nil(w, "network_id");
     key_real(w, "transport_uptime", (double)uptime / 1000.0);
-    key_nil(w, "probe_responder");
+    if (probe_responder_hash()) {
+      (void)rnc_rpc_write_string(w, "probe_responder");
+      (void)rnc_rpc_write_bin(w, probe_responder_hash(), 16);
+    } else
+      key_nil(w, "probe_responder");
   }
 }
 static uint32_t lowest_bitrate(rnc_host *h) {
