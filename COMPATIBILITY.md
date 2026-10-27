@@ -453,3 +453,36 @@ jailed fetch with an escape attempt and a missing file); a host test for the
 connect deadline; and differential tests against the unmodified reference
 `rncp` in all four directions (ours pushes to and fetches from the reference
 listener; the reference pushes to and fetches from ours).
+
+## Remote execution: reticulum-c-x (`feature/rnx`)
+
+`reticulum-c-x` speaks the rnx protocol: destination `rnx.execute`, request path
+`command` with `[command, timeout, stdout limit, stderr limit, stdin]`, and the
+eight-element result `[executed, return code, stdout, stderr, stdout length,
+stderr length, started, concluded]`. The listener splits the command with
+POSIX shell quoting rules and runs it directly (no shell), kills it after the
+requested timeout, returns the exit code (negative for a signal) and the
+captured output, applying the requested limits. Client exit codes follow rnx:
+242 no path, 243 no link, 244 request failed, 245 no result, 247 bad result,
+248 not executed, 249 no response, and with `-m` the remote exit code.
+
+Differences, on purpose: there is no accept-anyone mode, so a listener only runs
+commands for the allow list (at most 8 identity hashes), and a request from an
+identity that is not listed is dropped without an answer (as ALLOW_LIST does in
+the reference). A command is stopped after 25 s because the request service
+keeps an incoming request for 30 s, and the handler runs inside the listener's
+loop, so one command runs at a time. Requests and results are limited to about
+64 kB (output beyond that is counted but not returned). Interactive mode is not
+implemented.
+
+Both command line tools now keep the node running for 300 ms after finishing so
+the link close actually leaves the socket; before, a listener kept a link slot
+until its timeout, so after four pushes (`reticulum-c-cp`) or eight commands the
+next one failed. A regression test runs 6 and 12 sequential clients.
+
+Evidence: a process test with the real binaries (output, mirrored exit code,
+stdin, output limits, stderr, a missing executable, a timeout that stops
+`sleep 30`, an unlisted identity that cannot create a marker file, 12 runs in a
+row) and differential tests against the unmodified reference `rnx` in both
+directions (the reference runs a command on ours and mirrors its exit code; ours
+runs one on the reference listener).

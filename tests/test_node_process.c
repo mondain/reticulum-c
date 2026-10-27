@@ -2705,7 +2705,11 @@ static void cp_tools(const char *exe, const char *cp) {
     CHECK(snprintf(path, sizeof(path), "%s/payload.bin", recv) > 0);
     CHECK(file_read(path, buf, sizeof(buf)) == sizeof(bytes) &&
           !memcmp(buf, bytes, sizeof(bytes)));
-    CHECK(run_cp(cp, out, sizeof(out), send_args) == 0);
+    {
+      unsigned k;
+      for (k = 0; k < 6; ++k) /* the listener has 4 link slots */
+        CHECK(run_cp(cp, out, sizeof(out), send_args) == 0);
+    }
     CHECK(snprintf(path, sizeof(path), "%s/payload.bin.1", recv) > 0);
     CHECK(file_read(path, buf, sizeof(buf)) == sizeof(bytes));
     read_until(lfd, "Saved received file to", listen_out, sizeof(listen_out), 5);
@@ -2873,6 +2877,180 @@ static void cp_reference(const char *exe, const char *cp, const char *python) {
   remove_tree(dir);
   puts("cp reference tests passed");
 }
+
+/* ---- reticulum-c-x (rnx compatible remote execution) -------------------- */
+static void parse_after(const char *text, const char *needle, char hash[33]) {
+  const char *at = strstr(text, needle);
+  CHECK(at);
+  memcpy(hash, at + strlen(needle), 32);
+  hash[32] = 0;
+}
+static int x_run(const char *x, const char *connect, char *out, size_t size,
+                 const char *identity, ...) {
+  char *args[32];
+  size_t n = 0;
+  va_list ap;
+  const char *a;
+  args[n++] = (char *)x;
+  args[n++] = "--connect";
+  args[n++] = (char *)connect;
+  args[n++] = "--identity";
+  args[n++] = (char *)identity;
+  va_start(ap, identity);
+  while ((a = va_arg(ap, const char *)) != NULL && n < 31)
+    args[n++] = (char *)a;
+  va_end(ap);
+  args[n] = NULL;
+  return run_cp(x, out, size, args);
+}
+static void x_tools(const char *exe, const char *x) {
+  char dir[] = "/tmp/rnc-node-x-XXXXXX", cfg[256], key[256], admin[256],
+       idb[300], idc[300], idl[300], connect[64], hash_b[33], hash_c[33],
+       dest[33], out[8192], listen_out[8192], marker[300], touch[400],
+       text[2048], identity[33], cmd[400];
+  unsigned port = unused_port();
+  int dfd, lfd;
+  pid_t daemon, listener;
+  time_t started;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(idb, sizeof(idb), "%s/id_b", dir) > 0);
+  CHECK(snprintf(idc, sizeof(idc), "%s/id_c", dir) > 0);
+  CHECK(snprintf(idl, sizeof(idl), "%s/id_l", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(marker, sizeof(marker), "%s/marker", dir) > 0);
+  write_identity(idb, 21, hash_b);
+  write_identity(idc, 77, hash_c);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  {
+    char *listen_args[] = {(char *)x, "--connect", connect, "--identity", idl,
+                           "-l", "-a", hash_b, NULL};
+    listener = spawn_cp(x, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rnx listening for commands on <", listen_out,
+               sizeof(listen_out), 10);
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_after(listen_out, "rnx listening for commands on <", dest);
+  }
+  /* output comes back; the exit code is only mirrored with -m */
+  /* every run closes its link, so far more runs than link slots work */
+  {
+    unsigned k;
+    for (k = 0; k < 12; ++k)
+      CHECK(x_run(x, connect, out, sizeof(out), idb, dest, "echo again", NULL) == 0);
+  }
+  CHECK(x_run(x, connect, out, sizeof(out), idb, dest, "echo hello world", NULL) == 0 && strstr(out, "hello world"));
+  CHECK(x_run(x, connect, out, sizeof(out), idb, "-m", dest, "sh -c 'exit 3'", NULL) == 3);
+  CHECK(x_run(x, connect, out, sizeof(out), idb, dest, "sh -c 'exit 3'", NULL) == 0);
+  CHECK(x_run(x, connect, out, sizeof(out), idb, "--stdin", "abc", dest, "cat", NULL) == 0 && strstr(out, "abc"));
+  CHECK(x_run(x, connect, out, sizeof(out), idb, "--stdout", "3", dest, "echo abcdefgh", NULL) == 0 &&
+        strstr(out, "abc") && !strstr(out, "abcd") &&
+        strstr(out, "stdout truncated to 3 bytes"));
+  CHECK(x_run(x, connect, out, sizeof(out), idb, dest, "sh -c 'echo oops 1>&2'", NULL) == 0 && strstr(out, "oops"));
+  CHECK(x_run(x, connect, out, sizeof(out), idb, dest, "/no/such/binary", NULL) == 248 &&
+        strstr(out, "Remote could not execute command"));
+  /* a command that outlives its timeout is stopped */
+  started = time(NULL);
+  CHECK(x_run(x, connect, out, sizeof(out), idb, "-w", "2", dest, "sleep 30", NULL) == 0);
+  CHECK(time(NULL) - started < 15);
+  /* an identity that is not allowed cannot run anything */
+  CHECK(snprintf(touch, sizeof(touch), "touch %s", marker) > 0);
+  CHECK(x_run(x, connect, out, sizeof(out), idc, "-w", "5", dest, touch, NULL) != 0);
+  CHECK(access(marker, F_OK) != 0);
+  {
+    int rc_ = x_run(x, connect, out, sizeof(out), idb, dest, touch, NULL);
+    if (rc_)
+      fprintf(stderr, "touch as B failed (%d):\n%s\n", rc_, out);
+    CHECK(rc_ == 0);
+  }
+  CHECK(access(marker, F_OK) == 0);
+  (void)cmd;
+  (void)hash_c;
+  stop_cp(listener, lfd);
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("x tool tests passed");
+}
+/* The reference rnx against ours, both directions. */
+static void x_reference(const char *exe, const char *x, const char *python) {
+  char dir[] = "/tmp/rnc-x-ref-XXXXXX", cfg[256], key[256], admin[256],
+       refcfg[300], refconf[320], idl[300], ref_l[300], ref_c[300], connect[64],
+       hash_ref[33], dest[33], out[8192], listen_out[8192], text[2048],
+       identity[33];
+  unsigned port = unused_port();
+  int dfd, lfd;
+  pid_t daemon, listener;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(refcfg, sizeof(refcfg), "%s/refcfg", dir) > 0 &&
+        !mkdir(refcfg, 0700));
+  CHECK(snprintf(refconf, sizeof(refconf), "%s/config", refcfg) > 0);
+  CHECK(snprintf(idl, sizeof(idl), "%s/id_ours", dir) > 0);
+  CHECK(snprintf(ref_l, sizeof(ref_l), "%s/id_ref_l", dir) > 0);
+  CHECK(snprintf(ref_c, sizeof(ref_c), "%s/id_ref_c", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  write_identity(ref_c, 33, hash_ref);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = No\n"
+                 "[interfaces]\n[[Daemon]]\ntype = TCPClientInterface\n"
+                 "enabled = yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+                 port) > 0);
+  config_file(refconf, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+
+  /* ours executes for the reference */
+  {
+    char *our_listen[] = {(char *)x, "--connect", connect, "--identity", idl,
+                          "-l", "-a", hash_ref, NULL};
+    char *ref_run[] = {(char *)python, "-u", "-m", "RNS.Utilities.rnx",
+                       "--config", refcfg, "-i", ref_c, "-w", "30", "-m", dest,
+                       "sh -c 'echo from-ours; exit 4'", NULL};
+    listener = spawn_cp(x, &lfd, our_listen);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_after(listen_out, "rnx listening for commands on <", dest);
+    CHECK(run_cp(python, out, sizeof(out), ref_run) == 4 &&
+          strstr(out, "from-ours"));
+    stop_cp(listener, lfd);
+  }
+  /* the reference executes for ours */
+  {
+    char *ref_listen[] = {(char *)python, "-u", "-m", "RNS.Utilities.rnx",
+                          "--config", refcfg, "-l", "-n", "-i", ref_l, "-v",
+                          NULL};
+    char *run[] = {(char *)x, "--connect", connect, "--identity", idl, "-m",
+                   "-w", "30", dest, "sh -c 'echo from-ref; exit 5'", NULL};
+    listener = spawn_cp(python, &lfd, ref_listen);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rnx listening for commands on <", listen_out,
+               sizeof(listen_out), 60);
+    read_until(lfd, ">", listen_out, sizeof(listen_out), 5);
+    parse_after(listen_out, "rnx listening for commands on <", dest);
+    CHECK(run_cp(x, out, sizeof(out), run) == 5 && strstr(out, "from-ref"));
+    stop_cp(listener, lfd);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("x reference tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 4 || argc == 5 || argc == 6);
   if (!strcmp(argv[2], "cli"))
@@ -2880,6 +3058,10 @@ int main(int argc, char **argv) {
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
 
+  else if (!strcmp(argv[2], "x_ref") && argc == 6)
+    x_reference(argv[1], argv[3], argv[5]);
+  else if (!strcmp(argv[2], "x_tools") && argc == 4)
+    x_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "cp_ref") && argc == 6)
     cp_reference(argv[1], argv[3], argv[5]);
   else if (!strcmp(argv[2], "cp_tools") && argc == 4)
