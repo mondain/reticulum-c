@@ -311,3 +311,38 @@ file, `logfile`) and writes `[time] [Level]   module: message`; stderr is the
 default so the machine-readable lines on stdout are unaffected. The reference's
 per-call `RNS.log` messages are far more numerous; this covers the main events,
 not every message.
+
+## Tunnels (`feature/packet-cache`)
+
+Tunnels follow `Transport.synthesize_tunnel` / `handle_tunnel`: a TCP client
+(not kiss-framed) sends one broadcast PLAIN packet to `rnstransport.tunnel.
+synthesize` on connect, carrying its transport public key, a stable interface
+hash, a random hash and a signature; the receiver validates it, creates or
+refreshes the tunnel (id = SHA256(public key || interface hash), 8 h timeout),
+associates paths learned on that interface with it, and when the same tunnel
+reappears on a new interface restores those paths unless a newer one exists.
+`rnc_node_synthesize_tunnel`, `rnc_node_tunnel_count` / `_at` and a signed
+`rnc_node_tunnels_export` / `_import` checkpoint (kept as a separate record so
+the route checkpoint format is unchanged) are the API; the daemon saves the
+table with `SAVE` and at exit and shows it with the admin `TUNNELS` command.
+
+Local Linux evidence: native tests (establish, reject, restore, newer path,
+expiry, persistence, host synthesis, two-daemon persistence across a restart)
+and a differential test in which the unmodified reference's TCP client connects,
+announces, leaves, and reconnects: the daemon keeps the path through the
+absence and restores it on the reconnect without an announce. With restoration
+disabled that test fails.
+
+Notes:
+- The reference's interface hash is the hash of its interface description; this
+  host uses the hash of the interface name. It is only compared for equality.
+- A reference instance that is not a transport node uses a fresh transport
+  identity on every start unless `static_transport_identity` is set, so it only
+  produces the same tunnel again with transport enabled (or that option).
+- The transport packet cache is not implemented because the reference never
+  populates it (`Transport.should_cache` always returns False).
+
+Bug found on the way and fixed: an announce retry still pending for an interface
+that had been removed dereferenced a null interface (a TCP client leaving while
+its announce was queued for retransmission crashed the daemon). Regression test
+`reticulum_announce_ingress_removed`.
