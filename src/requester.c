@@ -13,7 +13,9 @@ typedef struct requester_job {
   enum job_state state;
   rnc_link *link;
   rnc_service *service;
-  uint8_t id[16], destination[16];
+  uint8_t id[16], destination[16], request_id[16];
+  int has_request_id;
+  double last_progress;
   rnc_identity identify;
   int has_identify;
   char path[REQUESTER_PATH_MAX];
@@ -231,14 +233,24 @@ rnc_result rnc_requester_tick(rnc_requester *r, uint64_t unix_seconds,
         (void)rnc_link_identify(j->link, &j->identify, now_ms);
       if (rnc_service_request(j->service, j->path, j->value, j->value_size,
                               (double)unix_seconds, now_ms, remaining,
-                              request_id) == RNC_OK)
+                              request_id) == RNC_OK) {
+        memcpy(j->request_id, request_id, 16);
+        j->has_request_id = 1;
         j->state = JOB_REQUESTED;
+      }
       else
         job_finish(j, RNC_REQUESTER_FAILED, now_ms);
     }
     if (j->state != JOB_CLOSING) {
       (void)rnc_service_pump(j->service, now_ms);
       (void)rnc_service_tick(j->service, now_ms);
+      if (j->has_request_id) {
+        rnc_request_state state;
+        double value;
+        if (rnc_service_request_state(j->service, j->request_id, &state,
+                                      &value) == RNC_OK)
+          j->last_progress = value;
+      }
       job_service_events(r, j, now_ms);
     }
     /* flush packets queued by the above (request, identify, teardown) */
@@ -255,6 +267,31 @@ rnc_result rnc_requester_tick(rnc_requester *r, uint64_t unix_seconds,
       job_release_link(r, j);
   }
   return RNC_OK;
+}
+rnc_result rnc_requester_progress(const rnc_requester *r, uint32_t tag,
+                                  rnc_request_state *state, double *progress) {
+  size_t i;
+  if (!r || !state)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_REQUESTER_JOBS; i++) {
+    const requester_job *j = &r->jobs[i];
+    double value = 0;
+    if (!j->used || j->tag != tag)
+      continue;
+    if (j->finished) {
+      *state = j->status == RNC_REQUESTER_DONE ? RNC_REQUEST_READY
+                                               : RNC_REQUEST_FAILED;
+      value = *state == RNC_REQUEST_READY ? 1.0 : j->last_progress;
+    } else if (j->has_request_id && j->service &&
+               rnc_service_request_state(j->service, j->request_id, state,
+                                         &value) == RNC_OK) {
+    } else
+      *state = RNC_REQUEST_SENT;
+    if (progress)
+      *progress = value;
+    return RNC_OK;
+  }
+  return RNC_STATE;
 }
 rnc_result rnc_requester_poll(rnc_requester *r, rnc_requester_result *result,
                               void *response, size_t capacity) {

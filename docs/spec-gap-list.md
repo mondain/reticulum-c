@@ -101,7 +101,7 @@ Largest gaps, in priority order:
 | IMPL | RTT | `rnc_link_rtt` |
 | PART | ResourceStrategy | Explicit `rnc_resource_accept` only, no strategy enum |
 | PART | `get_age`, `no_inbound_for`, `no_outbound_for` | Implemented. Missing: `inactive_for` (data-only idle), establishment/expected rate, `track_phy_stats`, rssi/snr/q, `get_mode` |
-| MISS | RequestReceipt progress | |
+| IMPL | RequestReceipt status and progress | `rnc_requester_progress` / `rnc_service_request_state`: FAILED, SENT, DELIVERED (request Resource arrived), RECEIVING (0..1 response Resource progress), READY. Callbacks are events/polling |
 
 ### Resource
 

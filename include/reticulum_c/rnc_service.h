@@ -49,6 +49,21 @@ rnc_result rnc_service_unregister(rnc_service *service, const char *path);
 rnc_result rnc_service_request(rnc_service *service, const char *path, const void *encoded_value,
                                size_t value_size, double unix_seconds, uint64_t now_ms,
                                uint64_t timeout_ms, uint8_t request_id[16]);
+/* RequestReceipt states of the reference: FAILED 0, SENT 1, DELIVERED 2 (the
+ * request Resource arrived), RECEIVING 3 (the response Resource is arriving),
+ * READY 4. An inline request goes SENT to READY. */
+typedef enum rnc_request_state {
+    RNC_REQUEST_FAILED = 0,
+    RNC_REQUEST_SENT,
+    RNC_REQUEST_DELIVERED,
+    RNC_REQUEST_RECEIVING,
+    RNC_REQUEST_READY
+} rnc_request_state;
+/* State and 0..1 progress of an outstanding request; RNC_STATE once its
+ * response or timeout has been queued as an event. */
+rnc_result rnc_service_request_state(const rnc_service *service,
+                                     const uint8_t request_id[16],
+                                     rnc_request_state *state, double *progress);
 /* Only responds once to an admitted, unexpired request. */
 rnc_result rnc_service_respond(rnc_service *service, const uint8_t request_id[16],
                                const void *encoded_value, size_t value_size, uint64_t now_ms);

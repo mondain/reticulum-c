@@ -17,6 +17,8 @@ typedef struct service_pending {
     int used, timed_out;
     uint8_t id[16];
     uint64_t deadline;
+    rnc_request_state state;
+    double progress;
 } service_pending;
 typedef struct service_queued {
     rnc_service_event event;
@@ -271,6 +273,8 @@ rnc_result rnc_service_request(rnc_service *s, const char *path, const void *val
     if (result != RNC_OK)
         return result;
     s->pending[index].used = 1;
+    s->pending[index].state = RNC_REQUEST_SENT;
+    s->pending[index].progress = 0;
     s->pending[index].deadline = now + timeout;
     memcpy(s->pending[index].id, hash, 16);
     memcpy(id, hash, 16);
@@ -447,6 +451,11 @@ rnc_result rnc_service_input(rnc_service *s, const rnc_link_event *e, uint64_t n
             s->rx_response = response;
             s->rx_binding = 1;
             memcpy(s->rx_id, id, 16);
+            if (response) {
+                int p = slot(s->pending, id);
+                if (p >= 0)
+                    s->pending[p].state = RNC_REQUEST_RECEIVING;
+            }
         }
     } else {
         rnc_result a = rnc_resource_input(s->tx, e, now), b = rnc_resource_input(s->rx, e, now);
@@ -466,6 +475,20 @@ rnc_result rnc_service_input(rnc_service *s, const rnc_link_event *e, uint64_t n
         s->now = now;
     return result;
 }
+rnc_result rnc_service_request_state(const rnc_service *s, const uint8_t id[16],
+                                     rnc_request_state *state, double *progress) {
+    size_t i;
+    if (!s || !id || !state)
+        return RNC_INVALID;
+    for (i = 0; i < RNC_SERVICE_PENDING; i++)
+        if (s->pending[i].used && !CRYPTO_memcmp(s->pending[i].id, id, 16)) {
+            *state = s->pending[i].timed_out ? RNC_REQUEST_FAILED : s->pending[i].state;
+            if (progress)
+                *progress = s->pending[i].progress;
+            return RNC_OK;
+        }
+    return RNC_STATE;
+}
 rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
     rnc_resource_event re;
     rnc_result result;
@@ -480,13 +503,26 @@ rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
         if (result != RNC_OK)
             return result;
     }
-    while (rnc_resource_poll(s->tx, &re) == RNC_OK)
+    while (rnc_resource_poll(s->tx, &re) == RNC_OK) {
+        int index = slot(s->pending, s->tx_id);
         if (re.type == RNC_RESOURCE_FAILED) {
-            int index = slot(s->pending, s->tx_id);
             if (s->tx_request && index >= 0)
                 s->pending[index].timed_out = 1;
-        }
+        } else if (re.type == RNC_RESOURCE_COMPLETE && s->tx_request &&
+                   index >= 0 && s->pending[index].state == RNC_REQUEST_SENT)
+            s->pending[index].state = RNC_REQUEST_DELIVERED;
+    }
     while (rnc_resource_poll(s->rx, &re) == RNC_OK) {
+        if (re.type == RNC_RESOURCE_PROGRESS && s->rx_binding && s->rx_response &&
+            re.total) {
+            int index = slot(s->pending, s->rx_id);
+            if (index >= 0 && s->pending[index].state != RNC_REQUEST_FAILED) {
+                double v = (double)re.transferred / (double)re.total;
+                s->pending[index].state = RNC_REQUEST_RECEIVING;
+                if (v > s->pending[index].progress)
+                    s->pending[index].progress = v > 1.0 ? 1.0 : v;
+            }
+        }
         if (re.type == RNC_RESOURCE_COMPLETE)
             s->rx_ready = 1;
         else if (re.type == RNC_RESOURCE_FAILED)

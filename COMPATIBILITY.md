@@ -398,3 +398,20 @@ signal-quality accessors are not provided.
 
 Evidence: unit tests for pending/delivered/failed queries, slot recycling and
 the default timeout boundary (expires exactly at the computed value).
+
+## Request progress (`feature/request-progress`)
+
+`rnc_requester_progress(requester, tag, &state, &progress)` gives the
+reference's `RequestReceipt` view of a job: SENT while the link opens and the
+request travels, DELIVERED when a Resource-sized request has been delivered,
+RECEIVING with a 0..1 progress (transferred over total parts) while a
+Resource-sized response arrives, READY (1.0) or FAILED when finished, until the
+result is polled; an unknown tag returns `RNC_STATE`. An inline request goes
+SENT to READY as in the reference. `rnc_service_request_state` is the same
+for a request made directly on a service. The reference's progress for
+multi-segment resources counts segments; responses here are single segment.
+
+Evidence: unit tests drive an inline echo (SENT, READY only), a 3 kB echo whose
+request and response both travel as Resources (SENT, DELIVERED, RECEIVING with
+a fractional, non-decreasing progress, READY at 1.0), and a silent handler
+(FAILED).
