@@ -5,6 +5,8 @@
 #include <reticulum_c/rnc_requester.h>
 #include <reticulum_c/rnc_responder.h>
 typedef struct management {
+  rnc_identity network;
+  int has_network;
   uint8_t probe[16];
   int probing;
   rnc_responder *responder;
@@ -20,10 +22,14 @@ typedef struct management {
   uint64_t started;
 } management;
 static management mgmt;
+static const uint8_t *network_identity_hash(void) {
+  return mgmt.has_network ? mgmt.network.hash : NULL;
+}
 static const uint8_t *probe_responder_hash(void) {
   return mgmt.probing ? mgmt.probe : NULL;
 }
 static void mgmt_stop(void) {
+  rnc_identity_clear(&mgmt.network);
   rnc_responder_free(mgmt.responder);
   rnc_requester_free(mgmt.requester);
   memset(&mgmt, 0, sizeof(mgmt));
@@ -121,6 +127,26 @@ static int mgmt_start(const config *c, const rnc_identity *id, rnc_node *node,
                       rnc_host *host) {
   uint8_t destination[16];
   mgmt_stop();
+  if (c->network_identity[0]) {
+    /* The reference registers the network and per-instance destinations on the
+     * network identity (they carry interface discovery). */
+    char name[128];
+    size_t i;
+    if (rnc_host_identity_load(c->network_identity, secure_random, NULL,
+                               &mgmt.network) != RNC_OK)
+      return 0;
+    mgmt.has_network = 1;
+    (void)snprintf(name, sizeof(name), "rnstransport.network.instance.");
+    for (i = 0; i < 16; ++i)
+      (void)snprintf(name + strlen(name), 3, "%02x", mgmt.network.hash[i]);
+    if (rnc_node_add_destination(node, &mgmt.network, name, NULL, 0,
+                                 destination) != RNC_OK ||
+        rnc_node_add_destination(node, &mgmt.network, "rnstransport.network",
+                                 NULL, 0, destination) != RNC_OK) {
+      mgmt_stop();
+      return 0;
+    }
+  }
   if (c->respond_to_probes) {
     /* rnstransport.probe proves every packet it receives (PROVE_ALL) and takes
      * no links, as Transport registers it */

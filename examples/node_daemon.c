@@ -26,6 +26,8 @@
 #define CONFIG_INTERFACES 8u
 #define BLACKHOLE_MAX 65536u
 static int decode_hex(const char *s, uint8_t *out);
+/* the management module (node_mgmt.h) owns the network identity */
+static const uint8_t *network_identity_hash(void);
 /* Identity hashes separated by commas and/or blanks (at most the allow-list
  * size); replaces any previous content. */
 static int parse_hash_list(const char *value, uint8_t (*out)[16],
@@ -67,6 +69,7 @@ typedef struct config {
       respond_to_probes;
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
+  char network_identity[512]; /* identity file path, empty = none */
   /* blackhole subscriptions: sources, update interval and first-run delay */
   uint8_t bh_sources[RNC_SERVICE_ALLOWLIST][16];
   size_t bh_source_count;
@@ -701,6 +704,19 @@ static int read_config(const char *path, config *c) {
           valid = 0;
           break;
         }
+      } else if (!strcmp(s, "network_identity")) {
+        const char *home = getenv("HOME");
+        int n;
+        if (value[0] == '~' && (value[1] == '/' || !value[1]) && home)
+          n = snprintf(c->network_identity, sizeof(c->network_identity),
+                       "%s%s", home, value + 1);
+        else
+          n = snprintf(c->network_identity, sizeof(c->network_identity), "%s",
+                       value);
+        if (n <= 0 || (size_t)n >= sizeof(c->network_identity)) {
+          valid = 0;
+          break;
+        }
       } else if (!strcmp(s, "blackhole_update_interval") ||
                  !strcmp(s, "blackhole_initial_wait")) {
         if (!number(value, 100000, &n) || !n) {
@@ -1192,13 +1208,21 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
       append(c, " until=%llu reason=%s\n", (unsigned long long)e.until,
              e.reason);
     }
+  } else if (!strcmp(request, "NETWORK")) {
+    if (network_identity_hash()) {
+      append(c, "network identity=");
+      for (i = 0; i < 16; ++i)
+        append(c, "%02x", network_identity_hash()[i]);
+      append(c, "\n");
+    } else
+      append(c, "NONE\n");
   } else if (!strcmp(request, "SAVE")) {
     append(c, "%s\n",
            state && save_state(state, node, id, (uint64_t)time(NULL), now)
                ? "OK"
                : "ERROR no state path or write failed");
   } else
-    append(c, "ERROR commands: STATUS ROUTES PATH <32hex> BLACKHOLE UNBLACKHOLE BLACKHOLES SAVE\n");
+    append(c, "ERROR commands: STATUS ROUTES PATH <32hex> BLACKHOLE UNBLACKHOLE BLACKHOLES NETWORK SAVE\n");
   if (!c->output_size)
     append(c, "EMPTY\n");
 }

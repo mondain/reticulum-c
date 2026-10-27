@@ -905,6 +905,51 @@ static void probe(const char *exe) {
   remove_tree(dir);
   puts("node probe responder tests passed");
 }
+/* Network identity: loaded from (or created at) the configured path in the
+ * reference's 64-byte file format, reported over the admin socket. */
+static void network_identity(const char *exe) {
+  char dir[] = "/tmp/rnc-node-netid-XXXXXX", cfg[256], key[256], admin[256],
+       path[256], text[1024], id[33], reply[256], first[64];
+  int fd;
+  pid_t p;
+  struct stat st;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(path, sizeof(path), "%s/network", dir) > 0);
+  /* not configured: nothing to report */
+  config_file(cfg, valid);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "NETWORK", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "NONE", 4));
+  stop(p, fd);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "network_identity = %s\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = 0\n",
+                 path) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  CHECK(!stat(path, &st) && st.st_size == 64 && (st.st_mode & 0777) == 0600);
+  admin_command(admin, "NETWORK", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "network identity=", 17) && strlen(reply) >= 49);
+  memcpy(first, reply, 49);
+  first[49] = 0;
+  /* the network identity is distinct from the transport identity */
+  CHECK(!strstr(reply, id));
+  stop(p, fd);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "NETWORK", reply, sizeof(reply));
+  CHECK(!strncmp(reply, first, 49)); /* stable across restarts */
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node network identity tests passed");
+}
 static void shared(const char *exe, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-node-shared-XXXXXX", cfg[256], keypath[256],
        admin[256], storage[256], text[2048], identity[33];
@@ -1373,12 +1418,78 @@ static void probe_reference(const char *exe, const char *reference,
   remove_tree(dir);
   puts("unmodified RNS rnprobe against the probe responder passed");
 }
+/* Identity files are interchangeable with the reference in both directions. */
+static void network_identity_reference(const char *exe, const char *reference,
+                                       const char *python) {
+  char dir[] = "/tmp/rnc-netid-ref-XXXXXX", cfg[256], key[256], admin[256],
+       theirs[256], ours[256], text[1024], id[33], reply[256], out[4096],
+       hash[33];
+  char *generate[3], *print[4];
+  int fd;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(theirs, sizeof(theirs), "%s/reference-identity", dir) > 0);
+  CHECK(snprintf(ours, sizeof(ours), "%s/daemon-identity", dir) > 0);
+  generate[0] = "-g";
+  generate[1] = theirs;
+  generate[2] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", generate, out,
+                 sizeof(out));
+  CHECK(strchr(out, '<') && strlen(strchr(out, '<')) > 33);
+  memcpy(hash, strchr(out, '<') + 1, 32);
+  hash[32] = 0;
+  /* the daemon loads the reference's identity; like its own key file it must
+   * not be readable by group or others, which the reference does not ensure */
+  CHECK(!chmod(theirs, 0600));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "network_identity = %s\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = 0\n",
+                 theirs) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "NETWORK", reply, sizeof(reply));
+  stop(p, fd);
+  CHECK(!strncmp(reply, "network identity=", 17) && !strncmp(reply + 17, hash, 32));
+  /* the reference loads the identity the daemon created */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "network_identity = %s\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = 0\n",
+                 ours) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "NETWORK", reply, sizeof(reply));
+  stop(p, fd);
+  print[0] = "-i";
+  print[1] = ours;
+  print[2] = "-p";
+  print[3] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", print, out,
+                 sizeof(out));
+  {
+    char want[40];
+    CHECK(snprintf(want, sizeof(want), "<%.32s>", reply + 17) > 0);
+    CHECK(strstr(out, want));
+  }
+  remove_tree(dir);
+  puts("network identity files interchange with the reference");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 5);
   if (!strcmp(argv[2], "cli"))
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+  else if (!strcmp(argv[2], "netid") && argc == 3)
+    network_identity(argv[1]);
   else if (!strcmp(argv[2], "probe") && argc == 3)
     probe(argv[1]);
   else if (!strcmp(argv[2], "sources") && argc == 3)
@@ -1389,6 +1500,8 @@ int main(int argc, char **argv) {
     blackhole(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
+  else if (!strcmp(argv[2], "netid_ref") && argc == 5)
+    network_identity_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "probe_ref") && argc == 5)
     probe_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "source_ref") && argc == 5)

@@ -54,7 +54,7 @@ Largest gaps, in priority order:
 | MISS | Tunnels and tunnel table | |
 | MISS | Transport packet cache and cache-request serving | Context 8 is parsed only inside Resource |
 | IMPL | Persistent known-destinations table | See `rnc_node_known_export/import` |
-| MISS | Network identities (6.5) | |
+| PART | Network identities (6.5) | `network_identity` file (created 0600 if absent, reference file format), reported as `network_id` and over the admin `NETWORK` command, with the `rnstransport.network` and `rnstransport.network.instance.<hash>` destinations registered; the discovery protocol that uses them is not implemented |
 | N/A | AES-128 link modes, Python pickle | By design; MessagePack RPC only |
 
 ## 3. API reference (manual ch16)
@@ -192,7 +192,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | MISS | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | |
 | IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
 | IMPL | `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval` | |
-| MISS | `discover_interfaces` and related, `network_identity` | |
+| IMPL | `network_identity` | |
+| MISS | `discover_interfaces` and related | |
 | MISS | `~/.reticulum` config/storage layout | Daemon uses `--identity` and `--state` |
 
 ### Utilities (lower priority for an SDK)
