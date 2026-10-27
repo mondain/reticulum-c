@@ -27,10 +27,10 @@
 typedef struct interface_config {
   rnc_host_config host;
   char name[64], address[256], target[256], device[64], group[64], netname[128],
-      passphrase[128];
+      passphrase[128], callsign[RNC_HOST_CALLSIGN_MAX + 2u], ax_call[8];
   size_t ifac_size;
   uint32_t interface_id;
-  int enabled, has_type;
+  int enabled, has_type, backbone;
   rnc_ifac ifac;
 } interface_config;
 typedef struct config {
@@ -111,12 +111,20 @@ static int set_type(interface_config *f, const char *value) {
                {"AutoInterface", RNC_HOST_AUTO},
                {"SerialInterface", RNC_HOST_SERIAL},
                {"KISSInterface", RNC_HOST_KISS},
-               {"RNodeInterface", RNC_HOST_RNODE}};
+               {"RNodeInterface", RNC_HOST_RNODE},
+               {"PipeInterface", RNC_HOST_PIPE},
+               {"AX25KISSInterface", RNC_HOST_AX25},
+               {"BackboneInterface", RNC_HOST_TCP_LISTEN},
+               {"BackboneClientInterface", RNC_HOST_TCP_CONNECT}};
   size_t i;
   for (i = 0; i < sizeof(types) / sizeof(*types); ++i)
     if (!strcmp(value, types[i].name)) {
       f->host.kind = types[i].kind;
       f->has_type = 1;
+      f->backbone = !strncmp(value, "Backbone", 8);
+      /* wire-compatible with TCP (HDLC); reference defaults differ */
+      if (f->backbone && types[i].kind == RNC_HOST_TCP_LISTEN)
+        f->host.fast_flap.enabled = 1;
       return 1;
     }
   return 0;
@@ -134,7 +142,8 @@ static int interface_key(interface_config *f, const char *key,
     return 1;
   }
   if (!strcmp(key, "listen_ip") || !strcmp(key, "listen_address") ||
-      !strcmp(key, "target_host") || !strcmp(key, "port"))
+      !strcmp(key, "target_host") ||
+      (!strcmp(key, "port") && !f->backbone) || !strcmp(key, "command"))
     return text_copy(f->address, sizeof(f->address), value);
   if (!strcmp(key, "forward_ip") || !strcmp(key, "target"))
     return text_copy(f->target, sizeof(f->target), value);
@@ -179,6 +188,72 @@ static int interface_key(interface_config *f, const char *key,
       return 0;
     f->host.announce_cap_permille = (uint32_t)(percent * 10.0 + 0.5);
     return f->host.announce_cap_permille != 0;
+  }
+  if (!strcmp(key, "airtime_limit_short") ||
+      !strcmp(key, "airtime_limit_long")) {
+    char *end;
+    double percent = strtod(value, &end);
+    if (end == value || *end || !(percent > 0.0) || percent > 100.0)
+      return 0;
+    if (!strcmp(key, "airtime_limit_short"))
+      f->host.airtime_limit_short = percent;
+    else
+      f->host.airtime_limit_long = percent;
+    return 1;
+  }
+  if (!strcmp(key, "parity")) {
+    if (!strcasecmp(value, "n") || !strcasecmp(value, "none"))
+      f->host.serial_parity = 'N';
+    else if (!strcasecmp(value, "e") || !strcasecmp(value, "even"))
+      f->host.serial_parity = 'E';
+    else if (!strcasecmp(value, "o") || !strcasecmp(value, "odd"))
+      f->host.serial_parity = 'O';
+    else
+      return 0;
+    return 1;
+  }
+  if (!strcmp(key, "kiss_framing") || !strcmp(key, "prefer_ipv6")) {
+    if (!boolean(value, &b))
+      return 0;
+    if (key[0] == 'k')
+      f->host.kiss_framing = b;
+    else
+      f->host.prefer_ipv6 = b;
+    return 1;
+  }
+  if (!strcmp(key, "block_fast_flapping")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->host.fast_flap.enabled = b;
+    return 1;
+  }
+  if (!strcmp(key, "fast_flapping_threshold") ||
+      !strcmp(key, "fast_flapping_block_time")) {
+    char *end;
+    double v = strtod(value, &end);
+    int minutes = !strcmp(key, "fast_flapping_block_time");
+    if (end == value || *end || !(v > 0.0) || v > 31536000.0)
+      return 0;
+    if (minutes)
+      f->host.fast_flap.expiry_seconds = (unsigned)(v * 60.0 + 0.5);
+    else
+      f->host.fast_flap.threshold_seconds = (unsigned)(v + 0.5);
+    return 1;
+  }
+  if (!strcmp(key, "respawn_delay")) {
+    char *end;
+    double seconds = strtod(value, &end);
+    if (end == value || *end || !(seconds >= 0.0) || seconds > 3600.0)
+      return 0;
+    f->host.respawn_delay_ms = (unsigned)(seconds * 1000.0 + 0.5);
+    return 1;
+  }
+  if (!strcmp(key, "callsign"))
+    return text_copy(f->ax_call, sizeof(f->ax_call), value);
+  if (!strcmp(key, "id_callsign")) {
+    if (strlen(value) > RNC_HOST_CALLSIGN_MAX)
+      return 0;
+    return text_copy(f->callsign, sizeof(f->callsign), value);
   }
   if (!strcmp(key, "ingress_control")) {
     if (!boolean(value, &b))
@@ -228,7 +303,41 @@ static int interface_key(interface_config *f, const char *key,
   }
   if (!number(value, UINT32_MAX, &n))
     return 0;
-  if (!strcmp(key, "listen_port") || !strcmp(key, "target_port")) {
+  if (!strcmp(key, "databits") || !strcmp(key, "stopbits")) {
+    if (key[0] == 'd') {
+      if (n < 5 || n > 8)
+        return 0;
+      f->host.serial_databits = (unsigned)n;
+    } else {
+      if (n < 1 || n > 2)
+        return 0;
+      f->host.serial_stopbits = (unsigned)n;
+    }
+    return 1;
+  }
+  if (!strcmp(key, "max_reconnect_tries")) {
+    if (n > 1000000)
+      return 0;
+    f->host.max_reconnect_tries = (unsigned)n;
+    return 1;
+  }
+  if (!strcmp(key, "connect_timeout") || !strcmp(key, "reconnect_wait")) {
+    if (n == 0 || n > 3600)
+      return 0;
+    if (key[0] == 'c')
+      f->host.connect_timeout_ms = (unsigned)n * 1000u;
+    else
+      f->host.reconnect_wait_ms = (unsigned)n * 1000u;
+    return 1;
+  }
+  if (!strcmp(key, "fast_flapping_grace")) {
+    if (n == 0 || n > 1000)
+      return 0;
+    f->host.fast_flap.grace = (unsigned)n;
+    return 1;
+  }
+  if (!strcmp(key, "listen_port") || !strcmp(key, "target_port") ||
+      (!strcmp(key, "port") && f->backbone)) {
     if (n > 65535)
       return 0;
     f->host.port = (uint16_t)n;
@@ -306,6 +415,25 @@ static int interface_key(interface_config *f, const char *key,
   }
   if (!strcmp(key, "codingrate")) {
     f->host.coding_rate = (unsigned)n;
+    return 1;
+  }
+  if (!strcmp(key, "ssid") || !strcmp(key, "preamble") ||
+      !strcmp(key, "txtail") || !strcmp(key, "persistence") ||
+      !strcmp(key, "slottime")) {
+    unsigned *field = !strcmp(key, "ssid")          ? &f->host.ssid
+                      : !strcmp(key, "preamble")    ? &f->host.preamble_ms
+                      : !strcmp(key, "txtail")      ? &f->host.txtail_ms
+                      : !strcmp(key, "persistence") ? &f->host.persistence
+                                                    : &f->host.slottime_ms;
+    if (n > 65535)
+      return 0;
+    *field = (unsigned)n;
+    return 1;
+  }
+  if (!strcmp(key, "id_interval")) {
+    if (n == 0 || n > 86400)
+      return 0;
+    f->host.id_interval = (unsigned)n;
     return 1;
   }
   if (!strcmp(key, "txpower")) {
@@ -386,6 +514,10 @@ static int finish_config(config *c) {
     f->host.target = f->target[0] ? f->target : NULL;
     f->host.device = f->device[0] ? f->device : NULL;
     f->host.group = f->group[0] ? f->group : NULL;
+    f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
+    f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
+    if (f->backbone && !f->host.bitrate)
+      f->host.bitrate = 100000000u; /* reference BITRATE_GUESS */
     if (!f->enabled)
       continue;
     ++enabled;

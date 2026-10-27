@@ -189,13 +189,16 @@ if(UNIX AND RNC_BUILD_HOST)
     if(BUILD_TESTING)
         add_executable(test_host tests/test_host.c)
         target_link_libraries(test_host PRIVATE reticulum_c_host OpenSSL::Crypto)
-        foreach(case codecs serial network keys rnode pressure udp policy)
+        foreach(case codecs serial network keys rnode rnode_extras pipe ax25 fast_flap tcp_options serial_params kiss pressure udp policy)
             add_test(NAME reticulum_host_${case} COMMAND test_host ${case})
         endforeach()
-        set_tests_properties(reticulum_host_serial reticulum_host_rnode reticulum_host_pressure
+        set_tests_properties(reticulum_host_serial reticulum_host_kiss reticulum_host_rnode reticulum_host_rnode_extras reticulum_host_pipe reticulum_host_ax25 reticulum_host_pressure
             PROPERTIES LABELS pty)
         set_tests_properties(reticulum_host_network reticulum_host_udp
             PROPERTIES LABELS network TIMEOUT 30)
+        add_executable(test_host_internal tests/test_host_internal.c)
+        target_link_libraries(test_host_internal PRIVATE reticulum_c OpenSSL::Crypto)
+        add_test(NAME reticulum_host_internal COMMAND test_host_internal)
         add_executable(test_node_rpc tests/test_node_rpc.c)
         target_link_libraries(test_node_rpc PRIVATE reticulum_c_host OpenSSL::Crypto)
         add_test(NAME reticulum_node_rpc COMMAND test_node_rpc)
@@ -216,6 +219,12 @@ if(UNIX AND RNC_BUILD_HOST)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 60)
+                add_test(NAME reticulum_node_process_backbone COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> backbone
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_backbone
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
             endif()
         endif()
     endif()

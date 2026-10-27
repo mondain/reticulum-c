@@ -4,8 +4,10 @@
 #endif
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netdb.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
 #include <stdio.h>
@@ -328,6 +330,12 @@ static void radio_test(void) {
   cfg.coding_rate = 5;
   cfg.flow_control = 1;
   CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  {
+    rnc_host_status radio_status;
+    /* reference: sf * (4/cr) / (2^sf / bw) = 5468.75 bit/s at SF7 BW125 CR5 */
+    CHECK(rnc_host_get_status(host, 1, &radio_status) == RNC_OK);
+    CHECK(radio_status.bitrate == 5469u);
+  }
   for (i = 0; i < 1000 && commands < 6; ++i) {
     ssize_t n;
     size_t k;
@@ -464,6 +472,662 @@ static void policy_test(void) {
   rnc_node_free(node);
   puts("host interface policy tests passed");
 }
+
+/* Reads whatever the radio side of the PTY received and counts KISS frames by
+ * command; data frames (command 0) are compared against the callsign. */
+typedef struct radio_tap {
+  int master;
+  rnc_host_framer parser;
+  unsigned data_frames, beacons, saw_st, saw_lt;
+  uint8_t st[2], lt[2];
+} radio_tap;
+static void radio_drain(radio_tap *t) {
+  uint8_t bytes[256], decoded[RNC_IFAC_FRAME_MAX], command;
+  size_t size, k;
+  ssize_t n = read(t->master, bytes, sizeof(bytes));
+  if (n <= 0)
+    return;
+  for (k = 0; k < (size_t)n; ++k)
+    if (rnc_host_frame_feed(&t->parser, RNC_HOST_KISS_FRAMING, bytes[k],
+                            &command, decoded, sizeof(decoded),
+                            &size) == RNC_OK) {
+      uint8_t ack[RNC_HOST_FRAME_MAX];
+      size_t ack_size;
+      if (command == 0) {
+        if (size == 6 && !memcmp(decoded, "N0CALL", 6))
+          ++t->beacons;
+        else
+          ++t->data_frames;
+      } else if (command == 0x0b && size == 2) {
+        t->saw_st = 1;
+        memcpy(t->st, decoded, 2);
+      } else if (command == 0x0c && size == 2) {
+        t->saw_lt = 1;
+        memcpy(t->lt, decoded, 2);
+      } else if (command >= 1 && command <= 6) {
+        if (command == 1)
+          decoded[3] = (uint8_t)(decoded[3] + 50u);
+        CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, command, decoded,
+                                    size, ack, sizeof(ack),
+                                    &ack_size) == RNC_OK);
+        CHECK(write(t->master, ack, ack_size) == (ssize_t)ack_size);
+      }
+    }
+}
+static void radio_extras_test(void) {
+  radio_tap tap = {0};
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_packet plain = {0};
+  uint64_t now = 100;
+  tap.master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  CHECK(tap.master >= 0);
+  CHECK(!grantpt(tap.master) && !unlockpt(tap.master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_RNODE;
+  cfg.address = ptsname(tap.master);
+  cfg.serial_baud = 115200;
+  cfg.frequency = 915000000;
+  cfg.bandwidth = 125000;
+  cfg.tx_power = 10;
+  cfg.spreading_factor = 7;
+  cfg.coding_rate = 5;
+  cfg.airtime_limit_short = 25.5;
+  cfg.airtime_limit_long = 10.0;
+  cfg.id_callsign = "N0CALL";
+  cfg.id_interval = 10;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  for (i = 0; i < 1000; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, ++now) == RNC_OK);
+    radio_drain(&tap);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    if (status.radio_ready && tap.saw_st && tap.saw_lt)
+      break;
+  }
+  CHECK(status.radio_ready && tap.saw_st && tap.saw_lt);
+  CHECK(tap.st[0] == 0x09 && tap.st[1] == 0xf6); /* 25.5% in hundredths */
+  CHECK(tap.lt[0] == 0x03 && tap.lt[1] == 0xe8); /* 10.0% */
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  now = 5000;
+  CHECK(rnc_node_send(node, &plain, 1700000001, now) == RNC_OK);
+  for (i = 0; i < 20; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000001, ++now) == RNC_OK);
+    radio_drain(&tap);
+  }
+  CHECK(tap.data_frames == 1 && tap.beacons == 0);
+  /* first transmission at ~5000 ms starts the ID clock; 10 s later we ID */
+  CHECK(rnc_host_step(host, 0, 1700000010, 14000) == RNC_OK);
+  radio_drain(&tap);
+  CHECK(tap.beacons == 0);
+  CHECK(rnc_host_step(host, 0, 1700000011, 15100) == RNC_OK);
+  CHECK(rnc_host_step(host, 0, 1700000011, 15200) == RNC_OK);
+  radio_drain(&tap);
+  CHECK(tap.beacons == 1);
+  /* the beacon itself does not restart the clock: nothing until new traffic */
+  CHECK(rnc_host_step(host, 0, 1700000040, 40000) == RNC_OK);
+  radio_drain(&tap);
+  CHECK(tap.beacons == 1);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK &&
+        status.tx_packets == 1);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(tap.master);
+  puts("host RNode airtime and beacon tests passed");
+}
+static void pipe_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_packet plain = {0};
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_PIPE;
+  cfg.address = "";
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+  cfg.address = "cat";
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  CHECK(rnc_node_send(node, &plain, 1700000000, 100) == RNC_OK);
+  for (i = 0; i < 300; ++i) {
+    CHECK(rnc_host_step(host, 10, 1700000000, 100 + i) == RNC_OK);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    if (status.rx_packets)
+      break;
+  }
+  /* cat echoes the HDLC frame back, so it arrives as input */
+  CHECK(status.online && status.kind == RNC_HOST_PIPE);
+  CHECK(status.tx_packets == 1 && status.rx_packets == 1);
+  CHECK(status.bitrate == 1000000u);
+  rnc_host_free(host);
+  /* a command that exits is restarted after respawn_delay_ms */
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.address = "true";
+  cfg.respawn_delay_ms = 50;
+  CHECK(rnc_host_add(host, 2, &cfg) == RNC_OK);
+  for (i = 0; i < 400; ++i) {
+    CHECK(rnc_host_step(host, 10, 1700000001, 1000 + 10u * i) == RNC_OK);
+    CHECK(rnc_host_get_status(host, 2, &status) == RNC_OK);
+    if (status.reconnects)
+      break;
+  }
+  CHECK(status.reconnects >= 1);
+  CHECK(i < 60); /* respawn_delay_ms honoured, not the 1 s default */
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host pipe tests passed");
+}
+typedef struct tnc_frame {
+  uint8_t command, data[RNC_HOST_FRAME_MAX];
+  size_t size;
+} tnc_frame;
+static size_t tnc_read(int master, rnc_host_framer *parser, tnc_frame *out,
+                       size_t count, size_t max) {
+  uint8_t bytes[512];
+  ssize_t n = read(master, bytes, sizeof(bytes));
+  size_t k;
+  for (k = 0; n > 0 && k < (size_t)n && count < max; ++k) {
+    uint8_t decoded[RNC_IFAC_FRAME_MAX], command;
+    size_t size;
+    if (rnc_host_frame_feed(parser, RNC_HOST_KISS_FRAMING, bytes[k], &command,
+                            decoded, sizeof(decoded), &size) == RNC_OK) {
+      out[count].command = command;
+      out[count].size = size;
+      memcpy(out[count].data, decoded, size);
+      ++count;
+    }
+  }
+  return count;
+}
+static void ax25_test(void) {
+  int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  uint8_t key[64] = {0}, ready[RNC_HOST_FRAME_MAX], header[16];
+  unsigned rng = 0, i;
+  size_t count = 0, ready_size, k;
+  tnc_frame frames[16];
+  rnc_host_framer parser = {0};
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_packet plain = {0};
+  const uint8_t setup[][2] = {{0x01, 35}, {0x04, 2}, {0x02, 64},
+                              {0x03, 2},  {0x0f, 1}};
+  const char dst[] = "APZRNS", src[] = "N0CALL";
+  CHECK(master >= 0 && !grantpt(master) && !unlockpt(master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_AX25;
+  cfg.address = ptsname(master);
+  cfg.serial_baud = 115200;
+  cfg.callsign = "ab";
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+  cfg.callsign = "n0call";
+  cfg.ssid = 16;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+  cfg.ssid = 3;
+  cfg.flow_control = 1;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  CHECK(rnc_node_send(node, &plain, 1700000000, 100) == RNC_OK);
+  for (i = 0; i < 100 && count < 6; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, 100 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 6);
+  for (k = 0; k < 5; ++k)
+    CHECK(frames[k].command == setup[k][0] && frames[k].size == 1 &&
+          frames[k].data[0] == setup[k][1]);
+  CHECK(frames[5].command == 0 && frames[5].size > 16);
+  for (k = 0; k < 6; ++k) {
+    header[k] = (uint8_t)(dst[k] << 1);
+    header[7 + k] = (uint8_t)(src[k] << 1);
+  }
+  header[6] = 0x60;
+  header[13] = 0x60 | (3 << 1) | 1;
+  header[14] = 0x03;
+  header[15] = 0xf0;
+  CHECK(!memcmp(frames[5].data, header, 16));
+  /* with flow control, the next packet waits for the TNC's ready frame */
+  CHECK(rnc_node_send(node, &plain, 1700000001, 1000) == RNC_OK);
+  for (i = 0; i < 20; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000001, 1000 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 6);
+  CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0x0f,
+                              (const uint8_t[]){1}, 1, ready,
+                              sizeof(ready), &ready_size) == RNC_OK);
+  CHECK(write(master, ready, ready_size) == (ssize_t)ready_size);
+  for (i = 0; i < 20; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000001, 3000 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 7 && frames[6].command == 0);
+  /* a frame arriving from the TNC has its AX.25 header stripped */
+  {
+    uint8_t echo[RNC_HOST_FRAME_MAX];
+    size_t echo_size;
+    CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0, frames[6].data,
+                                frames[6].size, echo, sizeof(echo),
+                                &echo_size) == RNC_OK);
+    CHECK(write(master, echo, echo_size) == (ssize_t)echo_size);
+  }
+  for (i = 0; i < 20; ++i)
+    CHECK(rnc_host_step(host, 0, 1700000001, 5000 + 100u * i) == RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+  CHECK(status.kind == RNC_HOST_AX25 && status.rx_packets == 1 &&
+        status.tx_packets == 2);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(master);
+  puts("host AX.25 KISS tests passed");
+}
+static int flap_connect(uint16_t port) {
+  struct sockaddr_in a = {0};
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  CHECK(fd >= 0);
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  CHECK(connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0);
+  CHECK(fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
+  return fd;
+}
+static void fast_flap_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i, round;
+  uint64_t now = 100;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.address = "127.0.0.1";
+  cfg.fast_flap.enabled = 1;
+  cfg.fast_flap.grace = 2;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && status.bound_port);
+  /* three short-lived connections exceed a grace of two */
+  for (round = 0; round < 3; ++round) {
+    int fd = flap_connect(status.bound_port);
+    uint8_t byte;
+    for (i = 0; i < 10; ++i)
+      CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+    CHECK(recv(fd, &byte, 1, 0) < 0 && errno == EAGAIN); /* accepted, open */
+    close(fd);
+    for (i = 0; i < 10; ++i)
+      CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+  }
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK &&
+        status.blocked_ips == 1);
+  {
+    int fd = flap_connect(status.bound_port);
+    uint8_t byte;
+    ssize_t got = -1;
+    for (i = 0; i < 20 && got < 0; ++i) {
+      CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+      got = recv(fd, &byte, 1, 0);
+    }
+    CHECK(got == 0); /* refused: closed without service */
+    close(fd);
+  }
+  /* the block lapses 12 h after the last flap */
+  CHECK(rnc_host_step(host, 0, 1700000000, now + 12u * 3600u * 1000u + 1000u) ==
+        RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK &&
+        status.blocked_ips == 0);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host fast-flap tests passed");
+}
+static int tcp_listener(int family, uint16_t *port) {
+  struct sockaddr_storage a = {0};
+  socklen_t n = sizeof(a);
+  int fd = socket(family, SOCK_STREAM, 0), one = 1;
+  CHECK(fd >= 0);
+  (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  if (family == AF_INET) {
+    struct sockaddr_in *v4 = (struct sockaddr_in *)&a;
+    v4->sin_family = AF_INET;
+    v4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    v4->sin_port = htons(*port);
+  } else {
+    struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&a;
+    v6->sin6_family = AF_INET6;
+    v6->sin6_addr = in6addr_loopback;
+    v6->sin6_port = htons(*port);
+  }
+  if (bind(fd, (struct sockaddr *)&a, family == AF_INET
+                                          ? sizeof(struct sockaddr_in)
+                                          : sizeof(struct sockaddr_in6)) < 0) {
+    close(fd);
+    return -1;
+  }
+  CHECK(listen(fd, 4) == 0);
+  CHECK(getsockname(fd, (struct sockaddr *)&a, &n) == 0);
+  *port = ntohs(family == AF_INET ? ((struct sockaddr_in *)&a)->sin_port
+                                  : ((struct sockaddr_in6 *)&a)->sin6_port);
+  CHECK(fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
+  return fd;
+}
+static int accept_within(rnc_host *host, int listener, uint64_t *now,
+                         unsigned steps) {
+  unsigned i;
+  for (i = 0; i < steps; ++i) {
+    int fd;
+    CHECK(rnc_host_step(host, 5, 1700000000, *now += 10) == RNC_OK);
+    fd = accept(listener, NULL, NULL);
+    if (fd >= 0)
+      return fd;
+  }
+  return -1;
+}
+static void tcp_options_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  uint64_t now = 100;
+  uint16_t port = 0, free_port = 0;
+  int listener, accepted, one = 1, value;
+  socklen_t n;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_packet plain = {0};
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  (void)one;
+  /* keepalive and user timeout on the host's connected socket */
+  host = rnc_host_new(node);
+  CHECK(host);
+  listener = tcp_listener(AF_INET, &port);
+  CHECK(listener >= 0);
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  cfg.address = "127.0.0.1";
+  cfg.port = port;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 50);
+  CHECK(accepted >= 0);
+  {
+    int fd, found = 0;
+    for (fd = 3; fd < 256; ++fd) {
+      struct sockaddr_in peer;
+      socklen_t peer_size = sizeof(peer);
+      if (fd == listener || fd == accepted ||
+          getpeername(fd, (struct sockaddr *)&peer, &peer_size) != 0 ||
+          peer.sin_family != AF_INET || ntohs(peer.sin_port) != port)
+        continue;
+      found = 1;
+      n = sizeof(value);
+      CHECK(getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &value, &n) == 0 &&
+            value == 1);
+#ifdef __linux__
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &value, &n) == 0 &&
+            value == 5);
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &value, &n) == 0 &&
+            value == 2);
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &value, &n) == 0 &&
+            value == 12);
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &value, &n) == 0 &&
+            value == 24000);
+#endif
+    }
+    CHECK(found);
+  }
+  close(accepted);
+  rnc_host_free(host);
+  /* kiss_framing: data frames are FEND 0x00 ... FEND instead of HDLC */
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kiss_framing = 1;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 50);
+  CHECK(accepted >= 0);
+  CHECK(rnc_node_send(node, &plain, 1700000000, now) == RNC_OK);
+  {
+    uint8_t bytes[64];
+    ssize_t got = -1;
+    for (i = 0; i < 50 && got <= 0; ++i) {
+      CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+      got = recv(accepted, bytes, sizeof(bytes), MSG_DONTWAIT);
+    }
+    CHECK(got > 3 && bytes[0] == 0xc0 && bytes[1] == 0x00 &&
+          bytes[got - 1] == 0xc0);
+  }
+  close(accepted);
+  rnc_host_free(host);
+  close(listener);
+  /* max_reconnect_tries stops retrying; reconnect_wait_ms paces attempts */
+  listener = tcp_listener(AF_INET, &free_port);
+  CHECK(listener >= 0);
+  close(listener); /* nothing listens on free_port now */
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kiss_framing = 0;
+  cfg.port = free_port;
+  cfg.reconnect_wait_ms = 50;
+  cfg.max_reconnect_tries = 2;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  for (i = 0; i < 100; ++i)
+    CHECK(rnc_host_step(host, 1, 1700000000, now += 10) == RNC_OK);
+  listener = tcp_listener(AF_INET, &free_port);
+  CHECK(listener >= 0);
+  CHECK(accept_within(host, listener, &now, 100) < 0);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && !status.online);
+  close(listener);
+  rnc_host_free(host);
+  /* without a limit, the same client connects once the listener appears */
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.max_reconnect_tries = 0;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  for (i = 0; i < 20; ++i)
+    CHECK(rnc_host_step(host, 1, 1700000000, now += 10) == RNC_OK);
+  listener = tcp_listener(AF_INET, &free_port);
+  CHECK(listener >= 0);
+  accepted = accept_within(host, listener, &now, 100);
+  CHECK(accepted >= 0);
+  close(accepted);
+  close(listener);
+  rnc_host_free(host);
+  /* prefer_ipv6 picks the IPv6 address of a name that has both */
+  {
+    struct addrinfo hints = {0}, *res = NULL;
+    uint16_t port6 = 0;
+    int listener6;
+    int v4 = 0, v6 = 0;
+    struct addrinfo *entry;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo("localhost", "1", &hints, &res) == 0)
+      for (entry = res; entry; entry = entry->ai_next) {
+        v4 |= entry->ai_family == AF_INET;
+        v6 |= entry->ai_family == AF_INET6;
+      }
+    if (res)
+      freeaddrinfo(res);
+    /* needs a dual-stack "localhost"; skipped where the resolver has no ::1 */
+    listener6 = v4 && v6 ? tcp_listener(AF_INET6, &port6) : -1;
+    if (listener6 < 0)
+      puts("prefer_ipv6 check skipped: localhost is not dual-stack here");
+    if (listener6 >= 0) {
+      host = rnc_host_new(node);
+      CHECK(host);
+      cfg.address = "localhost";
+      cfg.port = port6;
+      cfg.reconnect_wait_ms = 50;
+      cfg.prefer_ipv6 = 1;
+      CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+      accepted = accept_within(host, listener6, &now, 100);
+      CHECK(accepted >= 0);
+      close(accepted);
+      close(listener6);
+      rnc_host_free(host);
+    }
+  }
+  /* a connect that never completes is abandoned after connect_timeout_ms */
+  {
+    uint16_t stuck_port = 0;
+    int stuck = tcp_listener(AF_INET, &stuck_port), fillers[8], k;
+    struct sockaddr_in a = {0};
+    CHECK(stuck >= 0);
+    CHECK(listen(stuck, 0) == 0);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(stuck_port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    for (k = 0; k < 8; ++k) { /* saturate the accept queue so SYNs are dropped */
+      fillers[k] = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+      (void)connect(fillers[k], (struct sockaddr *)&a, sizeof(a));
+    }
+    host = rnc_host_new(node);
+    CHECK(host);
+    cfg.address = "127.0.0.1";
+    cfg.port = stuck_port;
+    cfg.prefer_ipv6 = 0;
+    cfg.connect_timeout_ms = 200;
+    cfg.reconnect_wait_ms = 100000;
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && !status.online);
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 100) == RNC_OK);
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 250) == RNC_OK);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK &&
+          status.last_errno == ETIMEDOUT);
+    rnc_host_free(host);
+    for (k = 0; k < 8; ++k)
+      close(fillers[k]);
+    close(stuck);
+  }
+  rnc_node_free(node);
+  puts("host TCP option tests passed");
+}
+static void serial_params_test(void) {
+  unsigned rng = 0;
+  uint8_t key[64] = {0};
+  rnc_identity id;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  {
+    int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    rnc_node *node = rnc_node_new(&id, 0, random_bytes, &rng);
+    rnc_host *host = rnc_host_new(node);
+    rnc_host_config cfg = {0};
+    CHECK(master >= 0 && !grantpt(master) && !unlockpt(master));
+    cfg.kind = RNC_HOST_SERIAL;
+    cfg.address = ptsname(master);
+    cfg.serial_baud = 115200;
+    cfg.serial_databits = 9;
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+    cfg.serial_databits = 8;
+    cfg.serial_parity = 'X';
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+    cfg.serial_parity = 'N';
+    cfg.serial_stopbits = 3;
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+    cfg.serial_databits = 7;
+    cfg.serial_parity = 'E';
+    cfg.serial_stopbits = 2;
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+    rnc_host_free(host);
+    rnc_node_free(node);
+    close(master);
+  }
+  puts("host serial parameter tests passed");
+}
+static void kiss_test(void) {
+  int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  uint8_t key[64] = {0}, ready[RNC_HOST_FRAME_MAX];
+  unsigned rng = 0, i;
+  size_t count = 0, ready_size, k;
+  tnc_frame frames[16];
+  rnc_host_framer parser = {0};
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_packet plain = {0};
+  const uint8_t setup[][2] = {{0x01, 10}, {0x04, 2}, {0x02, 64},
+                              {0x03, 2},  {0x0f, 1}};
+  CHECK(master >= 0 && !grantpt(master) && !unlockpt(master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_KISS;
+  cfg.address = ptsname(master);
+  cfg.serial_baud = 115200;
+  cfg.preamble_ms = 100;
+  cfg.flow_control = 1;
+  cfg.id_callsign = "N0CALL";
+  cfg.id_interval = 10;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  CHECK(rnc_node_send(node, &plain, 1700000000, 100) == RNC_OK);
+  for (i = 0; i < 100 && count < 6; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, 100 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 6);
+  for (k = 0; k < 5; ++k)
+    CHECK(frames[k].command == setup[k][0] && frames[k].size == 1 &&
+          frames[k].data[0] == setup[k][1]);
+  /* plain KISS carries the packet itself, with no AX.25 header */
+  CHECK(frames[5].command == 0 && frames[5].size < 30 &&
+        frames[5].data[0] == 0x08);
+  CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0x0f,
+                              (const uint8_t[]){1}, 1, ready, sizeof(ready),
+                              &ready_size) == RNC_OK);
+  CHECK(write(master, ready, ready_size) == (ssize_t)ready_size);
+  for (i = 0; i < 5; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000001, 11000 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 7 && frames[6].command == 0 && frames[6].size == 6 &&
+        !memcmp(frames[6].data, "N0CALL", 6)); /* station ID after 10 s */
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(master);
+  puts("host KISS tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -476,6 +1140,20 @@ int main(int argc, char **argv) {
     keys();
   else if (!strcmp(argv[1], "rnode"))
     radio_test();
+  else if (!strcmp(argv[1], "rnode_extras"))
+    radio_extras_test();
+  else if (!strcmp(argv[1], "pipe"))
+    pipe_test();
+  else if (!strcmp(argv[1], "ax25"))
+    ax25_test();
+  else if (!strcmp(argv[1], "fast_flap"))
+    fast_flap_test();
+  else if (!strcmp(argv[1], "tcp_options"))
+    tcp_options_test();
+  else if (!strcmp(argv[1], "serial_params"))
+    serial_params_test();
+  else if (!strcmp(argv[1], "kiss"))
+    kiss_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))

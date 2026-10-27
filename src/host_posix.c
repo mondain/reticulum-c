@@ -7,15 +7,19 @@
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <openssl/crypto.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -214,9 +218,17 @@ done:
 
 typedef struct host_frame {
   size_t size, offset, wire_size;
-  int announce, control;
+  int announce, control, beacon;
   uint8_t data[RNC_HOST_FRAME_MAX];
 } host_frame;
+/* KISS TNCs share one setup sequence, ready-flow control and station ID. */
+#define TNC_KIND(k) ((k) == RNC_HOST_KISS || (k) == RNC_HOST_AX25)
+#define HOST_FLAP_SLOTS 32u
+typedef struct host_flap {
+  char ip[INET6_ADDRSTRLEN];
+  uint64_t last;
+  unsigned count;
+} host_flap;
 typedef struct host_interface {
   int used, fd, discovery_fd, unicast_fd, connecting, node_added, accepted,
       has_ifac, ready;
@@ -230,7 +242,22 @@ typedef struct host_interface {
   int flow_control;
   unsigned radio_ack_mask;
   uint64_t radio_deadline;
+  pid_t child;
+  int kiss, gave_up, connect_failed;
+  unsigned tries;
+  uint64_t connect_deadline;
+  char ax_call[7];
+  int flap_on, flap_pending;
+  uint64_t flap_threshold_ms, flap_expiry_ms, spawned_at;
+  unsigned flap_grace;
+  char peer_ip[INET6_ADDRSTRLEN];
+  host_flap flaps[HOST_FLAP_SLOTS];
+  uint64_t lock_at;
   rnc_host_config radio;
+  char callsign[RNC_HOST_CALLSIGN_MAX + 1u];
+  size_t callsign_size;
+  uint64_t first_tx;
+  int first_tx_set;
   struct sockaddr_storage peer, multicast;
   socklen_t peer_size, multicast_size;
   rnc_ifac ifac;
@@ -338,16 +365,66 @@ static rnc_result activate(rnc_host *h, host_interface *f) {
     }
   }
   f->node_added = 1;
+  f->tries = 0;
   f->status.online = 1;
   f->status.last_errno = 0;
   f->status.bound_port = f->fd >= 0 ? bound_port(f->fd) : 0;
   (void)emit_host(h, RNC_HOST_UP, f->status.interface_id, 0, NULL);
   return RNC_OK;
 }
+static int flap_expired(const host_interface *l, const host_flap *e,
+                       uint64_t now) {
+  return now > e->last && now - e->last > l->flap_expiry_ms;
+}
+static int flap_blocked(const host_interface *l, const char *ip, uint64_t now) {
+  size_t i;
+  for (i = 0; i < HOST_FLAP_SLOTS; ++i)
+    if (l->flaps[i].count && !strcmp(l->flaps[i].ip, ip))
+      return l->flaps[i].count > l->flap_grace &&
+             !flap_expired(l, &l->flaps[i], now);
+  return 0;
+}
+static void flap_record(host_interface *l, const char *ip, uint64_t now) {
+  size_t i, slot = 0;
+  for (i = 0; i < HOST_FLAP_SLOTS; ++i) {
+    host_flap *e = &l->flaps[i];
+    if (e->count && flap_expired(l, e, now))
+      e->count = 0;
+    if (e->count && !strcmp(e->ip, ip)) {
+      ++e->count;
+      e->last = now;
+      return;
+    }
+  }
+  for (i = 0; i < HOST_FLAP_SLOTS; ++i) {
+    if (!l->flaps[i].count) {
+      slot = i;
+      break;
+    }
+    if (l->flaps[i].last < l->flaps[slot].last)
+      slot = i;
+  }
+  (void)snprintf(l->flaps[slot].ip, sizeof(l->flaps[slot].ip), "%s", ip);
+  l->flaps[slot].count = 1;
+  l->flaps[slot].last = now;
+}
 static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
+  int was_connecting = f->connecting || f->connect_failed;
+  if (f->flap_pending) {
+    host_interface *parent = find_interface(h, f->status.parent_id);
+    f->flap_pending = 0;
+    if (parent && parent->flap_on &&
+        h->now - f->spawned_at < parent->flap_threshold_ms)
+      flap_record(parent, f->peer_ip, h->now);
+  }
   if (f->fd >= 0) {
     close(f->fd);
     f->fd = -1;
+  }
+  if (f->status.kind == RNC_HOST_PIPE && f->child > 0) {
+    (void)kill(f->child, SIGKILL);
+    (void)waitpid(f->child, NULL, 0);
+    f->child = 0;
   }
   if (f->node_added) {
     (void)rnc_node_remove_interface(h->node, f->status.interface_id);
@@ -360,19 +437,41 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
     f->radio_ack_mask = 0;
     f->radio_deadline = 0;
     f->ready = 0;
+    f->first_tx_set = 0;
   }
   f->status.last_errno = error;
   f->connecting = 0;
+  f->connect_failed = 0;
   f->queue_count = 0;
+  if (f->status.kind == RNC_HOST_TCP_CONNECT && !f->accepted) {
+    if (was_connecting && f->radio.max_reconnect_tries &&
+        ++f->tries >= f->radio.max_reconnect_tries)
+      f->gave_up = 1;
+    f->retry_at = h->now + (f->radio.reconnect_wait_ms
+                                ? f->radio.reconnect_wait_ms
+                                : 5000u);
+  }
+  else if (f->status.kind == RNC_HOST_PIPE)
+    f->retry_at = h->now + (f->radio.respawn_delay_ms
+                                ? f->radio.respawn_delay_ms
+                                : 5000u);
+  else
+    f->retry_at = h->now + 1000u;
   f->input_offset = f->input_size = 0;
   f->pending = 0;
   memset(&f->framer, 0, sizeof(f->framer));
-  f->retry_at = h->now + 1000u;
+}
+static void note_connect_failure(rnc_host *h, host_interface *f) {
+  if (f->radio.max_reconnect_tries &&
+      ++f->tries >= f->radio.max_reconnect_tries)
+    f->gave_up = 1;
+  f->retry_at = h->now + (f->radio.reconnect_wait_ms ? f->radio.reconnect_wait_ms
+                                                      : 5000u);
 }
 static int resolve(const char *address, uint16_t port, int socktype,
-                   int passive, int family, struct sockaddr_storage *out,
-                   socklen_t *size) {
-  struct addrinfo hints, *result = NULL;
+                   int passive, int family, int prefer_ipv6,
+                   struct sockaddr_storage *out, socklen_t *size) {
+  struct addrinfo hints, *result = NULL, *pick;
   char service[6];
   int rc;
   memset(&hints, 0, sizeof(hints));
@@ -386,13 +485,19 @@ static int resolve(const char *address, uint16_t port, int socktype,
     errno = EINVAL;
     return -1;
   }
-  if (result->ai_addrlen > sizeof(*out)) {
+  pick = result;
+  if (prefer_ipv6)
+    for (pick = result; pick && pick->ai_family != AF_INET6;)
+      pick = pick->ai_next;
+  if (!pick)
+    pick = result;
+  if (pick->ai_addrlen > sizeof(*out)) {
     freeaddrinfo(result);
     errno = EINVAL;
     return -1;
   }
-  memcpy(out, result->ai_addr, result->ai_addrlen);
-  *size = (socklen_t)result->ai_addrlen;
+  memcpy(out, pick->ai_addr, pick->ai_addrlen);
+  *size = (socklen_t)pick->ai_addrlen;
   freeaddrinfo(result);
   return 0;
 }
@@ -421,6 +526,27 @@ static int socket_bound(struct sockaddr_storage *a, socklen_t size, int type) {
   }
   return fd;
 }
+/* Dead-peer detection as the reference sets it: probe after 5 s idle, every
+ * 2 s, 12 times; unacknowledged data aborts after 24 s. */
+static void tcp_tune(int fd) {
+  int on = 1;
+  (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+#ifdef TCP_KEEPIDLE
+  {
+    int idle = 5, interval = 2, probes = 12;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval,
+                     sizeof(interval));
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof(probes));
+  }
+#endif
+#ifdef TCP_USER_TIMEOUT
+  {
+    int ms = 24000;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &ms, sizeof(ms));
+  }
+#endif
+}
 static int connect_interface(rnc_host *h, host_interface *f) {
   int fd = socket(f->peer.ss_family, SOCK_STREAM, 0), rc;
   if (fd < 0)
@@ -429,6 +555,7 @@ static int connect_interface(rnc_host *h, host_interface *f) {
     close(fd);
     return -1;
   }
+  tcp_tune(fd);
   rc = connect(fd, (struct sockaddr *)&f->peer, f->peer_size);
   if (rc < 0 && errno != EINPROGRESS) {
     int e = errno;
@@ -438,6 +565,9 @@ static int connect_interface(rnc_host *h, host_interface *f) {
   }
   f->fd = fd;
   f->connecting = rc < 0;
+  f->connect_deadline =
+      h->now + (f->radio.connect_timeout_ms ? f->radio.connect_timeout_ms
+                                            : 5000u);
   if (!f->connecting && activate(h, f) != RNC_OK) {
     close(fd);
     f->fd = -1;
@@ -467,7 +597,119 @@ static speed_t baud_value(unsigned value) {
     return (speed_t)0;
   }
 }
-static int serial_open(const char *path, unsigned baud) {
+/* Splits a command line on blanks; single and double quotes group words. */
+static int split_command(char *line, char *argv[], size_t max) {
+  size_t n = 0;
+  char *r = line, *w = line, quote = 0;
+  int in_word = 0;
+  for (;; ++r) {
+    if (!*r || (!quote && (*r == ' ' || *r == '\t'))) {
+      if (in_word) {
+        *w++ = 0;
+        in_word = 0;
+      }
+      if (!*r)
+        break;
+      continue;
+    }
+    if (!in_word) {
+      if (n + 1u >= max)
+        return -1;
+      argv[n++] = w;
+      in_word = 1;
+    }
+    if (quote ? *r == quote : (*r == '"' || *r == '\'')) {
+      quote = quote ? 0 : *r;
+      continue;
+    }
+    *w++ = *r;
+  }
+  if (quote)
+    return -1;
+  argv[n] = NULL;
+  return (int)n;
+}
+/* Runs the command with both stdio streams on one end of a socketpair and
+ * returns the other end, non-blocking. */
+static int pipe_open(const char *command, pid_t *child) {
+  char line[256], *argv[32];
+  int sv[2], flags;
+  pid_t pid;
+  if (strlen(command) >= sizeof(line)) {
+    errno = EINVAL;
+    return -1;
+  }
+  strcpy(line, command);
+  if (split_command(line, argv, sizeof(argv) / sizeof(*argv)) < 1) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
+    return -1;
+  (void)fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+  (void)fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+  pid = fork();
+  if (pid < 0) {
+    close(sv[0]);
+    close(sv[1]);
+    return -1;
+  }
+  if (!pid) {
+    long fd, max = sysconf(_SC_OPEN_MAX);
+    if (dup2(sv[1], 0) < 0 || dup2(sv[1], 1) < 0)
+      _exit(126);
+    for (fd = 3; fd < (max > 0 && max < 4096 ? max : 4096); ++fd)
+      close((int)fd);
+    execvp(argv[0], argv);
+    _exit(127);
+  }
+  close(sv[1]);
+  flags = fcntl(sv[0], F_GETFL);
+  if (flags < 0 || fcntl(sv[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+    close(sv[0]);
+    (void)kill(pid, SIGKILL);
+    (void)waitpid(pid, NULL, 0);
+    return -1;
+  }
+  *child = pid;
+  return sv[0];
+}
+static int serial_open(const host_interface *f);
+static int device_open(host_interface *f) {
+  if (f->status.kind == RNC_HOST_PIPE)
+    return pipe_open(f->address, &f->child);
+  return serial_open(f);
+}
+/* Frame parameters (data bits, parity, stop bits) on top of raw mode. */
+static void serial_flags(const rnc_host_config *c, struct termios *t) {
+  t->c_cflag &= ~(CSIZE | PARENB | PARODD | CSTOPB);
+  t->c_cflag |= CLOCAL | CREAD;
+  switch (c->serial_databits) {
+  case 5:
+    t->c_cflag |= CS5;
+    break;
+  case 6:
+    t->c_cflag |= CS6;
+    break;
+  case 7:
+    t->c_cflag |= CS7;
+    break;
+  default:
+    t->c_cflag |= CS8;
+    break;
+  }
+  if (c->serial_parity == 'E' || c->serial_parity == 'O') {
+    t->c_cflag |= PARENB;
+    t->c_iflag |= INPCK;
+    if (c->serial_parity == 'O')
+      t->c_cflag |= PARODD;
+  }
+  if (c->serial_stopbits == 2)
+    t->c_cflag |= CSTOPB;
+}
+static int serial_open(const host_interface *f) {
+  const char *path = f->address;
+  unsigned baud = f->baud;
   int fd;
   struct termios t;
   struct stat st;
@@ -488,8 +730,7 @@ static int serial_open(const char *path, unsigned baud) {
                  IXON | IXOFF);
   t.c_oflag &= ~OPOST;
   t.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-  t.c_cflag &= ~(CSIZE | PARENB | CSTOPB);
-  t.c_cflag |= CS8 | CLOCAL | CREAD;
+  serial_flags(&f->radio, &t);
   t.c_cc[VMIN] = 0;
   t.c_cc[VTIME] = 0;
   if (cfsetispeed(&t, speed) < 0 || cfsetospeed(&t, speed) < 0 ||
@@ -521,6 +762,36 @@ static void put32(uint8_t out[4], uint32_t x) {
   out[1] = (uint8_t)(x >> 16);
   out[2] = (uint8_t)(x >> 8);
   out[3] = (uint8_t)x;
+}
+/* TNC timing in 10 ms units, as the reference sends them. */
+static uint8_t tnc_units(unsigned ms) {
+  return ms / 10u > 255u ? 255u : (uint8_t)(ms / 10u);
+}
+static rnc_result configure_ax25(host_interface *f, const rnc_host_config *c) {
+  uint8_t b[1];
+  rnc_result r;
+  b[0] = tnc_units(c->preamble_ms ? c->preamble_ms : 350u);
+  r = queue_command(f, 1, b, 1);
+  if (r == RNC_OK) {
+    b[0] = tnc_units(c->txtail_ms ? c->txtail_ms : 20u);
+    r = queue_command(f, 4, b, 1);
+  }
+  if (r == RNC_OK) {
+    b[0] = (uint8_t)(c->persistence > 255u ? 255u
+                                           : c->persistence ? c->persistence
+                                                            : 64u);
+    r = queue_command(f, 2, b, 1);
+  }
+  if (r == RNC_OK) {
+    b[0] = tnc_units(c->slottime_ms ? c->slottime_ms : 20u);
+    r = queue_command(f, 3, b, 1);
+  }
+  if (r == RNC_OK) {
+    b[0] = 1; /* the reference always sends READY=1 after configuring */
+    r = queue_command(f, 0x0f, b, 1);
+  }
+  f->ready = 1;
+  return r;
 }
 static rnc_result configure_radio(host_interface *f, const rnc_host_config *c) {
   uint8_t b[4];
@@ -558,6 +829,20 @@ static rnc_result configure_radio(host_interface *f, const rnc_host_config *c) {
     r = queue_command(f, command[i], b, n);
     if (r != RNC_OK)
       return r;
+  }
+  {
+    /* airtime lock commands carry hundredths of a percent, big endian */
+    const double limit[2] = {c->airtime_limit_short, c->airtime_limit_long};
+    for (i = 0; i < 2; ++i) {
+      unsigned at = (unsigned)(limit[i] * 100.0);
+      if (limit[i] <= 0.0)
+        continue;
+      b[0] = (uint8_t)(at >> 8);
+      b[1] = (uint8_t)at;
+      r = queue_command(f, i ? 0x0c : 0x0b, b, 2);
+      if (r != RNC_OK)
+        return r;
+    }
   }
   return RNC_OK;
 }
@@ -681,13 +966,39 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   socklen_t bind_size;
   rnc_result r = RNC_STATE;
   if (!h || !c || !id || id >= 0x80000000u || c->kind < RNC_HOST_TCP_LISTEN ||
-      c->kind > RNC_HOST_RNODE || c->kiss_port > 15 || find_interface(h, id))
+      c->kind > RNC_HOST_AX25 || c->kiss_port > 15 || find_interface(h, id))
     return RNC_INVALID;
   if (c->kind == RNC_HOST_RNODE &&
       (!c->frequency || !c->bandwidth || c->spreading_factor < 5 ||
        c->spreading_factor > 12 || c->coding_rate < 5 || c->coding_rate > 8 ||
        c->tx_power < 0 || c->tx_power > 27))
     return RNC_INVALID;
+  if ((c->kind == RNC_HOST_RNODE || c->kind == RNC_HOST_KISS) &&
+      (!(c->airtime_limit_short >= 0.0 && c->airtime_limit_short <= 100.0) ||
+       !(c->airtime_limit_long >= 0.0 && c->airtime_limit_long <= 100.0) ||
+       !c->id_callsign != !c->id_interval ||
+       (c->id_callsign && (!*c->id_callsign ||
+                           strlen(c->id_callsign) > RNC_HOST_CALLSIGN_MAX))))
+    return RNC_INVALID;
+  if (c->fast_flap.enabled && c->kind != RNC_HOST_TCP_LISTEN)
+    return RNC_INVALID;
+  if ((c->serial_databits && (c->serial_databits < 5 || c->serial_databits > 8)) ||
+      c->serial_stopbits > 2 ||
+      (c->serial_parity && c->serial_parity != 'N' && c->serial_parity != 'E' &&
+       c->serial_parity != 'O'))
+    return RNC_INVALID;
+  if (c->kiss_framing && c->kind != RNC_HOST_TCP_CONNECT)
+    return RNC_INVALID;
+  if (c->kind == RNC_HOST_AX25) {
+    size_t k, len = c->callsign ? strlen(c->callsign) : 0;
+    if (len < 3 || len > 6 || c->ssid > 15)
+      return RNC_INVALID;
+    for (k = 0; k < len; ++k)
+      if (c->callsign[k] < '0' || c->callsign[k] > 'z' ||
+          (c->callsign[k] > '9' && c->callsign[k] < 'A') ||
+          (c->callsign[k] > 'Z' && c->callsign[k] < 'a'))
+        return RNC_INVALID;
+  }
   if (c->mtu && (c->mtu < RNC_MTU || c->mtu > RNC_MAX_MTU ||
                  (c->kind >= RNC_HOST_SERIAL && c->mtu > RNC_MTU) ||
                  (c->kind == RNC_HOST_AUTO && c->mtu > 1196)))
@@ -728,8 +1039,29 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->kiss_port = c->kiss_port;
   f->flow_control = c->flow_control;
   f->ready = !c->flow_control;
-  f->bitrate =
-      c->bitrate ? c->bitrate : (c->kind == RNC_HOST_RNODE ? 1200u : 10000000u);
+  f->kiss = c->kiss_framing;
+  f->flap_on = c->fast_flap.enabled;
+  f->flap_threshold_ms =
+      (c->fast_flap.threshold_seconds ? c->fast_flap.threshold_seconds : 20u) *
+      1000u;
+  f->flap_grace = c->fast_flap.grace ? c->fast_flap.grace : 5u;
+  f->flap_expiry_ms = (uint64_t)(c->fast_flap.expiry_seconds
+                                     ? c->fast_flap.expiry_seconds
+                                     : 12u * 3600u) *
+                      1000u;
+  if (c->bitrate)
+    f->bitrate = c->bitrate;
+  else if (c->kind == RNC_HOST_RNODE) {
+    /* on-air rate as the reference computes it: sf * (4/cr) / (2^sf / bw) */
+    uint64_t den = (uint64_t)c->coding_rate << c->spreading_factor;
+    f->bitrate = (uint32_t)(((uint64_t)c->spreading_factor * 4u *
+                                 c->bandwidth + den / 2u) / den);
+    if (!f->bitrate)
+      f->bitrate = 1u;
+  } else
+    f->bitrate = c->kind == RNC_HOST_PIPE  ? 1000000u
+                 : c->kind == RNC_HOST_AX25 ? 1200u
+                                            : 10000000u;
   f->status.bitrate = f->bitrate;
   f->status.local = c->local;
   if (c->name) {
@@ -749,6 +1081,19 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->radio.address = f->radio.target = f->radio.device = f->radio.group = NULL;
   f->radio.ifac = NULL;
   f->radio.name = NULL;
+  f->radio.id_callsign = NULL;
+  f->radio.callsign = NULL;
+  if (c->kind == RNC_HOST_AX25) {
+    size_t k;
+    for (k = 0; c->callsign[k]; ++k)
+      f->ax_call[k] = (char)(c->callsign[k] >= 'a' ? c->callsign[k] - 32
+                                                    : c->callsign[k]);
+  }
+  if ((c->kind == RNC_HOST_RNODE || c->kind == RNC_HOST_KISS) &&
+      c->id_callsign) {
+    f->callsign_size = strlen(c->id_callsign);
+    memcpy(f->callsign, c->id_callsign, f->callsign_size);
+  }
   if (c->ifac) {
     f->ifac = *c->ifac;
     f->has_ifac = 1;
@@ -764,8 +1109,8 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     }
   }
   if (c->kind == RNC_HOST_TCP_LISTEN) {
-    if (resolve(c->address, c->port, SOCK_STREAM, 1, AF_UNSPEC, &bind_address,
-                &bind_size) < 0)
+    if (resolve(c->address, c->port, SOCK_STREAM, 1, AF_UNSPEC,
+                c->prefer_ipv6, &bind_address, &bind_size) < 0)
       goto fail;
     f->fd = socket_bound(&bind_address, bind_size, SOCK_STREAM);
     if (f->fd < 0 || listen(f->fd, 8) < 0)
@@ -774,16 +1119,16 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     f->status.online = 1;
   } else if (c->kind == RNC_HOST_TCP_CONNECT) {
     if (!c->port || resolve(c->address, c->port, SOCK_STREAM, 0, AF_UNSPEC,
-                            &f->peer, &f->peer_size) < 0) {
+                            c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
       r = RNC_INVALID;
       goto fail;
     }
     if (connect_interface(h, f) < 0) {
       f->status.last_errno = errno;
-      f->retry_at = h->now + 1000u;
+      note_connect_failure(h, f);
     }
   } else if (c->kind == RNC_HOST_UDP) {
-    if (resolve(c->address, c->port, SOCK_DGRAM, 1, AF_UNSPEC, &bind_address,
+    if (resolve(c->address, c->port, SOCK_DGRAM, 1, AF_UNSPEC, 0, &bind_address,
                 &bind_size) < 0)
       goto fail;
     f->fd = socket_bound(&bind_address, bind_size, SOCK_DGRAM);
@@ -792,7 +1137,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     f->status.bound_port = bound_port(f->fd);
     if (c->target && c->target_port &&
         resolve(c->target, c->target_port, SOCK_DGRAM, 0,
-                bind_address.ss_family, &f->peer, &f->peer_size) < 0)
+                bind_address.ss_family, 0, &f->peer, &f->peer_size) < 0)
       goto fail;
     r = activate(h, f);
     if (r != RNC_OK)
@@ -803,7 +1148,11 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     if (f->discovery_port == 65535 || setup_auto(f) < 0)
       goto fail;
   } else {
-    f->fd = serial_open(f->address, f->baud);
+    if (c->kind == RNC_HOST_PIPE && !*f->address) {
+      r = RNC_INVALID;
+      goto fail;
+    }
+    f->fd = device_open(f);
     if (f->fd < 0)
       goto fail;
     r = activate(h, f);
@@ -811,6 +1160,10 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       goto fail;
     if (c->kind == RNC_HOST_RNODE) {
       r = configure_radio(f, c);
+      if (r != RNC_OK)
+        goto fail;
+    } else if (TNC_KIND(c->kind)) {
+      r = configure_ax25(f, c);
       if (r != RNC_OK)
         goto fail;
     }
@@ -823,6 +1176,16 @@ fail: {
   return r;
 }
 }
+static size_t blocked_count(const rnc_host *h, const host_interface *l) {
+  size_t i, n = 0;
+  if (!l->flap_on)
+    return 0;
+  for (i = 0; i < HOST_FLAP_SLOTS; ++i)
+    if (l->flaps[i].count > l->flap_grace &&
+        !flap_expired(l, &l->flaps[i], h->now))
+      ++n;
+  return n;
+}
 rnc_result rnc_host_get_status(const rnc_host *h, uint32_t id,
                                rnc_host_status *out) {
   size_t i;
@@ -832,6 +1195,7 @@ rnc_result rnc_host_get_status(const rnc_host *h, uint32_t id,
     if (h->interfaces[i].used && h->interfaces[i].status.interface_id == id) {
       *out = h->interfaces[i].status;
       out->queued_frames = h->interfaces[i].queue_count;
+      out->blocked_ips = blocked_count(h, &h->interfaces[i]);
       return RNC_OK;
     }
   return RNC_AGAIN;
@@ -844,6 +1208,7 @@ rnc_result rnc_host_status_at(const rnc_host *h, size_t index,
     return RNC_AGAIN;
   *out = h->interfaces[index].status;
   out->queued_frames = h->interfaces[index].queue_count;
+  out->blocked_ips = blocked_count(h, &h->interfaces[index]);
   return RNC_OK;
 }
 rnc_result rnc_host_poll(rnc_host *h, rnc_host_event *out) {
@@ -884,10 +1249,29 @@ static rnc_result queue_packet(host_interface *f, const rnc_packet *p) {
   if (f->status.kind == RNC_HOST_UDP || f->status.kind == RNC_HOST_AUTO) {
     memcpy(q->data, wire, m);
     q->size = m;
+  } else if (f->status.kind == RNC_HOST_AX25) {
+    uint8_t ax[16 + RNC_MAX_FRAME];
+    size_t k;
+    for (k = 0; k < 6; ++k) {
+      ax[k] = (uint8_t)("APZRNS"[k] << 1);
+      ax[7 + k] = k < strlen(f->ax_call) ? (uint8_t)(f->ax_call[k] << 1) : 0x20;
+    }
+    ax[6] = 0x60;
+    ax[13] = (uint8_t)(0x60u | (f->radio.ssid << 1) | 1u);
+    ax[14] = 0x03; /* UI frame */
+    ax[15] = 0xf0; /* no layer 3 */
+    memcpy(ax + 16, wire, m);
+    r = rnc_host_frame_encode(RNC_HOST_KISS_FRAMING,
+                              (uint8_t)(f->kiss_port << 4), ax, 16 + m,
+                              q->data, sizeof(q->data), &q->size);
+    if (r != RNC_OK)
+      return r;
   } else {
-    r = rnc_host_frame_encode(f->status.kind == RNC_HOST_TCP_LISTEN ||
-                                      f->status.kind == RNC_HOST_TCP_CONNECT ||
-                                      f->status.kind == RNC_HOST_SERIAL
+    r = rnc_host_frame_encode((f->status.kind == RNC_HOST_TCP_LISTEN ||
+                               f->status.kind == RNC_HOST_TCP_CONNECT ||
+                               f->status.kind == RNC_HOST_SERIAL ||
+                               f->status.kind == RNC_HOST_PIPE) &&
+                                      !f->kiss
                                   ? RNC_HOST_HDLC
                                   : RNC_HOST_KISS_FRAMING,
                               (uint8_t)(f->kiss_port << 4), wire, m, q->data,
@@ -986,13 +1370,28 @@ static rnc_result input_packet(rnc_host *h, host_interface *f,
 static void accept_tcp(rnc_host *h, host_interface *parent) {
   int fd;
   host_interface *f;
-  fd = accept(parent->fd, NULL, NULL);
+  struct sockaddr_storage peer;
+  socklen_t peer_size = sizeof(peer);
+  char ip[INET6_ADDRSTRLEN] = "";
+  fd = accept(parent->fd, (struct sockaddr *)&peer, &peer_size);
   if (fd < 0)
     return;
+  if (peer.ss_family == AF_INET)
+    (void)inet_ntop(AF_INET, &((struct sockaddr_in *)&peer)->sin_addr, ip,
+                    sizeof(ip));
+  else if (peer.ss_family == AF_INET6)
+    (void)inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&peer)->sin6_addr, ip,
+                    sizeof(ip));
+  if (parent->flap_on && flap_blocked(parent, ip, h->now)) {
+    close(fd);
+    ++parent->status.dropped_packets;
+    return;
+  }
   if (nonblock(fd) < 0) {
     close(fd);
     return;
   }
+  tcp_tune(fd);
   f = empty_interface(h);
   if (!f || h->next_id < 0x80000000u) {
     close(fd);
@@ -1004,6 +1403,9 @@ static void accept_tcp(rnc_host *h, host_interface *parent) {
   f->fd = fd;
   f->discovery_fd = f->unicast_fd = -1;
   f->accepted = 1;
+  f->spawned_at = h->now;
+  f->flap_pending = parent->flap_on;
+  (void)snprintf(f->peer_ip, sizeof(f->peer_ip), "%s", ip);
   f->status.kind = RNC_HOST_TCP_CONNECT;
   f->status.interface_id = h->next_id++;
   f->status.parent_id = parent->status.interface_id;
@@ -1143,7 +1545,8 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
   rnc_result r;
   ssize_t got;
   rnc_host_framing mode =
-      f->status.kind == RNC_HOST_KISS || f->status.kind == RNC_HOST_RNODE
+      f->status.kind == RNC_HOST_KISS || f->status.kind == RNC_HOST_RNODE ||
+              f->status.kind == RNC_HOST_AX25 || f->kiss
           ? RNC_HOST_KISS_FRAMING
           : RNC_HOST_HDLC;
   if (f->pending) {
@@ -1175,7 +1578,8 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
     if (!got) {
       /* VMIN=VTIME=0 serial reads can return zero while idle. Only TCP zero
        * is EOF; actual serial hangup is handled from POLLHUP in the pump. */
-      if (f->status.kind == RNC_HOST_TCP_CONNECT)
+      if (f->status.kind == RNC_HOST_TCP_CONNECT ||
+          f->status.kind == RNC_HOST_PIPE)
         disconnect_interface(h, f, 0);
       return RNC_OK;
     }
@@ -1238,10 +1642,23 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
         }
         continue;
       }
-      if (f->status.kind == RNC_HOST_KISS &&
+      if (TNC_KIND(f->status.kind) && (command & 15u) == 0x0f) {
+        if (f->flow_control)
+          f->ready = 1;
+        continue;
+      }
+      if ((f->status.kind == RNC_HOST_KISS || f->status.kind == RNC_HOST_AX25 ||
+           f->kiss) &&
           ((command & 15u) != 0 || (command >> 4) != f->kiss_port))
         continue;
-      r = input_packet(h, f, raw, n, unix_seconds);
+      if (f->status.kind == RNC_HOST_AX25) {
+        if (n <= 16u) {
+          ++f->status.dropped_packets;
+          continue;
+        }
+        r = input_packet(h, f, raw + 16, n - 16u, unix_seconds);
+      } else
+        r = input_packet(h, f, raw, n, unix_seconds);
       if (r == RNC_AGAIN)
         return RNC_OK;
       if (r != RNC_OK)
@@ -1257,6 +1674,20 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
   size_t i, index = 0;
   ssize_t sent;
   int fd, delivered = 1;
+  if (f->callsign_size && f->first_tx_set && f->status.online &&
+      f->status.radio_ready && f->queue_count < RNC_HOST_QUEUE_FRAMES &&
+      h->now >= f->first_tx + (uint64_t)f->radio.id_interval * 1000u) {
+    host_frame *b = &f->queue[f->queue_count];
+    memset(b, 0, sizeof(*b));
+    b->beacon = 1;
+    if (rnc_host_frame_encode(RNC_HOST_KISS_FRAMING,
+                              (uint8_t)(f->kiss_port << 4),
+                              (const uint8_t *)f->callsign, f->callsign_size,
+                              b->data, sizeof(b->data), &b->size) == RNC_OK) {
+      ++f->queue_count;
+      f->first_tx_set = 0; /* restarts with the next ordinary transmission */
+    }
+  }
   if (!f->queue_count || !f->status.online || f->connecting)
     return RNC_OK;
   for (i = 0; i < f->queue_count; ++i)
@@ -1279,6 +1710,12 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
   if (f->status.kind == RNC_HOST_RNODE && !q->control &&
       (!f->status.radio_ready || (f->flow_control && !f->ready)))
     return RNC_OK;
+  if (TNC_KIND(f->status.kind) && !q->control && f->flow_control &&
+      !f->ready) {
+    if (h->now < f->lock_at + 5000u) /* reference unlock timeout */
+      return RNC_OK;
+    f->ready = 1;
+  }
   if (f->status.kind == RNC_HOST_AUTO && f->status.parent_id) {
     socket_owner = find_interface(h, f->status.parent_id);
     if (!socket_owner)
@@ -1295,7 +1732,8 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
     } else
       sent = sendto(fd, q->data, q->size, 0, (struct sockaddr *)&f->peer,
                     f->peer_size);
-  } else if (f->status.kind == RNC_HOST_TCP_CONNECT) {
+  } else if (f->status.kind == RNC_HOST_TCP_CONNECT ||
+             f->status.kind == RNC_HOST_PIPE) {
 #ifdef MSG_NOSIGNAL
     sent = send(fd, q->data + q->offset, q->size - q->offset, MSG_NOSIGNAL);
 #else
@@ -1331,7 +1769,14 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
     f->next_tx = h->now + duration;
     if (q->announce)
       f->next_announce = h->now + duration * 50u;
-    if (!q->control) {
+    if (q->beacon) {
+      if (f->flow_control)
+        f->ready = 0;
+    } else if (!q->control) {
+      if (f->callsign_size && !f->first_tx_set) {
+        f->first_tx = h->now;
+        f->first_tx_set = 1;
+      }
       if (delivered) {
         ++f->status.tx_packets;
         f->status.tx_bytes += q->wire_size;
@@ -1340,8 +1785,11 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
           f->status.tx_announce_bytes += q->wire_size;
         }
       }
-      if (f->status.kind == RNC_HOST_RNODE && f->flow_control)
+      if ((f->status.kind == RNC_HOST_RNODE || TNC_KIND(f->status.kind)) &&
+          f->flow_control) {
         f->ready = 0;
+        f->lock_at = h->now;
+      }
     }
     if (index + 1u < f->queue_count)
       memmove(&f->queue[index], &f->queue[index + 1u],
@@ -1386,19 +1834,21 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         (void)rnc_host_remove(h, f->status.interface_id);
       continue;
     }
-    if (f->fd < 0 && !f->accepted && now >= f->retry_at) {
+    if (f->fd < 0 && !f->accepted && !f->gave_up && now >= f->retry_at) {
       if (f->status.kind == RNC_HOST_TCP_CONNECT) {
         if (connect_interface(h, f) < 0) {
           f->status.last_errno = errno;
-          f->retry_at = now + 1000u;
+          note_connect_failure(h, f);
         } else
           ++f->status.reconnects;
       } else if (f->status.kind >= RNC_HOST_SERIAL) {
-        f->fd = serial_open(f->address, f->baud);
+        f->fd = device_open(f);
         if (f->fd >= 0 && activate(h, f) == RNC_OK) {
           ++f->status.reconnects;
           if (f->status.kind == RNC_HOST_RNODE)
             (void)configure_radio(f, &f->radio);
+          else if (TNC_KIND(f->status.kind))
+            (void)configure_ax25(f, &f->radio);
         } else {
           if (f->fd >= 0) {
             close(f->fd);
@@ -1435,6 +1885,10 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         disconnect_interface(h, f, ETIMEDOUT);
         continue;
       }
+    }
+    if (f->connecting && now >= f->connect_deadline) {
+      disconnect_interface(h, f, ETIMEDOUT);
+      continue;
     }
     if (f->fd >= 0) {
       pf[count].fd = f->fd;
@@ -1481,6 +1935,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         error = errno;
       f->connecting = 0;
       if (error || activate(h, f) != RNC_OK) {
+        f->connect_failed = 1;
         disconnect_interface(h, f, error ? error : ENOSPC);
         continue;
       }
