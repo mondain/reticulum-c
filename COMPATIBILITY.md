@@ -40,8 +40,9 @@ so identification waits for LINK_ESTABLISHED. Its external FFI library is built
 from unmodified source, separately from this C library and SDK.
 
 At that extraction snapshot, Windows, multi-hop routing, IFAC, radio hardware
-and other implementations remained unexecuted. The passing matrix covers only the tested subset at these exact
-revisions. It does not establish complete Reticulum stack or radio compatibility.
+and other implementations remained unexecuted. The passing matrix covers only
+the tested subset at these exact revisions. It does not establish complete
+Reticulum stack or radio compatibility.
 
 ## SDK 0.2 development branch
 
@@ -74,7 +75,12 @@ The suite also covers malformed bulk-envelope recovery, completed-advertisement
 proof replay followed by another bulk request, receive-queue backpressure,
 Resource allocation failure/reuse and distant map-hash collisions.
 
+Documentation snapshot `8a22d1f3781defb57acc1bdab25b7d0c234a95aa`, with the
+same implementation, passed all seven [hosted expansion jobs](https://github.com/mondain/reticulum-c/actions/runs/40426146410):
+Linux static/shared/compression-disabled/sanitizers, macOS, RNS and Leviculum.
+The complete RNS suite was also rerun locally at that snapshot: 88/88 passed.
+
 Socket and leak tests require execution outside the restricted local sandbox.
-These results refresh Linux evidence only; hosted macOS/CI for the expansion,
-actual radio, AutoInterface multicast deployment, Windows and additional
-implementations still need separate verification.
+Actual radio, AutoInterface multicast deployment, Windows, live external
+Resource/service sessions and additional implementations still need separate
+verification.

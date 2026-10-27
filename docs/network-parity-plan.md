@@ -22,73 +22,39 @@ Transfer/service engines own application protocol state and pass context-tagged
 plaintext through the link's authenticated raw-packet API. Stream readers/writers
 use the standard Channel system message 0xff00 and preserve EOF/backpressure.
 
-## Tasks and verification
+## Implementation and verification status
 
-- [ ] Establish a clean isolated worktree and baseline; all new tests are C.
-- [ ] Security primitives: IFAC derivation/masking/checking, ratchet generation,
-  encryption/decryption/rotation/storage records, ratcheted announces, GROUP keys
-  and PLAIN destination hashing. Tests: deterministic reference vectors,
-  tampering/truncation/wrong secrets, expiry/rotation and bounds; live oracle.
-- [ ] Link services: authenticated context-tagged packet input/output, standard
-  Buffer streams and adaptive Channel send windows (default bounded behavior
-  remains compatible). Tests: two real in-memory links, reserved types, stream
-  EOF/compression/fragmentation/backpressure, loss, wrap and window growth.
-- [ ] Transfers and services: standard Resources with integrity, flow control,
-  retries, cancellation/progress, bounded compression/segmentation; standard Link
-  requests/responses and admission/timeouts. Test C pairs and unmodified RNS in
-  both roles, loss, malformed control, cancellation and maximum capacities.
-- [ ] Mesh node: path request codec, signed announcement caching/freshness,
-  bounded routing tables/expiry, request forwarding/duplicate suppression,
-  SINGLE and Link packet/proof forwarding, interface removal and reconnect.
-  Test a multi-interface multi-hop topology, forged proofs/announces, loops,
-  stale routes, clock rollback, saturation and real RNS routing in both roles.
-- [ ] Node host: C TCP/UDP/AutoInterface and serial/KISS/RNode adapters; IFAC,
-  per-interface announce/airtime queues; a configurable daemon with persistent
-  identities/network state and shared-instance/admin tools. Verify processes,
-  reload/reconnect, private state permissions, malformed config/IPC and PTYs.
-- [ ] Integrate node/transfer APIs in standalone examples without introducing
-  runtime dependencies on Python/Rust/other stacks. Verify source integration
-  and the relocated installed SDK consumer.
-- [ ] Fresh independent review, Linux/macOS/shared/sanitizer CI, RNS/Leviculum
-  and reticulum-rs interoperability matrix, exact tested publication refs.
+- [x] Isolated feature worktree and C-only library/test implementations.
+- [x] IFAC, ratchet generation/rotation/persistence/encryption, signed ratcheted
+  announces, GROUP keys and PLAIN destination hashing. Unit and pinned RNS
+  differential checks cover byte compatibility, tampering, expiry and bounds.
+- [x] Authenticated context-tagged Link packets, Buffer streams, bounded adaptive
+  Channel windows and MTU negotiation. Defaults preserve earlier Link behavior.
+- [x] Segmented Resources, optional bounded BZip2 compression, flow control,
+  cancellation, integrity proofs and request/response services. C pairs and
+  pinned RNS differential fixtures cover both roles and recovery/bounds.
+- [x] Bounded mesh routing, path requests, signed announce freshness, forwarding,
+  reverse proofs and transit links. In-memory multi-hop and actual direct/
+  two-router RNS Channel sessions, including loss and large MTU, pass.
+- [x] Optional POSIX host and node daemon, identity/checkpoint persistence,
+  configuration reload, native administration and authenticated MessagePack
+  shared-instance RPC. Real TCP/UDP/process/serial-PTY checks pass.
+- [x] Standalone node/text examples and relocated installed SDK consumption,
+  static/shared builds and compression-disabled configuration.
+- [x] Linux static/shared/sanitizer/leak/compression-disabled, macOS and pinned
+  RNS/Leviculum hosted jobs. Exact evidence is linked in
+  [the readiness record](resume-status.md) and [compatibility](../COMPATIBILITY.md).
 
-Physical radio and Windows claims require execution on that hardware/platform;
-implemented drivers or cross-compilation alone do not establish validation.
+## Explicit verification boundaries
 
-## Execution ledger
+The original audit included wider interoperability and hardware goals. This
+PR implements the SDK APIs and records the coverage actually executed. Live
+external Resource/service sessions, AutoInterface multicast deployment, physical
+radio, Windows and a third reference stack remain future validation work.
+Differential fixtures, PTYs and successful compilation do not replace those
+checks or establish complete-stack compatibility.
 
-Ruling: the user's proceed approves the gap list, dependency order and continued
-implementation without another design permission gate. Additive APIs will keep
-existing callers working; version packaging will reflect actual ABI changes.
-
-2026-10-26 execution update:
-- Worktree branch feature/network-stack-parity, base6536fb6. No publication yet.
-- SDK0.2.0/SOVERSION1: packet/event ABI enlarged for max4096MTU, defaults500.
-- Security APIs/modules+unitandoptionalC-CPythonoracle pass exactRNS IFAC,
-  ratchet/GROUPbothdirections, signedratchetannounce, PLAIN/pathdestinationhash.
-- Node routing/pathrequests/reverseproof/transitlinks/announcebudget plus
-  signedcheckpoint+sharedlocaltransparenthop bridge implemented. SevenCgroups
-  pass, including4node2routerencryptedChannel and3messages170sapart.
-- Reviewfixed: pathnamehashoffbyone(frozen6b9f66014d9853faab220fba47d02761),
-  activeLinkroutingTTL, unauthlocalinterfacepin(nowbind_link_on), sameifaceforward,
-  eventcleanupatifaceremoval, oversizedHEADER2, requesttagreplay/queuebudget.
-- Resources/services standardwire, boundedBZip2optional, segments>1MiB,
-  cancel/proofs/admission/MessagePack/requests/deadlines, adaptiveChannels and
-  standardBufferstreams implemented. FifteenC-CPythonpost-handshake differential
-  modespassincludingbothroles/compression/largeMTU/bulk; actualnetworknotrefreshed.
-- Reviewfixed: Resourcewirequota, duplicateHMU; servicelate/replayedrequests and
-  latecompletedbulkresponsekeepingrxslot. Newtest_service_expiry isregistered.
-- POSIXhost separatetarget reticulum_c::host, TCP/UDP/AutoIPv6/HDLC/serial/KISS/
-  RNode/IFAC+privateidentity APIs; codecsandrealPTYtests pass. DaemonIPCwiring
-  andprocessoracle are still inprogress (parity_links owns thosefiles).
-- RNS1.5.5RPC uses MessagePack, NOT theolderpickle protocol. PureC ipc.c/auth/
-  framing/query/writer native4groupspass; PythonCAPIoracleagreedwithCPython
-  challenges/RNSMessagePack (parity_security owns oraclewhilehost integrates).
-- Integrated out/parity-rns:62/62 socket-free pass. Sixold/newRNS networktests+
-  hostnetwork/textpeer blockedlocallyEPERM; must run hostedCI before claims.
-- Freshreview_network_core isreviewing protocolmodules; candidate distantResource
-  maphashcollision search-window defect and malformedcompletedservice recovery
-  stillunderinvestigation. FixImportant findings before publication.
-- Stillrequired: integrateIPC/daemon/tests/CMake; liveRNSlarge-MTUcase; published
-  Linux/static/shared/sanitizer/mac/RNS/Lev CI; standalone SDK package/source
-  validation; currentdocs/featurematrix; exactrefs.
+Independent final source review covers protocol and node/host changes. Confirmed
+Important findings must be reproduced, fixed with regression coverage and
+validated before the PR is marked ready. No publication or compatibility claim
+may include private downstream project details.

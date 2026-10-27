@@ -78,9 +78,10 @@ listen_port = 7778
   --identity /path/to/private/identity --admin /path/to/private/admin.sock
 ```
 
-The optional `--state FILE` selects the checkpoint path. The daemon provides TCP/UDP/AutoInterface and serial/
-KISS/RNode adapters, signed route checkpoints and authenticated shared-instance
-RPC. RNS 1.5.5 RPC uses MessagePack. SIGHUP reloads configuration; SIGINT/SIGTERM
+The optional `--state FILE` selects the checkpoint path. The daemon provides
+TCP/UDP/AutoInterface and serial/KISS/RNode adapters, signed route checkpoints
+and authenticated shared-instance RPC. RNS 1.5.5 RPC uses MessagePack.
+SIGHUP reloads configuration; SIGINT/SIGTERM
 stop the daemon. Keep identity, checkpoint and admin paths in a private directory.
 Actual radio and multicast deployment require separate hardware/network checks.
 
