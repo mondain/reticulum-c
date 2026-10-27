@@ -46,6 +46,11 @@ rnc_result rnc_responder_register(rnc_responder *responder,
                                   const uint8_t (*allowed)[16],
                                   size_t allowed_count,
                                   rnc_responder_handler handler, void *context);
+/* Destination.set_max_request_size for every link to the destination, present
+ * and future (RNC_SERVICE_NO_LIMIT removes the limit). */
+rnc_result rnc_responder_set_max_request_size(rnc_responder *responder,
+                                              const uint8_t destination[16],
+                                              size_t max_size);
 /* RNC_OK: the event was for a responder link and is consumed. RNC_AGAIN: not
  * ours, handle it elsewhere. Other results: the event was ours but could not be
  * processed (for example RNC_NO_SPACE when all link slots are busy). */

@@ -523,26 +523,27 @@ enum {
   EXIT_NOT_EXECUTED = 248,
   EXIT_NO_RESPONSE = 249
 };
-static int await_path(app *a, const uint8_t destination[16], double wait) {
-  uint64_t start = monotonic_ms(), last_request = 0;
-  rnc_route route;
-  int requested = 0;
-  while (!stopping && monotonic_ms() - start < (uint64_t)(wait * 1000.0)) {
-    uint64_t now = monotonic_ms();
-    if (!pump(a))
-      return 0;
-    if (rnc_node_lookup(a->node, destination, now, &route) == RNC_OK)
-      return 1;
-    if (!requested || now - last_request > 5000u) {
-      rnc_host_status s;
-      if (rnc_host_get_status(a->host, 1, &s) == RNC_OK && s.online) {
-        (void)rnc_node_request_path(a->node, destination, now);
-        requested = 1;
-        last_request = now;
-      }
+static int await_callback(void *context, const rnc_host_event *event) {
+  app *a = context;
+  uint64_t unix_now = (uint64_t)time(NULL), now = monotonic_ms();
+  if (event) {
+    if (event->type == RNC_HOST_NODE && event->node.type == RNC_NODE_LOCAL) {
+      if (a->responder)
+        (void)rnc_responder_input(a->responder, &event->node, unix_now, now);
+      if (a->requester)
+        (void)rnc_requester_input(a->requester, &event->node, unix_now, now);
     }
+    return stopping != 0;
   }
-  return 0;
+  if (a->responder)
+    (void)rnc_responder_tick(a->responder, unix_now, now);
+  if (a->requester)
+    (void)rnc_requester_tick(a->requester, unix_now, now);
+  return stopping != 0;
+}
+static int await_path(app *a, const uint8_t destination[16], double wait) {
+  return rnc_host_await_path(a->host, destination, (unsigned)(wait * 1000.0),
+                             await_callback, a) == RNC_OK;
 }
 static size_t encode_request(const char *command, uint8_t *out, size_t cap) {
   rnc_rpc_writer w;

@@ -19,6 +19,7 @@ typedef struct responder_destination {
   int used;
   rnc_identity identity;
   uint8_t destination[16];
+  size_t max_request;
   responder_handler handlers[RNC_RESPONDER_HANDLERS];
 } responder_destination;
 typedef struct responder_slot {
@@ -101,6 +102,7 @@ rnc_result rnc_responder_add_destination(rnc_responder *r,
     if (!r->destinations[i].used) {
       memset(&r->destinations[i], 0, sizeof(r->destinations[i]));
       r->destinations[i].used = 1;
+      r->destinations[i].max_request = RNC_SERVICE_NO_LIMIT;
       r->destinations[i].identity = *identity;
       memcpy(r->destinations[i].destination, destination, 16);
       return RNC_OK;
@@ -151,6 +153,22 @@ rnc_result rnc_responder_register(rnc_responder *r,
     memcpy(h->allowed, allowed, allowed_count * 16);
   h->function = handler;
   h->context = context;
+  return RNC_OK;
+}
+rnc_result rnc_responder_set_max_request_size(rnc_responder *r,
+                                              const uint8_t destination[16],
+                                              size_t max_size) {
+  responder_destination *d;
+  size_t i;
+  if (!r || !destination)
+    return RNC_INVALID;
+  d = find_destination(r, destination);
+  if (!d)
+    return RNC_STATE;
+  d->max_request = max_size;
+  for (i = 0; i < RNC_RESPONDER_LINKS; i++)
+    if (r->slots[i].used && &r->destinations[r->slots[i].destination] == d)
+      (void)rnc_service_set_max_request_size(r->slots[i].service, max_size);
   return RNC_OK;
 }
 size_t rnc_responder_link_count(const rnc_responder *r) {
@@ -208,6 +226,7 @@ static rnc_result accept_link(rnc_responder *r, responder_destination *d,
     OPENSSL_cleanse(s, sizeof(*s));
     return result;
   }
+  (void)rnc_service_set_max_request_size(s->service, d->max_request);
   s->used = 1;
   s->destination = (size_t)(d - r->destinations);
   return RNC_OK;

@@ -89,7 +89,7 @@ typedef struct node_tunnel {
   node_tunnel_path paths[RNC_NODE_TUNNEL_PATHS];
 } node_tunnel;
 typedef struct node_destination {
-  int used, type, has_ratchet, proof;
+  int used, type, has_ratchet, proof, no_links;
   uint8_t ratchet[32];
   rnc_identity identity;
   char name[128];
@@ -1482,24 +1482,78 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
   n->requests[slot] = entry;
   return RNC_OK;
 }
-rnc_result rnc_node_request_path(rnc_node *n, const uint8_t address[16],
-                                 uint64_t now) {
-  uint8_t tag[16];
+rnc_result rnc_node_request_path_ex(rnc_node *n, const uint8_t address[16],
+                                    uint32_t interface_id, const uint8_t *tag,
+                                    size_t tag_size, int recursive,
+                                    uint64_t now) {
+  uint8_t random_tag[16];
   rnc_packet p;
   rnc_result r;
-  if (!n || !address || now < n->now)
+  node_interface *iface = NULL;
+  size_t i, wire;
+  uint8_t raw[RNC_MTU];
+  if (!n || !address || now < n->now || (tag && (!tag_size || tag_size > 16)))
     return RNC_INVALID;
-  if (!room(n, interface_count(n)))
+  if (interface_id) {
+    iface = interface(n, interface_id);
+    if (!iface)
+      return RNC_STATE;
+  }
+  if (!room(n, iface ? 1 : interface_count(n)))
     return RNC_AGAIN;
-  r = n->random(n->random_context, tag, 16);
-  if (r == RNC_OK)
-    r = rnc_path_request_create(address, n->transport ? n->id : NULL, tag, 16,
-                                &p);
+  if (!tag) {
+    r = n->random(n->random_context, random_tag, 16);
+    if (r != RNC_OK)
+      return r;
+    tag = random_tag;
+    tag_size = 16;
+  }
+  r = rnc_path_request_create(address, n->transport ? n->id : NULL, tag,
+                              tag_size, &p);
   if (r != RNC_OK)
     return r;
-  broadcast(n, &p, 0);
+  if (iface && recursive) {
+    for (i = 0; i < NODE_QUEUE; i++)
+      if (n->queued[i].used && n->queued[i].iface == interface_id)
+        return RNC_AGAIN;
+    if (iface->announce_after > now)
+      return RNC_AGAIN;
+    if (rnc_packet_encode(&p, raw, sizeof(raw), &wire) != RNC_OK)
+      return RNC_PROTOCOL;
+    iface->announce_after =
+        after(now, ((uint64_t)wire * UINT64_C(8000000) +
+                    (uint64_t)iface->bitrate * (iface->cap ? iface->cap : 20u) - 1u) /
+                       ((uint64_t)iface->bitrate * (iface->cap ? iface->cap : 20u)));
+  }
+  if (iface)
+    emit(n, RNC_NODE_SEND, interface_id, &p);
+  else
+    broadcast(n, &p, 0);
   n->now = now;
   return RNC_OK;
+}
+rnc_result rnc_node_request_path(rnc_node *n, const uint8_t address[16],
+                                 uint64_t now) {
+  return rnc_node_request_path_ex(n, address, 0, NULL, 0, 0, now);
+}
+unsigned rnc_node_hops_to(rnc_node *n, const uint8_t address[16], uint64_t now) {
+  node_route *route = n && address ? route_find(n, address, now) : NULL;
+  return route ? route->route.hops : RNC_PATHFINDER_MAX_HOPS;
+}
+rnc_result rnc_node_set_accepts_links(rnc_node *n, const uint8_t address[16],
+                                      int accepts) {
+  node_destination *d;
+  if (!n || !address || (accepts != 0 && accepts != 1))
+    return RNC_INVALID;
+  d = destination_find(n, address);
+  if (!d)
+    return RNC_STATE;
+  d->no_links = !accepts;
+  return RNC_OK;
+}
+int rnc_node_accepts_links(rnc_node *n, const uint8_t address[16]) {
+  node_destination *d = n && address ? destination_find(n, address) : NULL;
+  return d && !d->no_links;
 }
 static rnc_result proof_link(node_link *l, const rnc_packet *p) {
   uint8_t signed_data[83];
@@ -1900,7 +1954,8 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
   } else if (destination_find(n, p.destination) &&
              destination_find(n, p.destination)->type == (int)destination) {
     node_destination *d = destination_find(n, p.destination);
-    emit(n, RNC_NODE_LOCAL, ingress, &p);
+    if (!(type == RNC_LINKREQUEST && d->no_links))
+      emit(n, RNC_NODE_LOCAL, ingress, &p);
     r = RNC_OK;
     if (type == RNC_DATA && destination == RNC_SINGLE &&
         d->proof == RNC_PROVE_ALL && d->identity.has_private) {

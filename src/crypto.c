@@ -13,6 +13,24 @@ rnc_result rnc_hash(const void *data, size_t size, uint8_t output[32]) {
     return RNC_OK;
 }
 
+rnc_result rnc_truncated_hash(const void *data, size_t size, uint8_t output[16]) {
+    uint8_t full[32];
+    rnc_result r;
+    if (!output) return RNC_INVALID;
+    r = rnc_hash(data, size, full);
+    if (r == RNC_OK) memcpy(output, full, 16);
+    return r;
+}
+rnc_result rnc_random_hash(rnc_random_fn random, void *context, uint8_t output[16]) {
+    uint8_t bytes[16];
+    rnc_result r;
+    if (!random || !output) return RNC_INVALID;
+    r = random(context, bytes, sizeof(bytes));
+    if (r == RNC_OK) r = rnc_truncated_hash(bytes, sizeof(bytes), output);
+    OPENSSL_cleanse(bytes, sizeof(bytes));
+    return r;
+}
+
 static int public_key(int type, const uint8_t private_key[32], uint8_t output[32]) {
     EVP_PKEY *key = EVP_PKEY_new_raw_private_key(type, NULL, private_key, 32);
     size_t size = 32;
