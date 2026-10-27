@@ -37,6 +37,11 @@ typedef struct node_interface {
   uint64_t ic_activated, ic_sustained, ic_held_release, pr_activated,
       pr_sustained;
 } node_interface;
+typedef struct node_known {
+  int used;
+  rnc_announce announce;
+  uint64_t heard, stamp;
+} node_known;
 typedef struct node_held {
   int used;
   uint32_t iface;
@@ -125,6 +130,7 @@ struct rnc_node {
   node_receipt receipts[RNC_NODE_RECEIPTS];
   node_announce announces[NODE_ANNOUNCES];
   node_held held[NODE_HELD];
+  node_known known[RNC_NODE_KNOWN];
   const rnc_packet *input_packet;
   int releasing;
   node_rate rates[NODE_RATES];
@@ -799,6 +805,144 @@ static int path_request_pending(const rnc_node *n, const uint8_t d[16],
       return 1;
   return 0;
 }
+/* Known-destination store: independent of path lifetime and bounded. */
+static void known_remember(rnc_node *n, const rnc_announce *a, uint64_t stamp,
+                           uint64_t now) {
+  node_known *slot = NULL, *oldest = &n->known[0];
+  size_t i;
+  for (i = 0; i < RNC_NODE_KNOWN; i++) {
+    node_known *k = &n->known[i];
+    if (k->used && same(k->announce.destination, a->destination)) {
+      if (stamp <= k->stamp)
+        return;
+      slot = k;
+      break;
+    }
+    if (!k->used) {
+      if (!slot)
+        slot = k;
+    } else if (k->heard < oldest->heard || !oldest->used)
+      oldest = k;
+  }
+  if (!slot)
+    slot = oldest;
+  slot->used = 1;
+  slot->announce = *a;
+  slot->stamp = stamp;
+  slot->heard = now;
+}
+#define KNOWN_MAGIC "RNCK"
+#define KNOWN_ENTRY_MAX (16 + 10 + 64 + 10 + 1 + 32 + 2 + sizeof(((rnc_announce *)0)->app_data))
+rnc_result rnc_node_recall(const rnc_node *n, const uint8_t address[16],
+                           rnc_announce *announce) {
+  size_t i;
+  if (!n || !address || !announce)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_KNOWN; i++)
+    if (n->known[i].used && same(n->known[i].announce.destination, address)) {
+      *announce = n->known[i].announce;
+      return RNC_OK;
+    }
+  return RNC_STATE;
+}
+rnc_result rnc_node_known_export(const rnc_node *n, void *output,
+                                 size_t capacity, size_t *written) {
+  uint8_t *o = output;
+  size_t i, used = 0, off = 4 + 1 + 2;
+  uint8_t digest[32];
+  if (written)
+    *written = 0;
+  if (!n || !output || !written)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_KNOWN; i++)
+    used += n->known[i].used != 0;
+  if (capacity < off + 32)
+    return RNC_NO_SPACE;
+  memcpy(o, KNOWN_MAGIC, 4);
+  o[4] = 1;
+  o[5] = (uint8_t)(used >> 8);
+  o[6] = (uint8_t)used;
+  for (i = 0; i < RNC_NODE_KNOWN; i++) {
+    const rnc_announce *a = &n->known[i].announce;
+    if (!n->known[i].used)
+      continue;
+    if (capacity - off < 32 + 16 + 10 + 64 + 10 + 1 + 32 + 2 + a->app_size)
+      return RNC_NO_SPACE;
+    memcpy(o + off, a->destination, 16), off += 16;
+    memcpy(o + off, a->name_hash, 10), off += 10;
+    memcpy(o + off, a->identity.public_key, 64), off += 64;
+    memcpy(o + off, a->random_hash, 10), off += 10;
+    o[off++] = (uint8_t)(a->has_ratchet != 0);
+    memcpy(o + off, a->ratchet, 32), off += 32;
+    o[off++] = (uint8_t)(a->app_size >> 8);
+    o[off++] = (uint8_t)a->app_size;
+    memcpy(o + off, a->app_data, a->app_size), off += a->app_size;
+  }
+  if (rnc_hash(o, off, digest) != RNC_OK)
+    return RNC_CRYPTO;
+  if (capacity - off < 32)
+    return RNC_NO_SPACE;
+  memcpy(o + off, digest, 32);
+  *written = off + 32;
+  return RNC_OK;
+}
+rnc_result rnc_node_known_import(rnc_node *n, const void *input, size_t size) {
+  const uint8_t *in = input;
+  uint8_t digest[32], material[26], full[32];
+  size_t count, off = 7, i;
+  rnc_announce *items;
+  rnc_result r = RNC_OK;
+  if (!n || !input || size < 7 + 32 || memcmp(in, KNOWN_MAGIC, 4) || in[4] != 1)
+    return RNC_PROTOCOL;
+  if (rnc_hash(in, size - 32, digest) != RNC_OK)
+    return RNC_CRYPTO;
+  if (CRYPTO_memcmp(digest, in + size - 32, 32))
+    return RNC_AUTH;
+  count = ((size_t)in[5] << 8) | in[6];
+  if (count > RNC_NODE_KNOWN)
+    return RNC_PROTOCOL;
+  items = calloc(count ? count : 1, sizeof(*items));
+  if (!items)
+    return RNC_NO_SPACE;
+  for (i = 0; i < count && r == RNC_OK; i++) {
+    rnc_announce *a = &items[i];
+    size_t app;
+    if (size - 32 - off < 16 + 10 + 64 + 10 + 1 + 32 + 2) {
+      r = RNC_PROTOCOL;
+      break;
+    }
+    memcpy(a->destination, in + off, 16), off += 16;
+    memcpy(a->name_hash, in + off, 10), off += 10;
+    r = rnc_identity_from_public(&a->identity, in + off);
+    off += 64;
+    memcpy(a->random_hash, in + off, 10), off += 10;
+    a->has_ratchet = in[off++] != 0;
+    memcpy(a->ratchet, in + off, 32), off += 32;
+    app = ((size_t)in[off] << 8) | in[off + 1];
+    off += 2;
+    if (r != RNC_OK || app > sizeof(a->app_data) || size - 32 - off < app) {
+      r = RNC_PROTOCOL;
+      break;
+    }
+    a->app_size = app;
+    memcpy(a->app_data, in + off, app), off += app;
+    memcpy(material, a->name_hash, 10);
+    memcpy(material + 10, a->identity.hash, 16);
+    if (rnc_hash(material, 26, full) != RNC_OK || memcmp(full, a->destination, 16))
+      r = RNC_PROTOCOL;
+  }
+  if (r == RNC_OK && off != size - 32)
+    r = RNC_PROTOCOL;
+  for (i = 0; i < count && r == RNC_OK; i++) {
+    uint64_t stamp = 0;
+    size_t k;
+    for (k = 5; k < 10; k++)
+      stamp = (stamp << 8) | items[i].random_hash[k];
+    known_remember(n, &items[i], stamp, n->now);
+  }
+  free(items);
+  return r;
+}
 /* Reference-compatible per-destination announce rate table. Returns nonzero
  * when the announce must not be rebroadcast. Paths are learned regardless. */
 static int rate_blocked(rnc_node *n, const node_interface *iface,
@@ -919,6 +1063,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   stamp = announce_time(&a);
   if (stamp > unix_seconds && stamp - unix_seconds > 300)
     return RNC_PROTOCOL;
+  known_remember(n, &a, stamp, now);
   route = route_find(n, p->destination, now);
   update = !route || stamp > route->route.announced_at;
   if (route && !memcmp(a.random_hash, route->route.announce.random_hash, 10))

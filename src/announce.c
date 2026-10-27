@@ -61,3 +61,12 @@ rnc_result rnc_announce_verify(const rnc_packet *packet, rnc_announce *announce)
     *announce = result;
     return RNC_OK;
 }
+
+int rnc_announce_matches_aspect(const rnc_announce *announce, const char *aspect) {
+    uint8_t name[RNC_NAME_HASH_SIZE], destination[16];
+    if (!announce || !aspect || !*aspect)
+        return 0;
+    if (rnc_destination_hash(aspect, &announce->identity, name, destination) != RNC_OK)
+        return 0;
+    return !memcmp(destination, announce->destination, 16);
+}

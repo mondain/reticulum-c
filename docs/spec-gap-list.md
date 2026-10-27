@@ -53,7 +53,7 @@ Largest gaps, in priority order:
 | IMPL | `PacketReceipt` equivalent: `rnc_node_send_tracked` + `RNC_NODE_RECEIPT` event (delivered/failed, RTT, timeout); `rnc_node_set_proof_strategy` (NONE/APP/ALL) | PROVE_APP is signalled by the LOCAL event; no callback API by design |
 | MISS | Tunnels and tunnel table | |
 | MISS | Transport packet cache and cache-request serving | Context 8 is parsed only inside Resource |
-| MISS | Persistent known-destinations table | |
+| IMPL | Persistent known-destinations table | See `rnc_node_known_export/import` |
 | MISS | Network identities (6.5) | |
 | N/A | AES-128 link modes, Python pickle | By design; MessagePack RPC only |
 
@@ -73,7 +73,7 @@ Largest gaps, in priority order:
 | IMPL | create, from_bytes, load/get keys, sign, validate, encrypt, decrypt | |
 | IMPL | `from_file` (64B raw, mode 0600, strict checks) | |
 | PART | `to_file` / `pub_to_file`; `truncated_hash` / `get_random_hash` helpers | |
-| MISS | `recall`, `recall_app_data`, `current_ratchet_id` | |
+| IMPL | `recall`, `recall_app_data` | `rnc_node_recall`: bounded 256-entry store independent of path lifetime, with sealed export/import for host persistence. Ratchet is returned in the recalled announce |
 
 ### Destination
 
@@ -123,7 +123,7 @@ Largest gaps, in priority order:
 | Status | Feature | Notes |
 | --- | --- | --- |
 | PART | `has_path` / `hops_to` / `next_hop` | Via `rnc_node_lookup`; `request_path` exists |
-| MISS | `register_announce_handler` with aspect filter | Generic `RNC_NODE_ANNOUNCE` event only |
+| PART | `register_announce_handler` with aspect filter | Event-based; `rnc_announce_matches_aspect` provides the filter |
 | MISS | `await_path`; `request_path` on_interface/recursive options | |
 | MISS | `blackhole_identity` / `unblackhole_identity` / sources / publish | |
 | MISS | `remote_management_enabled`, `discovered_interfaces`, discovery sources | |
@@ -164,7 +164,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | --- | --- | --- |
 | IMPL | `type`, `enabled` (daemon), `name`, `bitrate`, `mtu`, IFAC (`networkname`, `passphrase`, `ifac_size`) | |
 | MISS | `outgoing`, `bootstrap_only`, `ifac_netname` / `ifac_netkey` aliases | |
-| IMPL | Interface modes: full, gateway, access_point, roaming, boundary | `rnc_node_interface_policy`; announce propagation rules follow the reference behavior as recalled, (the manual's table is an image, so the reference source was used). Rules verified against the pinned reference `Transport.py`. Gateway/AP path-request discovery on behalf of clients is NOT yet implemented. Config keys `mode`/`interface_mode` in the daemon |
+| IMPL | Interface modes: full, gateway, access_point, roaming, boundary | `rnc_node_interface_policy`; announce propagation rules follow the reference behavior as recalled, (the manual's table is an image, so the reference source was used). Rules verified against the pinned reference `Transport.py`. Gateway/AP/roaming interfaces now search for unknown paths on behalf of clients. Config keys `mode`/`interface_mode` in the daemon |
 | IMPL | Announce rate control: `announce_cap` | Per-interface via policy and daemon `announce_cap` (percent); default 2% |
 | IMPL | `announce_rate_target` / `grace` / `penalty` | Per-interface policy and daemon keys; blocks rebroadcast only, paths still learned; bounded 128-entry table |
 | IMPL | New destination rate limiting (8.18) and ingress control (8.20) | Frequency-tracked burst detection, held announces released one per interval, pending-request and known-destination exemptions. Held announces share a 32-entry node table (reference default is 256 per interface). Released announces bypass the burst gate instead of re-entering it. Config keys `ingress_control`, `ic_*` in the daemon |

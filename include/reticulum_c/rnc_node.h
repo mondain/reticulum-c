@@ -43,6 +43,7 @@ typedef enum rnc_receipt_status {
   RNC_RECEIPT_FAILED
 } rnc_receipt_status;
 #define RNC_NODE_RECEIPTS 32u
+#define RNC_NODE_KNOWN 256u
 typedef struct rnc_node_event {
   rnc_node_event_type type;
   uint32_t interface_id;
@@ -163,6 +164,19 @@ rnc_result rnc_node_tick(rnc_node *node, uint64_t unix_seconds,
                          uint64_t now_ms);
 rnc_result rnc_node_lookup(const rnc_node *node, const uint8_t destination[16],
                            uint64_t now_ms, rnc_route *route);
+/* Known-destination store (Identity.recall). Every valid, fresh announce for
+ * a non-local destination is remembered independently of path lifetime, in a
+ * table bounded to RNC_NODE_KNOWN entries (least recently heard is evicted).
+ * RNC_STATE means unknown. Newer announces replace older ones; replays do not. */
+rnc_result rnc_node_recall(const rnc_node *node, const uint8_t destination[16],
+                           rnc_announce *announce);
+/* Versioned, SHA-256-sealed snapshot for host persistence. Import is atomic,
+ * rejects any modification (RNC_AUTH) and entries whose destination does not
+ * derive from their identity, and merges into the current table. */
+rnc_result rnc_node_known_export(const rnc_node *node, void *output,
+                                 size_t capacity, size_t *written);
+rnc_result rnc_node_known_import(rnc_node *node, const void *input,
+                                 size_t size);
 rnc_result rnc_node_poll(rnc_node *node, rnc_node_event *event);
 /* Bind a locally owned link before routing its packets (initiator or
  * responder). Transit links are installed by forwarded requests and activated
