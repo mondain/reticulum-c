@@ -212,7 +212,9 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | PART | `rncp` | `reticulum-c-cp` (examples/reticulum_cp.c) over the new `rnc_transfer` library: listen (`-l`, `-a`, `-n`, `-s`, `-O`, `-F`, `-j`, `-b`), push and fetch (`-f`), compatible with the reference in all four directions. Not implemented: identity allow-list files, `-p`, `-P`, `-C`, `-S`, files over 16 MiB (held in memory), the reference's `--config` (it attaches over `--connect HOST:PORT`) |
 | PART | `rnx` | `reticulum-c-x` (examples/reticulum_x.c): listener with an allow list and client (`-w`, `-m`, `-d`, `-N`, `--stdin`, `--stdout`, `--stderr`), compatible with the reference in both directions. Not implemented: accept-anyone (`-n`, deliberately), interactive mode (`-x`), `-W`, `-p`, allowed-identity files, `--config`; a command is stopped after 25 s and requests/responses are limited to about 64 kB |
 | PART | `rnsh` | `reticulum-c-sh` (examples/reticulum_sh.c): listener (allow list, `-C`, `-A`, default program) and initiator (`-m`, `-N`, `-w`, terminal raw mode, window size, `~.`) speaking protocol 1, compatible with the reference rnsh in both directions. Not implemented: accept-anyone (`-n`, deliberately), line-interactive mode, allowed-identities file, `-p`, `-s`, compression of sent stream data, terminal attribute application on the pty |
-| MISS | `rnodeconf` | |
+| MISS | `rnodeconf` | Needs RNode hardware to test |
+| N/A | `rnir`, `rnpkg`, `RNS.Resolver` | Stubs in the pinned reference: they only start Reticulum or `pass`, so there is nothing to implement |
+| MISS | `rngit` | Git over Reticulum (about 10,000 lines of Python with pages, media and highlighting); not started |
 | IMPL | Remote management, blackhole publishing and subscribing, interface discovery | |
 
 ## 6. Examples (manual ch13)
