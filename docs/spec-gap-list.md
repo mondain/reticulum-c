@@ -17,7 +17,7 @@ Largest gaps, in priority order:
 1. Endpoint packet delivery proofs and `PacketReceipt` (PROVE_NONE/APP/ALL, implicit/explicit proofs, timeouts). Blocks the Echo and rnprobe patterns.
 2. Interface policy: interface modes, configurable `announce_cap`, per-destination announce rate limiting, new-destination rate limiting, path request burst control, ingress control.
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
-4. Missing interface types: Backbone, I2P, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
+4. Missing interface types: I2P, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits and callsign beacon done; remaining): detection/firmware check.
 6. Management plane: blackhole management, remote management destination, interface discovery, network identities, probe responder.
 7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
@@ -137,7 +137,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | Auto | IMPL | IPv6 link-local multicast, `group_id`, discovery/data ports, 1.6s announce, 22s peer timeout, per-peer sub-interfaces |
 | Auto | PART | `multicast_address_type` / scope (only temporary link scope) |
 | Auto | MISS | `allowed_devices`, `ignored_devices`, multiple devices; multi-NIC; Android/Windows specifics; address-change handling |
-| Backbone / BackboneClient | MISS | Entire type (TCP server/client are closest) |
+| Backbone / BackboneClient | PART | Daemon types map to TCP listen/connect (same HDLC wire format) with 100 Mb/s pacing and fast-flap IP blocking; no epoll data-plane egress/ingress watermarks, `device` binding or `prefer_ipv6` |
 | TCP server | IMPL | Listen, accept, IPv4/IPv6, DNS |
 | TCP server | MISS | `prefer_ipv6`, `i2p_tunneled`, device binding, TCP keepalive / user timeout |
 | TCP client | IMPL | Connect, auto-reconnect (1s fixed) |

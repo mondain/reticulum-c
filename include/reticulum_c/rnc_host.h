@@ -47,6 +47,13 @@ rnc_result rnc_host_auto_group(const char *group, uint8_t multicast[16]);
 rnc_result rnc_host_auto_token(const char *group, const char *ipv6,
                                uint8_t token[32]);
 #define RNC_HOST_CALLSIGN_MAX 32u
+/* Backbone-style listener protection: a client IP whose connections each last
+ * under threshold_seconds more than grace times is refused until expiry_seconds
+ * after its last flap. Zero fields select 20 s, 5 flaps and 12 h. */
+typedef struct rnc_fast_flap {
+  int enabled;
+  unsigned threshold_seconds, grace, expiry_seconds;
+} rnc_fast_flap;
 typedef struct rnc_host_config {
   rnc_host_kind kind;
   const char *name; /* optional human-readable interface name */
@@ -84,6 +91,7 @@ typedef struct rnc_host_config {
   uint32_t announce_rate_target, announce_rate_grace, announce_rate_penalty;
   int recursive_path_requests;  /* see rnc_interface_policy */
   rnc_ingress_policy ingress;   /* zero = reference defaults */
+  rnc_fast_flap fast_flap;      /* TCP_LISTEN only; off by default */
 } rnc_host_config;
 typedef struct rnc_host_status {
   uint32_t interface_id, parent_id;
@@ -105,6 +113,7 @@ typedef struct rnc_host_status {
   uint8_t ifac_signature[64];
   rnc_interface_mode mode;
   uint32_t announce_cap_permille;
+  size_t blocked_ips; /* TCP_LISTEN: IPs currently refused for flapping */
 } rnc_host_status;
 typedef struct rnc_host rnc_host;
 typedef enum rnc_host_event_type {

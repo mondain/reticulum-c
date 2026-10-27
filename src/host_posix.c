@@ -219,6 +219,12 @@ typedef struct host_frame {
   int announce, control, beacon;
   uint8_t data[RNC_HOST_FRAME_MAX];
 } host_frame;
+#define HOST_FLAP_SLOTS 32u
+typedef struct host_flap {
+  char ip[INET6_ADDRSTRLEN];
+  uint64_t last;
+  unsigned count;
+} host_flap;
 typedef struct host_interface {
   int used, fd, discovery_fd, unicast_fd, connecting, node_added, accepted,
       has_ifac, ready;
@@ -234,6 +240,11 @@ typedef struct host_interface {
   uint64_t radio_deadline;
   pid_t child;
   char ax_call[7];
+  int flap_on, flap_pending;
+  uint64_t flap_threshold_ms, flap_expiry_ms, spawned_at;
+  unsigned flap_grace;
+  char peer_ip[INET6_ADDRSTRLEN];
+  host_flap flaps[HOST_FLAP_SLOTS];
   uint64_t lock_at;
   rnc_host_config radio;
   char callsign[RNC_HOST_CALLSIGN_MAX + 1u];
@@ -353,7 +364,50 @@ static rnc_result activate(rnc_host *h, host_interface *f) {
   (void)emit_host(h, RNC_HOST_UP, f->status.interface_id, 0, NULL);
   return RNC_OK;
 }
+static int flap_expired(const host_interface *l, const host_flap *e,
+                       uint64_t now) {
+  return now > e->last && now - e->last > l->flap_expiry_ms;
+}
+static int flap_blocked(const host_interface *l, const char *ip, uint64_t now) {
+  size_t i;
+  for (i = 0; i < HOST_FLAP_SLOTS; ++i)
+    if (l->flaps[i].count && !strcmp(l->flaps[i].ip, ip))
+      return l->flaps[i].count > l->flap_grace &&
+             !flap_expired(l, &l->flaps[i], now);
+  return 0;
+}
+static void flap_record(host_interface *l, const char *ip, uint64_t now) {
+  size_t i, slot = 0;
+  for (i = 0; i < HOST_FLAP_SLOTS; ++i) {
+    host_flap *e = &l->flaps[i];
+    if (e->count && flap_expired(l, e, now))
+      e->count = 0;
+    if (e->count && !strcmp(e->ip, ip)) {
+      ++e->count;
+      e->last = now;
+      return;
+    }
+  }
+  for (i = 0; i < HOST_FLAP_SLOTS; ++i) {
+    if (!l->flaps[i].count) {
+      slot = i;
+      break;
+    }
+    if (l->flaps[i].last < l->flaps[slot].last)
+      slot = i;
+  }
+  (void)snprintf(l->flaps[slot].ip, sizeof(l->flaps[slot].ip), "%s", ip);
+  l->flaps[slot].count = 1;
+  l->flaps[slot].last = now;
+}
 static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
+  if (f->flap_pending) {
+    host_interface *parent = find_interface(h, f->status.parent_id);
+    f->flap_pending = 0;
+    if (parent && parent->flap_on &&
+        h->now - f->spawned_at < parent->flap_threshold_ms)
+      flap_record(parent, f->peer_ip, h->now);
+  }
   if (f->fd >= 0) {
     close(f->fd);
     f->fd = -1;
@@ -841,6 +895,8 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
        (c->id_callsign && (!*c->id_callsign ||
                            strlen(c->id_callsign) > RNC_HOST_CALLSIGN_MAX))))
     return RNC_INVALID;
+  if (c->fast_flap.enabled && c->kind != RNC_HOST_TCP_LISTEN)
+    return RNC_INVALID;
   if (c->kind == RNC_HOST_AX25) {
     size_t k, len = c->callsign ? strlen(c->callsign) : 0;
     if (len < 3 || len > 6 || c->ssid > 15)
@@ -891,6 +947,15 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->kiss_port = c->kiss_port;
   f->flow_control = c->flow_control;
   f->ready = !c->flow_control;
+  f->flap_on = c->fast_flap.enabled;
+  f->flap_threshold_ms =
+      (c->fast_flap.threshold_seconds ? c->fast_flap.threshold_seconds : 20u) *
+      1000u;
+  f->flap_grace = c->fast_flap.grace ? c->fast_flap.grace : 5u;
+  f->flap_expiry_ms = (uint64_t)(c->fast_flap.expiry_seconds
+                                     ? c->fast_flap.expiry_seconds
+                                     : 12u * 3600u) *
+                      1000u;
   if (c->bitrate)
     f->bitrate = c->bitrate;
   else if (c->kind == RNC_HOST_RNODE) {
@@ -1017,6 +1082,16 @@ fail: {
   return r;
 }
 }
+static size_t blocked_count(const rnc_host *h, const host_interface *l) {
+  size_t i, n = 0;
+  if (!l->flap_on)
+    return 0;
+  for (i = 0; i < HOST_FLAP_SLOTS; ++i)
+    if (l->flaps[i].count > l->flap_grace &&
+        !flap_expired(l, &l->flaps[i], h->now))
+      ++n;
+  return n;
+}
 rnc_result rnc_host_get_status(const rnc_host *h, uint32_t id,
                                rnc_host_status *out) {
   size_t i;
@@ -1026,6 +1101,7 @@ rnc_result rnc_host_get_status(const rnc_host *h, uint32_t id,
     if (h->interfaces[i].used && h->interfaces[i].status.interface_id == id) {
       *out = h->interfaces[i].status;
       out->queued_frames = h->interfaces[i].queue_count;
+      out->blocked_ips = blocked_count(h, &h->interfaces[i]);
       return RNC_OK;
     }
   return RNC_AGAIN;
@@ -1038,6 +1114,7 @@ rnc_result rnc_host_status_at(const rnc_host *h, size_t index,
     return RNC_AGAIN;
   *out = h->interfaces[index].status;
   out->queued_frames = h->interfaces[index].queue_count;
+  out->blocked_ips = blocked_count(h, &h->interfaces[index]);
   return RNC_OK;
 }
 rnc_result rnc_host_poll(rnc_host *h, rnc_host_event *out) {
@@ -1198,9 +1275,23 @@ static rnc_result input_packet(rnc_host *h, host_interface *f,
 static void accept_tcp(rnc_host *h, host_interface *parent) {
   int fd;
   host_interface *f;
-  fd = accept(parent->fd, NULL, NULL);
+  struct sockaddr_storage peer;
+  socklen_t peer_size = sizeof(peer);
+  char ip[INET6_ADDRSTRLEN] = "";
+  fd = accept(parent->fd, (struct sockaddr *)&peer, &peer_size);
   if (fd < 0)
     return;
+  if (peer.ss_family == AF_INET)
+    (void)inet_ntop(AF_INET, &((struct sockaddr_in *)&peer)->sin_addr, ip,
+                    sizeof(ip));
+  else if (peer.ss_family == AF_INET6)
+    (void)inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&peer)->sin6_addr, ip,
+                    sizeof(ip));
+  if (parent->flap_on && flap_blocked(parent, ip, h->now)) {
+    close(fd);
+    ++parent->status.dropped_packets;
+    return;
+  }
   if (nonblock(fd) < 0) {
     close(fd);
     return;
@@ -1216,6 +1307,9 @@ static void accept_tcp(rnc_host *h, host_interface *parent) {
   f->fd = fd;
   f->discovery_fd = f->unicast_fd = -1;
   f->accepted = 1;
+  f->spawned_at = h->now;
+  f->flap_pending = parent->flap_on;
+  (void)snprintf(f->peer_ip, sizeof(f->peer_ip), "%s", ip);
   f->status.kind = RNC_HOST_TCP_CONNECT;
   f->status.interface_id = h->next_id++;
   f->status.parent_id = parent->status.interface_id;

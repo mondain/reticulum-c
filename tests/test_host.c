@@ -746,6 +746,70 @@ static void ax25_test(void) {
   close(master);
   puts("host AX.25 KISS tests passed");
 }
+static int flap_connect(uint16_t port) {
+  struct sockaddr_in a = {0};
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  CHECK(fd >= 0);
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  CHECK(connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0);
+  CHECK(fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
+  return fd;
+}
+static void fast_flap_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i, round;
+  uint64_t now = 100;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.address = "127.0.0.1";
+  cfg.fast_flap.enabled = 1;
+  cfg.fast_flap.grace = 2;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && status.bound_port);
+  /* three short-lived connections exceed a grace of two */
+  for (round = 0; round < 3; ++round) {
+    int fd = flap_connect(status.bound_port);
+    uint8_t byte;
+    for (i = 0; i < 10; ++i)
+      CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+    CHECK(recv(fd, &byte, 1, 0) < 0 && errno == EAGAIN); /* accepted, open */
+    close(fd);
+    for (i = 0; i < 10; ++i)
+      CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+  }
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK &&
+        status.blocked_ips == 1);
+  {
+    int fd = flap_connect(status.bound_port);
+    uint8_t byte;
+    ssize_t got = -1;
+    for (i = 0; i < 20 && got < 0; ++i) {
+      CHECK(rnc_host_step(host, 5, 1700000000, now += 10) == RNC_OK);
+      got = recv(fd, &byte, 1, 0);
+    }
+    CHECK(got == 0); /* refused: closed without service */
+    close(fd);
+  }
+  /* the block lapses 12 h after the last flap */
+  CHECK(rnc_host_step(host, 0, 1700000000, now + 12u * 3600u * 1000u + 1000u) ==
+        RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK &&
+        status.blocked_ips == 0);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host fast-flap tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -764,6 +828,8 @@ int main(int argc, char **argv) {
     pipe_test();
   else if (!strcmp(argv[1], "ax25"))
     ax25_test();
+  else if (!strcmp(argv[1], "fast_flap"))
+    fast_flap_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))

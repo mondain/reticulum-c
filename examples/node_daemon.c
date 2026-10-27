@@ -30,7 +30,7 @@ typedef struct interface_config {
       passphrase[128], callsign[RNC_HOST_CALLSIGN_MAX + 2u], ax_call[8];
   size_t ifac_size;
   uint32_t interface_id;
-  int enabled, has_type;
+  int enabled, has_type, backbone;
   rnc_ifac ifac;
 } interface_config;
 typedef struct config {
@@ -113,12 +113,18 @@ static int set_type(interface_config *f, const char *value) {
                {"KISSInterface", RNC_HOST_KISS},
                {"RNodeInterface", RNC_HOST_RNODE},
                {"PipeInterface", RNC_HOST_PIPE},
-               {"AX25KISSInterface", RNC_HOST_AX25}};
+               {"AX25KISSInterface", RNC_HOST_AX25},
+               {"BackboneInterface", RNC_HOST_TCP_LISTEN},
+               {"BackboneClientInterface", RNC_HOST_TCP_CONNECT}};
   size_t i;
   for (i = 0; i < sizeof(types) / sizeof(*types); ++i)
     if (!strcmp(value, types[i].name)) {
       f->host.kind = types[i].kind;
       f->has_type = 1;
+      f->backbone = !strncmp(value, "Backbone", 8);
+      /* wire-compatible with TCP (HDLC); reference defaults differ */
+      if (f->backbone && types[i].kind == RNC_HOST_TCP_LISTEN)
+        f->host.fast_flap.enabled = 1;
       return 1;
     }
   return 0;
@@ -136,8 +142,8 @@ static int interface_key(interface_config *f, const char *key,
     return 1;
   }
   if (!strcmp(key, "listen_ip") || !strcmp(key, "listen_address") ||
-      !strcmp(key, "target_host") || !strcmp(key, "port") ||
-      !strcmp(key, "command"))
+      !strcmp(key, "target_host") ||
+      (!strcmp(key, "port") && !f->backbone) || !strcmp(key, "command"))
     return text_copy(f->address, sizeof(f->address), value);
   if (!strcmp(key, "forward_ip") || !strcmp(key, "target"))
     return text_copy(f->target, sizeof(f->target), value);
@@ -193,6 +199,25 @@ static int interface_key(interface_config *f, const char *key,
       f->host.airtime_limit_short = percent;
     else
       f->host.airtime_limit_long = percent;
+    return 1;
+  }
+  if (!strcmp(key, "block_fast_flapping")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->host.fast_flap.enabled = b;
+    return 1;
+  }
+  if (!strcmp(key, "fast_flapping_threshold") ||
+      !strcmp(key, "fast_flapping_block_time")) {
+    char *end;
+    double v = strtod(value, &end);
+    int minutes = !strcmp(key, "fast_flapping_block_time");
+    if (end == value || *end || !(v > 0.0) || v > 31536000.0)
+      return 0;
+    if (minutes)
+      f->host.fast_flap.expiry_seconds = (unsigned)(v * 60.0 + 0.5);
+    else
+      f->host.fast_flap.threshold_seconds = (unsigned)(v + 0.5);
     return 1;
   }
   if (!strcmp(key, "respawn_delay")) {
@@ -258,7 +283,14 @@ static int interface_key(interface_config *f, const char *key,
   }
   if (!number(value, UINT32_MAX, &n))
     return 0;
-  if (!strcmp(key, "listen_port") || !strcmp(key, "target_port")) {
+  if (!strcmp(key, "fast_flapping_grace")) {
+    if (n == 0 || n > 1000)
+      return 0;
+    f->host.fast_flap.grace = (unsigned)n;
+    return 1;
+  }
+  if (!strcmp(key, "listen_port") || !strcmp(key, "target_port") ||
+      (!strcmp(key, "port") && f->backbone)) {
     if (n > 65535)
       return 0;
     f->host.port = (uint16_t)n;
@@ -437,6 +469,8 @@ static int finish_config(config *c) {
     f->host.group = f->group[0] ? f->group : NULL;
     f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
     f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
+    if (f->backbone && !f->host.bitrate)
+      f->host.bitrate = 100000000u; /* reference BITRATE_GUESS */
     if (!f->enabled)
       continue;
     ++enabled;
