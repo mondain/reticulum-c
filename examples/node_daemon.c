@@ -78,7 +78,8 @@ typedef struct interface_config {
 } interface_config;
 typedef struct config {
   int transport, share, share_tcp, remote_management, publish_blackhole,
-      respond_to_probes, explicit_proofs, panic_on_interface_error;
+      respond_to_probes, explicit_proofs, panic_on_interface_error,
+      no_link_mtu_discovery;
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
   char network_identity[512]; /* identity file path, empty = none */
@@ -690,6 +691,11 @@ static int finish_config(config *c) {
          (!f->host.address || !f->host.port)) ||
         (f->host.kind >= RNC_HOST_SERIAL && !f->host.address))
       return 0;
+    /* The reference sizes TCP interfaces from their bitrate, far above 500, so
+     * links across them can negotiate large packets. */
+    if (!f->host.mtu && (f->host.kind == RNC_HOST_TCP_LISTEN ||
+                         f->host.kind == RNC_HOST_TCP_CONNECT))
+      f->host.mtu = RNC_MAX_MTU;
     if (f->host.mtu &&
         (f->host.mtu < RNC_MTU || f->host.mtu > RNC_MAX_MTU ||
          (f->host.kind >= RNC_HOST_SERIAL && f->host.mtu > RNC_MTU) ||
@@ -968,6 +974,8 @@ static int read_config(const char *path, config *c) {
           c->respond_to_probes = b;
         else if (!strcmp(s, "use_implicit_proof"))
           c->explicit_proofs = !b;
+        else if (!strcmp(s, "link_mtu_discovery"))
+          c->no_link_mtu_discovery = !b;
         else if (!strcmp(s, "panic_on_interface_error"))
           c->panic_on_interface_error = b;
         else if (!strcmp(s, "discover_interfaces"))
@@ -1307,6 +1315,8 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
     goto fail;
   if (c->explicit_proofs)
     (void)rnc_node_set_implicit_proofs(*node, 0);
+  if (c->no_link_mtu_discovery)
+    (void)rnc_node_set_link_mtu_discovery(*node, 0);
   for (i = 0; i < c->count; ++i)
     if (c->interfaces[i].enabled) {
       rnc_host_status status;
@@ -1437,10 +1447,10 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
     for (i = 0; i < RNC_HOST_SLOTS; ++i)
       if (rnc_host_status_at(host, i, &status) == RNC_OK)
         append(c,
-               "interface id=%u parent=%u kind=%u online=%d port=%u rx=%llu "
-               "tx=%llu dropped=%llu queued=%zu\n",
+               "interface id=%u parent=%u kind=%u online=%d port=%u mtu=%u "
+               "rx=%llu tx=%llu dropped=%llu queued=%zu\n",
                status.interface_id, status.parent_id, (unsigned)status.kind,
-               status.online, status.bound_port,
+               status.online, status.bound_port, (unsigned)status.mtu,
                (unsigned long long)status.rx_packets,
                (unsigned long long)status.tx_packets,
                (unsigned long long)status.dropped_packets,

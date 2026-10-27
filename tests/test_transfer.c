@@ -20,6 +20,8 @@ static rnc_result rng(void *ctx, uint8_t *p, size_t n) {
   }
   return RNC_OK;
 }
+/* Interface MTU for the next setup() and the largest packet on the wire. */
+static size_t iface_mtu = 500, max_wire;
 typedef struct net {
   rnc_identity client_id, server_id;
   rnc_node *client, *server;
@@ -79,6 +81,13 @@ static int on_fetch(void *ctx, const uint8_t *path, size_t path_size,
   *name_size = 11;
   return RNC_FETCH_FOUND;
 }
+static void wire_note(const rnc_packet *packet) {
+  uint8_t raw[RNC_MAX_MTU];
+  size_t wire = 0;
+  if (rnc_packet_encode(packet, raw, sizeof(raw), &wire) == RNC_OK &&
+      wire > max_wire)
+    max_wire = wire;
+}
 static void pump(net *n, unsigned steps) {
   unsigned i;
   for (i = 0; i < steps; i++) {
@@ -89,14 +98,18 @@ static void pump(net *n, unsigned steps) {
     CHECK(rnc_transfer_listener_tick(n->listener, UNIX, n->now) == RNC_OK);
     CHECK(rnc_transfer_client_tick(n->xfer, UNIX, n->now) == RNC_OK);
     while (rnc_node_poll(n->client, &e) == RNC_OK) {
-      if (e.type == RNC_NODE_SEND)
+      if (e.type == RNC_NODE_SEND) {
+        wire_note(&e.packet);
         CHECK(rnc_node_input(n->server, 1, &e.packet, UNIX, n->now) == RNC_OK);
+      }
       else if (e.type == RNC_NODE_LOCAL)
         CHECK(rnc_transfer_client_input(n->xfer, &e, UNIX, n->now) == RNC_OK);
     }
     while (rnc_node_poll(n->server, &e) == RNC_OK) {
-      if (e.type == RNC_NODE_SEND)
+      if (e.type == RNC_NODE_SEND) {
+        wire_note(&e.packet);
         CHECK(rnc_node_input(n->client, 1, &e.packet, UNIX, n->now) == RNC_OK);
+      }
       else if (e.type == RNC_NODE_LOCAL) {
         rnc_result r = rnc_transfer_listener_input(n->listener, &e, UNIX, n->now);
         CHECK(r == RNC_OK || r == RNC_AGAIN);
@@ -116,6 +129,8 @@ static void setup(net *n, int allow, int fetch) {
   CHECK(n->client && n->server);
   CHECK(rnc_node_add_interface(n->client, 1, 1000000) == RNC_OK);
   CHECK(rnc_node_add_interface(n->server, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_interface_mtu(n->client, 1, iface_mtu) == RNC_OK);
+  CHECK(rnc_node_interface_mtu(n->server, 1, iface_mtu) == RNC_OK);
   CHECK(rnc_node_add_destination(n->server, &n->server_id, "rncp.receive",
                                  NULL, 0, n->destination) == RNC_OK);
   memset(&cfg, 0, sizeof(cfg));
@@ -312,6 +327,31 @@ static void arguments(void) {
                                    &(rnc_transfer_config){0}, rng, NULL));
   teardown(&n);
 }
+/* With 4096 byte interfaces a pushed file travels in large packets and arrives
+ * intact; with 500 byte ones nothing larger than that is ever sent. */
+static void large_mtu(void) {
+  size_t mtus[2] = {RNC_MAX_MTU, 500}, k;
+  for (k = 0; k < 2; ++k) {
+    net n;
+    uint8_t *data = malloc(60000), out[16];
+    rnc_transfer_result r;
+    CHECK(data);
+    iface_mtu = mtus[k];
+    max_wire = 0;
+    setup(&n, 2, 0);
+    CHECK(rng(NULL, data, 60000) == RNC_OK); /* incompressible */
+    CHECK(rnc_transfer_send(n.xfer, n.destination, &n.client_id,
+                            (const uint8_t *)"mtu.bin", 7, data, 60000, 1,
+                            600000, UNIX, n.now) == RNC_OK);
+    r = finish(&n, out, sizeof(out), 60000, NULL, 1);
+    CHECK(r.status == RNC_TRANSFER_DONE && n.received == 1 &&
+          n.received_size == 60000 && !memcmp(n.received_data, data, 60000));
+    CHECK(k == 0 ? max_wire > 2000 : max_wire <= 500);
+    free(data);
+    teardown(&n);
+  }
+  iface_mtu = 500;
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "send"))
@@ -326,6 +366,8 @@ int main(int argc, char **argv) {
     fetch_refused();
   else if (!strcmp(argv[1], "unavailable"))
     fetch_unavailable();
+  else if (!strcmp(argv[1], "large_mtu"))
+    large_mtu();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
   else

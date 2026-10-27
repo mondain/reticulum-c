@@ -544,3 +544,30 @@ interoperates but moves bulk data in smaller packets.
 Evidence: a host test (receive-only client, the same client with output on as a
 control, and a listener's accepted connection), a receipt test for the explicit
 proof format, and daemon tests for the config keys and for skip versus panic.
+
+## Link MTU discovery (`feature/link-mtu-discovery`)
+
+The link protocol already negotiated an MTU (3 signalling bytes in the link
+request and proof, the smaller of both ends, transport nodes clamping a request
+to their own interfaces), but nothing asked for more than 500 bytes. Now
+applications configure their links from the interfaces: `rnc_node_link_mtu_to`
+(initiator, the interface the route leaves by) and `rnc_node_link_mtu_on`
+(responder, the interface the request arrived on), used by the responder,
+requester, transfer listener and client, and the remote shell. `link_mtu_discovery`
+(default on, `rnc_node_set_link_mtu_discovery`, daemon key `link_mtu_discovery`)
+switches it off, which keeps every link at 500 bytes.
+
+The daemon now gives TCP interfaces (server, client, Backbone) a 4096 byte MTU
+unless `mtu` is set; the reference sizes them from their bitrate, far higher.
+Other interface kinds keep 500. The library caps packets at 4096, below the
+reference's 16 KiB and more. The admin `STATUS` line shows `mtu=`.
+
+Measured: one megabyte pushed by `reticulum-c-cp` to the unmodified reference
+`rncp` through the daemon takes 1.9 s with discovery and 8.1 s with the
+daemon's interface held at 500 bytes, and the files are identical.
+
+Evidence: requester tests (4096 byte interfaces carry packets over 2000 bytes,
+discovery off stays at 500, a 500 byte far side clamps the link, intermediate
+sizes), a transfer test with incompressible 60 kB over both settings, a test of
+the node helpers, daemon tests for the key and the per-interface defaults, and
+the reference differential tests, which now negotiate larger links.

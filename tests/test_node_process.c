@@ -72,6 +72,12 @@ static void cli(const char *exe) {
               "No\n[interfaces]\n[[T]]\ntype = TCPServerInterface\n"
               "listen_port = 0\noutgoing = No\n");
   CHECK(run_check(exe, path) == 0);
+  config_file(path,
+              "[reticulum]\nshare_instance = No\nlink_mtu_discovery = No\n"
+              "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 0\n");
+  CHECK(run_check(exe, path) == 0);
+  config_file(path, "[reticulum]\nlink_mtu_discovery = maybe\n");
+  CHECK(run_check(exe, path) != 0);
   config_file(path, "[reticulum]\nuse_implicit_proof = maybe\n");
   CHECK(run_check(exe, path) != 0);
   config_file(path, "[reticulum]\npanic_on_interface_error = maybe\n");
@@ -3448,6 +3454,37 @@ static void panic_on_interface(const char *exe) {
   remove_tree(dir);
   puts("node panic tests passed");
 }
+/* TCP interfaces take 4096 byte packets unless configured otherwise (the
+ * reference sizes them from their bitrate, far above 500), so links across
+ * them can use large packets; other kinds keep 500. */
+static void interface_mtu(const char *exe) {
+  char dir[] = "/tmp/rnc-node-mtu-XXXXXX", cfg[256], key[256], admin[256],
+       text[2048], identity[33], reply[4096];
+  int fd;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[Default]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = 0\n[[Small]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = 0\nmtu = 1196\n[[Datagram]]\ntype = UDPInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = 0\nforward_ip = "
+                 "127.0.0.1\nforward_port = 9\n") > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, identity);
+  admin_command(admin, "STATUS", reply, sizeof(reply));
+  CHECK(strstr(reply, "mtu=4096"));
+  CHECK(strstr(reply, "mtu=1196"));
+  CHECK(strstr(reply, "mtu=500"));
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node interface MTU tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 4 || argc == 5 || argc == 6);
   if (!strcmp(argv[2], "cli"))
@@ -3459,6 +3496,8 @@ int main(int argc, char **argv) {
     sh_reference(argv[1], argv[3], argv[5]);
   else if (!strcmp(argv[2], "x_ref") && argc == 6)
     x_reference(argv[1], argv[3], argv[5]);
+  else if (!strcmp(argv[2], "mtu") && argc == 3)
+    interface_mtu(argv[1]);
   else if (!strcmp(argv[2], "panic") && argc == 3)
     panic_on_interface(argv[1]);
   else if (!strcmp(argv[2], "sh_tools") && argc == 4)

@@ -122,7 +122,10 @@ rnc_result rnc_requester_start(rnc_requester *r, const uint8_t destination[16],
     result = RNC_NO_SPACE;
     goto fail;
   }
-  result = rnc_link_open(j->link, &route.announce, now_ms);
+  result = rnc_link_configure_mtu(j->link,
+                                  rnc_node_link_mtu_to(r->node, destination, now_ms));
+  if (result == RNC_OK)
+    result = rnc_link_open(j->link, &route.announce, now_ms);
   if (result == RNC_OK)
     result = rnc_link_address(j->link, j->id);
   if (result == RNC_OK)

@@ -204,8 +204,11 @@ static rnc_result accept_link(rnc_transfer_listener *l,
   if (!conn_open(&s->c, l->node, l->config.max_size, l->random,
                  l->random_context))
     return RNC_NO_SPACE;
-  result = rnc_link_accept(s->c.link, &l->identity, l->destination,
-                           &event->packet, now);
+  result = rnc_link_configure_mtu(
+      s->c.link, rnc_node_link_mtu_on(l->node, event->interface_id));
+  if (result == RNC_OK)
+    result = rnc_link_accept(s->c.link, &l->identity, l->destination,
+                             &event->packet, now);
   if (result == RNC_OK)
     result = rnc_link_address(s->c.link, s->c.id);
   if (result == RNC_OK)
@@ -472,7 +475,10 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
     result = RNC_NO_SPACE;
     goto fail;
   }
-  result = rnc_link_open(j->c.link, &route.announce, now);
+  result = rnc_link_configure_mtu(
+      j->c.link, rnc_node_link_mtu_to(c->node, destination, now));
+  if (result == RNC_OK)
+    result = rnc_link_open(j->c.link, &route.announce, now);
   if (result == RNC_OK)
     result = rnc_link_address(j->c.link, j->c.id);
   if (result == RNC_OK)

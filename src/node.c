@@ -140,7 +140,7 @@ struct rnc_node {
   rnc_identity identity; /* kept for tunnel synthesis when it has a key */
   int has_identity;
   node_tunnel tunnels[RNC_NODE_TUNNELS];
-  int transport, explicit_proofs;
+  int transport, explicit_proofs, no_mtu_discovery;
   rnc_random_fn random;
   void *random_context;
   uint64_t now;
@@ -1720,6 +1720,24 @@ rnc_result rnc_node_receipt_timeout(rnc_node *n, const uint8_t destination[16],
                      ? (uint64_t)RNC_MTU * 8u * 1000u / iface->bitrate
                      : 0u);
   return RNC_OK;
+}
+rnc_result rnc_node_set_link_mtu_discovery(rnc_node *n, int enabled) {
+  if (!n || (enabled != 0 && enabled != 1))
+    return RNC_INVALID;
+  n->no_mtu_discovery = !enabled;
+  return RNC_OK;
+}
+int rnc_node_link_mtu_discovery(const rnc_node *n) {
+  return n ? !n->no_mtu_discovery : 1;
+}
+size_t rnc_node_link_mtu_on(rnc_node *n, uint32_t id) {
+  node_interface *iface = n && !n->no_mtu_discovery ? interface(n, id) : NULL;
+  return iface && iface->mtu >= RNC_MTU ? iface->mtu : RNC_MTU;
+}
+size_t rnc_node_link_mtu_to(rnc_node *n, const uint8_t destination[16],
+                            uint64_t now) {
+  node_route *route = n && destination ? route_find(n, destination, now) : NULL;
+  return route ? rnc_node_link_mtu_on(n, route->route.interface_id) : RNC_MTU;
 }
 rnc_result rnc_node_set_implicit_proofs(rnc_node *n, int implicit) {
   if (!n || (implicit != 0 && implicit != 1))

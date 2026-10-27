@@ -183,8 +183,11 @@ static rnc_result accept_link(rnc_responder *r, responder_destination *d,
     memset(s, 0, sizeof(*s));
     return RNC_NO_SPACE;
   }
-  result = rnc_link_accept(s->link, &d->identity, d->destination,
-                           &event->packet, now);
+  result = rnc_link_configure_mtu(
+      s->link, rnc_node_link_mtu_on(r->node, event->interface_id));
+  if (result == RNC_OK)
+    result = rnc_link_accept(s->link, &d->identity, d->destination,
+                             &event->packet, now);
   if (result == RNC_OK)
     result = rnc_link_address(s->link, s->id);
   if (result == RNC_OK)

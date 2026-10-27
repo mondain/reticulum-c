@@ -64,7 +64,7 @@ Largest gaps, in priority order:
 | Status | Feature | Notes |
 | --- | --- | --- |
 | PART | Shared instance and RPC server (HMAC, MessagePack GET queries) | Several query names (`blackholed_identities`, `rate_table`, `path_table` fields) are decoded but the host supplies the data; the first two return empty |
-| PART | `get_instance`, `transport_enabled`, `link_mtu_discovery`, `should_use_implicit_proof` accessors | `rnc_node_implicit_proofs` / `rnc_node_set_implicit_proofs` cover `should_use_implicit_proof`; the rest are Python-instance accessors or concern link MTU discovery (not implemented, links stay at the 500 byte MTU) |
+| PART | `get_instance`, `transport_enabled`, `link_mtu_discovery`, `should_use_implicit_proof` accessors | `rnc_node_implicit_proofs` / `rnc_node_set_implicit_proofs` cover `should_use_implicit_proof`; `rnc_node_link_mtu_discovery` covers `link_mtu_discovery`; `get_instance` and `transport_enabled` are Python-instance accessors |
 
 ### Identity
 
@@ -194,7 +194,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | IMPL | `loglevel` (`[logging]`), `logdestination` (stdout, stderr or a file that rolls over at 5 MiB), `logfile` | Library hook `rnc_log.h`; the daemon formats `[time] [Level] module: message` |
 | PART | `instance_name` | Accepted; the shared instance is TCP only, so it names nothing |
 | IMPL | `respond_to_probes` | Daemon registers `rnstransport.probe` with PROVE_ALL, takes no links; reported as `probe_responder` in interface stats |
-| PART | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | `panic_on_interface_error` and `use_implicit_proof` implemented; `link_mtu_discovery` is not (links stay at 500 bytes) |
+| IMPL | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | all three implemented |
 | IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
 | IMPL | `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval` | |
 | IMPL | `network_identity` | |
