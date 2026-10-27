@@ -65,6 +65,10 @@ typedef struct rnc_host_config {
   uint16_t mtu;     /* default500; AUTO default1196; serial/radio maximum500 */
   uint32_t bitrate; /* serialization pacing; default10Mb/s */
   unsigned serial_baud, kiss_port;
+  /* Serial-style kinds: 0 = 8 data bits, no parity, 1 stop bit. serial_parity
+   * is 'N', 'E' or 'O'. */
+  unsigned serial_databits, serial_stopbits;
+  char serial_parity;
   const char
       *device; /* AUTO: interface name carrying a link-local IPv6 address */
   const char *group; /* AUTO: discovery group, default"reticulum" */

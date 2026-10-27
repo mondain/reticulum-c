@@ -139,10 +139,13 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | Auto | MISS | `allowed_devices`, `ignored_devices`, multiple devices; multi-NIC; Android/Windows specifics; address-change handling |
 | Backbone / BackboneClient | PART | Daemon types map to TCP listen/connect (same HDLC wire format) with 100 Mb/s pacing and fast-flap IP blocking; no epoll data-plane egress/ingress watermarks, `device` binding or `prefer_ipv6` |
 | TCP server | IMPL | Listen, accept, IPv4/IPv6, DNS |
-| TCP server | MISS | `prefer_ipv6`, `i2p_tunneled`, device binding, TCP keepalive / user timeout |
+| TCP server | IMPL | `prefer_ipv6`, TCP keepalive and user timeout on accepted sockets |
+| TCP server | MISS | `i2p_tunneled`, device binding |
 | TCP client | IMPL | Connect, auto-reconnect (1s fixed) |
-| TCP client | PART | Address resolved once; no `reconnect_wait`, `max_reconnect_tries`, `connect_timeout` |
-| TCP client | MISS | `kiss_framing`, `fixed_mtu`, `i2p_tunneled` |
+| TCP client | IMPL | `reconnect_wait`, `max_reconnect_tries`, `connect_timeout`, `prefer_ipv6`, keepalive and user timeout |
+| TCP client | PART | Address resolved once on add; reconnects reuse it |
+| TCP client | IMPL | `kiss_framing` (`fixed_mtu` is the existing `mtu`) |
+| TCP client | MISS | `i2p_tunneled` |
 | UDP | PART | Single unicast target; receive-only mode |
 | UDP | MISS | Broadcast, multiple targets |
 | I2P | MISS | Entire type |
@@ -150,10 +153,11 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | RNode LoRa | MISS | Detection and firmware check, BLE/TCP RNode, RSSI/SNR/battery stats |
 | RNode Multi | MISS | Sub-interfaces (only `kiss_port` in the command byte) |
 | Serial | IMPL | HDLC over termios, speed |
-| Serial | MISS | databits, parity, stopbits, hardware flow control, port locking |
+| Serial | IMPL | databits, parity, stopbits (daemon `databits` / `parity` / `stopbits`) |
+| Serial | MISS | hardware flow control, port locking |
 | Pipe | IMPL | `PipeInterface`: command on a socketpair, HDLC, respawn delay, 1 Mb/s pacing |
 | KISS | IMPL | Framing, port nibble, `flow_control` |
-| KISS | MISS | preamble, txtail, persistence, slottime, beacon |
+| KISS | IMPL | preamble, txtail, persistence, slottime, ready flow control, `id_callsign` / `id_interval` beacon |
 | AX.25 KISS | IMPL | `AX25KISSInterface`: UI frames (APZRNS to callsign-SSID), TNC preamble/txtail/persistence/slottime, flow control with 5s unlock |
 | Discoverable interfaces (8.14) | MISS | All options and autoconnect |
 | Custom interfaces (8.1) | PART | No plugin API, but hosts can call `rnc_node_add_interface` directly |

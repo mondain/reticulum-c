@@ -1038,6 +1038,96 @@ static void tcp_options_test(void) {
   rnc_node_free(node);
   puts("host TCP option tests passed");
 }
+static void serial_params_test(void) {
+  unsigned rng = 0;
+  uint8_t key[64] = {0};
+  rnc_identity id;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  {
+    int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    rnc_node *node = rnc_node_new(&id, 0, random_bytes, &rng);
+    rnc_host *host = rnc_host_new(node);
+    rnc_host_config cfg = {0};
+    CHECK(master >= 0 && !grantpt(master) && !unlockpt(master));
+    cfg.kind = RNC_HOST_SERIAL;
+    cfg.address = ptsname(master);
+    cfg.serial_baud = 115200;
+    cfg.serial_databits = 9;
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+    cfg.serial_databits = 8;
+    cfg.serial_parity = 'X';
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+    cfg.serial_parity = 'N';
+    cfg.serial_stopbits = 3;
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_INVALID);
+    cfg.serial_databits = 7;
+    cfg.serial_parity = 'E';
+    cfg.serial_stopbits = 2;
+    CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+    rnc_host_free(host);
+    rnc_node_free(node);
+    close(master);
+  }
+  puts("host serial parameter tests passed");
+}
+static void kiss_test(void) {
+  int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  uint8_t key[64] = {0}, ready[RNC_HOST_FRAME_MAX];
+  unsigned rng = 0, i;
+  size_t count = 0, ready_size, k;
+  tnc_frame frames[16];
+  rnc_host_framer parser = {0};
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_packet plain = {0};
+  const uint8_t setup[][2] = {{0x01, 10}, {0x04, 2}, {0x02, 64},
+                              {0x03, 2},  {0x0f, 1}};
+  CHECK(master >= 0 && !grantpt(master) && !unlockpt(master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  CHECK(node);
+  host = rnc_host_new(node);
+  CHECK(host);
+  cfg.kind = RNC_HOST_KISS;
+  cfg.address = ptsname(master);
+  cfg.serial_baud = 115200;
+  cfg.preamble_ms = 100;
+  cfg.flow_control = 1;
+  cfg.id_callsign = "N0CALL";
+  cfg.id_interval = 10;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  plain.flags = 8;
+  plain.data_size = 1;
+  plain.data[0] = 0x11;
+  CHECK(rnc_node_send(node, &plain, 1700000000, 100) == RNC_OK);
+  for (i = 0; i < 100 && count < 6; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, 100 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 6);
+  for (k = 0; k < 5; ++k)
+    CHECK(frames[k].command == setup[k][0] && frames[k].size == 1 &&
+          frames[k].data[0] == setup[k][1]);
+  /* plain KISS carries the packet itself, with no AX.25 header */
+  CHECK(frames[5].command == 0 && frames[5].size < 30 &&
+        frames[5].data[0] == 0x08);
+  CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, 0x0f,
+                              (const uint8_t[]){1}, 1, ready, sizeof(ready),
+                              &ready_size) == RNC_OK);
+  CHECK(write(master, ready, ready_size) == (ssize_t)ready_size);
+  for (i = 0; i < 5; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000001, 11000 + 100u * i) == RNC_OK);
+    count = tnc_read(master, &parser, frames, count, 16);
+  }
+  CHECK(count == 7 && frames[6].command == 0 && frames[6].size == 6 &&
+        !memcmp(frames[6].data, "N0CALL", 6)); /* station ID after 10 s */
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(master);
+  puts("host KISS tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "codecs"))
@@ -1060,6 +1150,10 @@ int main(int argc, char **argv) {
     fast_flap_test();
   else if (!strcmp(argv[1], "tcp_options"))
     tcp_options_test();
+  else if (!strcmp(argv[1], "serial_params"))
+    serial_params_test();
+  else if (!strcmp(argv[1], "kiss"))
+    kiss_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "udp"))
