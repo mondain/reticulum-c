@@ -789,6 +789,87 @@ static void rnode_detect_test(void) {
   CHECK(!status.radio_ready && !status.online);
   puts("host RNode detection tests passed");
 }
+static int tcp_listener(int family, uint16_t *port);
+static int accept_within(rnc_host *host, int listener, uint64_t *now,
+                         unsigned steps);
+/* A WiFi RNode: the same KISS protocol over TCP (port 7633 unless configured),
+ * with a detection ping when the line has been quiet. */
+static void rnode_tcp_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0, i;
+  uint64_t now = 100;
+  uint16_t port = 0;
+  int listener, accepted;
+  detect_tap tap;
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  memset(&tap, 0, sizeof(tap));
+  tap.mode = 2;
+  tap.fw[0] = 1;
+  tap.fw[1] = 74;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  host = node ? rnc_host_new(node) : NULL;
+  listener = tcp_listener(AF_INET, &port);
+  CHECK(host && listener >= 0);
+  cfg.kind = RNC_HOST_RNODE;
+  cfg.address = "tcp://127.0.0.1";
+  cfg.port = port;
+  cfg.frequency = 915000000;
+  cfg.bandwidth = 125000;
+  cfg.tx_power = 10;
+  cfg.spreading_factor = 7;
+  cfg.coding_rate = 5;
+  cfg.reconnect_wait_ms = 100;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 100);
+  CHECK(accepted >= 0);
+  CHECK(!fcntl(accepted, F_SETFL, fcntl(accepted, F_GETFL) | O_NONBLOCK));
+  tap.master = accepted;
+  /* detection, then the radio is configured and acknowledged */
+  for (i = 0; i < 500; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 10) == RNC_OK);
+    detect_drain(&tap);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    if (status.radio_ready)
+      break;
+  }
+  CHECK(status.radio_ready && tap.detects == 1 && tap.config_frames >= 6);
+  /* quiet for longer than 3.5 s: the host pings with a detection request */
+  for (i = 0; i < 400; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 10) == RNC_OK);
+    detect_drain(&tap);
+  }
+  CHECK(tap.detects >= 2 && status.radio_ready);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && status.radio_ready &&
+        status.online);
+  /* the line drops: the host reconnects and detects again */
+  close(accepted);
+  accepted = accept_within(host, listener, &now, 1000);
+  CHECK(accepted >= 0);
+  CHECK(!fcntl(accepted, F_SETFL, fcntl(accepted, F_GETFL) | O_NONBLOCK));
+  memset(&tap, 0, sizeof(tap));
+  tap.mode = 2;
+  tap.fw[0] = 1;
+  tap.fw[1] = 74;
+  tap.master = accepted;
+  for (i = 0; i < 500; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 10) == RNC_OK);
+    detect_drain(&tap);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    if (status.radio_ready)
+      break;
+  }
+  CHECK(status.radio_ready && tap.detects >= 1 && tap.config_frames >= 6);
+  close(accepted);
+  close(listener);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  puts("host RNode TCP tests passed");
+}
 static void radio_extras_test(void) {
   radio_tap tap = {0};
   uint8_t key[64] = {0};
@@ -1302,6 +1383,9 @@ static void tcp_options_test(void) {
       /* BSD kernels report boolean options as their flag bit, not 1 */
       CHECK(getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &value, &n) == 0 &&
             value != 0);
+      /* small frames must not wait for an ACK (Nagle), as in the reference */
+      CHECK(getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &value, &n) == 0 &&
+            value != 0);
 #ifdef __linux__
       CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &value, &n) == 0 &&
             value == 5);
@@ -1646,6 +1730,8 @@ int main(int argc, char **argv) {
     radio_test();
   else if (!strcmp(argv[1], "rnode_detect"))
     rnode_detect_test();
+  else if (!strcmp(argv[1], "rnode_tcp"))
+    rnode_tcp_test();
   else if (!strcmp(argv[1], "rnode_extras"))
     radio_extras_test();
   else if (!strcmp(argv[1], "pipe"))
