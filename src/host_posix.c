@@ -728,8 +728,17 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->kiss_port = c->kiss_port;
   f->flow_control = c->flow_control;
   f->ready = !c->flow_control;
-  f->bitrate =
-      c->bitrate ? c->bitrate : (c->kind == RNC_HOST_RNODE ? 1200u : 10000000u);
+  if (c->bitrate)
+    f->bitrate = c->bitrate;
+  else if (c->kind == RNC_HOST_RNODE) {
+    /* on-air rate as the reference computes it: sf * (4/cr) / (2^sf / bw) */
+    uint64_t den = (uint64_t)c->coding_rate << c->spreading_factor;
+    f->bitrate = (uint32_t)(((uint64_t)c->spreading_factor * 4u *
+                                 c->bandwidth + den / 2u) / den);
+    if (!f->bitrate)
+      f->bitrate = 1u;
+  } else
+    f->bitrate = 10000000u;
   f->status.bitrate = f->bitrate;
   f->status.local = c->local;
   if (c->name) {

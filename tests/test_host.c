@@ -328,6 +328,12 @@ static void radio_test(void) {
   cfg.coding_rate = 5;
   cfg.flow_control = 1;
   CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  {
+    rnc_host_status radio_status;
+    /* reference: sf * (4/cr) / (2^sf / bw) = 5468.75 bit/s at SF7 BW125 CR5 */
+    CHECK(rnc_host_get_status(host, 1, &radio_status) == RNC_OK);
+    CHECK(radio_status.bitrate == 5469u);
+  }
   for (i = 0; i < 1000 && commands < 6; ++i) {
     ssize_t n;
     size_t k;
