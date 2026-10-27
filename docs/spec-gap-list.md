@@ -88,7 +88,8 @@ Largest gaps, in priority order:
 | Status | Feature | Notes |
 | --- | --- | --- |
 | PART | Send via `rnc_node_send`, `rnc_link_send_packet(_hashed)` | |
-| MISS | `PacketReceipt` (status, rtt, timeout, callbacks), `resend`, `get_rssi/get_snr/get_q` | |
+| IMPL | `PacketReceipt` status, rtt, timeout | `rnc_node_send_tracked` (DELIVERED/FAILED event with rtt), `rnc_node_receipt_status` (SENT/DELIVERED/FAILED, culled = RNC_STATE), `rnc_node_receipt_timeout` and timeout 0 for the reference default (6 s per hop plus first-hop 6 s + MTU at the interface rate). Callbacks are events |
+| MISS | `resend`, `get_rssi/get_snr/get_q` | Resend by building and tracking a new packet |
 
 ### Link
 
@@ -216,7 +217,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | Status | Example | Notes |
 | --- | --- | --- |
 | IMPL | Announce (incl. ratcheted, path request), Broadcast/PLAIN, GROUP, Link, Identification (allow-list), Requests/Responses, Channel, Buffer, Filetransfer | |
-| PART | Echo | Encrypt/decrypt done; proofs/receipts missing; no RTT/hops helper |
+| PART | Echo | Encrypt/decrypt, proofs and receipts with RTT done; no hops helper beyond `rnc_node_lookup` |
 | PART | Callback-style APIs | Provided as events instead (service, resource, link) |
 
 The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`. No example exists for announce, broadcast, echo, link, identification, request, channel, buffer or filetransfer (tests cover them).

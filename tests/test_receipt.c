@@ -146,6 +146,95 @@ static void forged(void) {
   CHECK(e.receipt_status == RNC_RECEIPT_FAILED);
   release(&p);
 }
+/* Receipts can be queried after the fact: pending, then delivered or failed
+ * with the RTT, and unknown hashes report as culled. */
+static void status(void) {
+  pair p = setup();
+  rnc_packet d = data_to(&p, "query"), d2 = data_to(&p, "never");
+  rnc_node_event e, proof;
+  rnc_receipt_status st = RNC_RECEIPT_DELIVERED;
+  uint64_t rtt = 99;
+  uint8_t hash[32], hash2[32], unknown[32] = {1};
+  CHECK(rnc_node_set_proof_strategy(p.b, p.dest, RNC_PROVE_ALL) == RNC_OK);
+  CHECK(rnc_node_send_tracked(p.a, &d, 5000, 1000, 100, hash) == RNC_OK);
+  CHECK(rnc_node_receipt_status(p.a, hash, &st, &rtt) == RNC_OK &&
+        st == RNC_RECEIPT_SENT && rtt == 0);
+  CHECK(rnc_node_receipt_status(p.a, unknown, &st, &rtt) == RNC_STATE);
+  CHECK(next(p.a, RNC_NODE_SEND, &e));
+  CHECK(rnc_node_input(p.b, 1, &e.packet, 1000, 130) == RNC_OK);
+  CHECK(next(p.b, RNC_NODE_SEND, &proof));
+  CHECK(rnc_node_input(p.a, 1, &proof.packet, 1000, 160) == RNC_OK);
+  CHECK(next(p.a, RNC_NODE_RECEIPT, &e));
+  CHECK(rnc_node_receipt_status(p.a, hash, &st, &rtt) == RNC_OK &&
+        st == RNC_RECEIPT_DELIVERED && rtt == 60);
+  /* a second packet nobody proves fails but stays queryable */
+  CHECK(rnc_node_set_proof_strategy(p.b, p.dest, RNC_PROVE_NONE) == RNC_OK);
+  CHECK(rnc_node_send_tracked(p.a, &d2, 1000, 1000, 200, hash2) == RNC_OK);
+  CHECK(rnc_node_tick(p.a, 1000, 1300) == RNC_OK);
+  CHECK(next(p.a, RNC_NODE_RECEIPT, &e));
+  CHECK(rnc_node_receipt_status(p.a, hash2, &st, &rtt) == RNC_OK &&
+        st == RNC_RECEIPT_FAILED && rtt == 1100);
+  CHECK(rnc_node_receipt_status(p.a, hash, &st, &rtt) == RNC_OK &&
+        st == RNC_RECEIPT_DELIVERED);
+  release(&p);
+}
+/* Every slot holding a pending receipt blocks a new one; finished receipts
+ * are recycled, oldest first, so tracking never wedges. */
+static void recycle(void) {
+  pair p = setup();
+  rnc_node_event e;
+  rnc_receipt_status st;
+  uint64_t rtt;
+  uint8_t first[32], hash[32];
+  unsigned i;
+  for (i = 0; i < RNC_NODE_RECEIPTS; ++i) {
+    char text[16];
+    rnc_packet d;
+    snprintf(text, sizeof(text), "p%u", i);
+    d = data_to(&p, text);
+    CHECK(rnc_node_send_tracked(p.a, &d, 1000, 1000, 100, i ? hash : first) ==
+          RNC_OK);
+    while (next(p.a, RNC_NODE_SEND, &e)) {
+    }
+  }
+  {
+    rnc_packet d = data_to(&p, "overflow");
+    CHECK(rnc_node_send_tracked(p.a, &d, 1000, 1000, 100, hash) == RNC_AGAIN);
+    CHECK(rnc_node_tick(p.a, 1000, 1200) == RNC_OK);
+    while (next(p.a, RNC_NODE_RECEIPT, &e)) {
+    }
+    CHECK(rnc_node_receipt_status(p.a, first, &st, &rtt) == RNC_OK &&
+          st == RNC_RECEIPT_FAILED);
+    CHECK(rnc_node_send_tracked(p.a, &d, 1000, 1000, 1300, hash) == RNC_OK);
+    CHECK(rnc_node_receipt_status(p.a, hash, &st, &rtt) == RNC_OK &&
+          st == RNC_RECEIPT_SENT);
+  }
+  release(&p);
+}
+/* Timeout 0 asks for the reference default: first hop (one MTU at the
+ * interface rate plus 6 s) and 6 s per hop. */
+static void default_timeout(void) {
+  pair p = setup();
+  rnc_packet d = data_to(&p, "default");
+  rnc_route route;
+  rnc_node_event e;
+  uint64_t timeout = 0, want;
+  uint8_t hash[32], none[16] = {9};
+  CHECK(rnc_node_lookup(p.a, p.dest, 100, &route) == RNC_OK);
+  want = 6000u + 4000000u / 1000000u + 6000u * route.hops;
+  CHECK(rnc_node_receipt_timeout(p.a, p.dest, 100, &timeout) == RNC_OK &&
+        timeout == want);
+  CHECK(rnc_node_receipt_timeout(p.a, none, 100, &timeout) == RNC_STATE);
+  CHECK(rnc_node_send_tracked(p.a, &d, 0, 1000, 100, hash) == RNC_OK);
+  while (next(p.a, RNC_NODE_SEND, &e)) {
+  }
+  CHECK(rnc_node_tick(p.a, 1000, 100 + want - 1) == RNC_OK);
+  CHECK(!next(p.a, RNC_NODE_RECEIPT, &e));
+  CHECK(rnc_node_tick(p.a, 1000, 100 + want) == RNC_OK);
+  CHECK(next(p.a, RNC_NODE_RECEIPT, &e) &&
+        e.receipt_status == RNC_RECEIPT_FAILED);
+  release(&p);
+}
 int main(int argc, char **argv) {
   if (argc != 2)
     return 2;
@@ -157,6 +246,12 @@ int main(int argc, char **argv) {
     prove_app();
   else if (!strcmp(argv[1], "forged"))
     forged();
+  else if (!strcmp(argv[1], "status"))
+    status();
+  else if (!strcmp(argv[1], "recycle"))
+    recycle();
+  else if (!strcmp(argv[1], "default_timeout"))
+    default_timeout();
   else
     return 2;
   return 0;

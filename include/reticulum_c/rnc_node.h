@@ -39,6 +39,7 @@ typedef enum rnc_proof_strategy {
   RNC_PROVE_ALL
 } rnc_proof_strategy;
 typedef enum rnc_receipt_status {
+  RNC_RECEIPT_SENT = 0,
   RNC_RECEIPT_DELIVERED = 1,
   RNC_RECEIPT_FAILED
 } rnc_receipt_status;
@@ -146,8 +147,20 @@ rnc_result rnc_node_prove(rnc_node *node, const uint8_t destination[16],
                           int implicit, uint64_t unix_seconds, uint64_t now_ms);
 /* Send a SINGLE DATA packet and track its delivery proof. A route to the
  * destination is required to learn the signer. Exactly one RNC_NODE_RECEIPT
- * event follows: DELIVERED on a valid proof, FAILED after timeout_ms. The
+ * event follows: DELIVERED on a valid proof, FAILED after timeout_ms (0 = default). The
  * packet hash (also the receipt key) is returned in hash. */
+/* Query a receipt by packet hash after (or before) its event: SENT while
+ * pending, then DELIVERED or FAILED with the round trip time (0 while pending).
+ * Finished receipts stay until their slot is recycled for a newer one, oldest
+ * first; an unknown or recycled hash returns RNC_STATE (the reference's CULLED). */
+rnc_result rnc_node_receipt_status(const rnc_node *node, const uint8_t hash[32],
+                                   rnc_receipt_status *status,
+                                   uint64_t *rtt_ms);
+/* The reference's default receipt timeout for a destination with a known
+ * route: 6 s per hop plus 6 s and one MTU at the first hop's bitrate.
+ * rnc_node_send_tracked uses it when timeout_ms is 0. */
+rnc_result rnc_node_receipt_timeout(rnc_node *node, const uint8_t destination[16],
+                                    uint64_t now, uint64_t *timeout_ms);
 rnc_result rnc_node_send_tracked(rnc_node *node, const rnc_packet *packet,
                                  uint64_t timeout_ms, uint64_t unix_seconds,
                                  uint64_t now_ms, uint8_t hash[32]);
