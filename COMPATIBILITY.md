@@ -220,3 +220,25 @@ here than there), and the sender side was already able to serve windows up to 75
 The in-process test harness now drains link events in batches because a link
 holds RNC_LINK_EVENTS (64) undelivered events and a 75-part window can exceed
 that if a host feeds a whole round before polling.
+
+### Resource timeouts
+
+The fixed 2 s / 60 s timers are replaced by the reference's rate-based ones:
+the receiver waits `factor x outstanding x SDU x 8 / EIFR` (factor 4 until the
+first part, then 2) plus a hashmap-update allowance, 0.25 s grace and 0.5 s per
+retry used, where EIFR is the measured data rate, else the previous resource's
+on the link, else link set-up cost over RTT. The sender's limits follow the
+link RTT (advertisement RTT x 6 + 1 s, part requests RTT x 96 + 78 s then
+cancel, proof RTT x 3 + 10 s). Link set-up cost is a constant 287 bytes rather
+than the exact byte count; it only seeds the first estimate.
+
+Verified by white-box tests against values computed with the reference's own
+formulas, a wiring test (a measured fast rate shortens the wait from the old
+2 s), the existing drop/retry transfer tests, and the embedded reference
+Resource sender/receiver oracle cases (161/161 with the oracle, 131/131
+without, 128/128 under sanitizers with differential cases excluded).
+
+As in the reference, the first request of a transfer waits only about 0.4 s
+because its formula mixes SDU bytes with a bits-per-second rate, so links with
+a round trip above that see a duplicate first request; rates settle after the
+first round.

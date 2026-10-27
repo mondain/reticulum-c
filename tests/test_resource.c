@@ -396,6 +396,30 @@ static void window_shrinks(void) {
     CHECK(rnc_resource_window_max(p.rx) < 10);
     finish(&p);
 }
+/* Once a fast rate has been measured the receiver does not sit out the old
+ * fixed two seconds: silence of a fraction of that already counts as a lost
+ * round. */
+static void timeout_follows_rate(void) {
+    pair p;
+    size_t before;
+    unsigned i;
+    start_big(&p);
+    for (i = 0; i < 100 && rnc_resource_window(p.rx) < 6; i++) {
+        CHECK(rnc_resource_pump(p.tx, p.now) == RNC_OK);
+        CHECK(rnc_resource_pump(p.rx, p.now) == RNC_OK);
+        transfer(&p, p.a, p.b, p.tx, 1);
+        transfer(&p, p.b, p.a, p.rx, 0);
+        p.now += 10;
+        CHECK(rnc_resource_tick(p.tx, p.now) == RNC_OK);
+        CHECK(rnc_resource_tick(p.rx, p.now) == RNC_OK);
+    }
+    before = rnc_resource_window(p.rx);
+    CHECK(before >= 6);
+    p.now += 600; /* well under 2 s */
+    CHECK(rnc_resource_tick(p.rx, p.now) == RNC_OK);
+    CHECK(rnc_resource_window(p.rx) < before);
+    finish(&p);
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     if (!strcmp(argv[1], "transfer"))
@@ -410,6 +434,8 @@ int main(int argc, char **argv) {
         quota_test();
     else if (!strcmp(argv[1], "cancel"))
         cancel_test();
+    else if (!strcmp(argv[1], "timeout_rate"))
+        timeout_follows_rate();
     else if (!strcmp(argv[1], "window_fast"))
         window_fast();
     else if (!strcmp(argv[1], "window_slow"))

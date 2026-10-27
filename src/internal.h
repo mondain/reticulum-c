@@ -30,6 +30,7 @@ struct rnc_link {
     uint64_t outbound, activated, est_timeout, stale_since;
     int stale, teardown, est_set;
     size_t last_resource_window;
+    uint64_t last_resource_eifr;
     size_t local_mtu, mtu, mdu;
     uint16_t tx_next, rx_next;
     size_t tx_window, tx_limit, tx_min, tx_tier, tx_good;
