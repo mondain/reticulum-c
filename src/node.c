@@ -140,7 +140,7 @@ struct rnc_node {
   rnc_identity identity; /* kept for tunnel synthesis when it has a key */
   int has_identity;
   node_tunnel tunnels[RNC_NODE_TUNNELS];
-  int transport;
+  int transport, explicit_proofs;
   rnc_random_fn random;
   void *random_context;
   uint64_t now;
@@ -1721,6 +1721,15 @@ rnc_result rnc_node_receipt_timeout(rnc_node *n, const uint8_t destination[16],
                      : 0u);
   return RNC_OK;
 }
+rnc_result rnc_node_set_implicit_proofs(rnc_node *n, int implicit) {
+  if (!n || (implicit != 0 && implicit != 1))
+    return RNC_INVALID;
+  n->explicit_proofs = !implicit;
+  return RNC_OK;
+}
+int rnc_node_implicit_proofs(const rnc_node *n) {
+  return n ? !n->explicit_proofs : 1;
+}
 rnc_result rnc_node_send_tracked(rnc_node *n, const rnc_packet *packet,
                                  uint64_t timeout, uint64_t unix_seconds,
                                  uint64_t now, uint8_t hash[32]) {
@@ -1878,7 +1887,7 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
     if (type == RNC_DATA && destination == RNC_SINGLE &&
         d->proof == RNC_PROVE_ALL && d->identity.has_private) {
       rnc_packet proof;
-      r = make_proof(d, &p, 1, &proof);
+      r = make_proof(d, &p, !n->explicit_proofs, &proof);
       if (r == RNC_OK)
         emit(n, RNC_NODE_SEND, ingress, &proof);
     }

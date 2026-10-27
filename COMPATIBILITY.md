@@ -521,3 +521,26 @@ reference rnsh in both directions. The reference listener's pipe mode fails in
 this test environment (its transmit path reports a bad file descriptor after it
 starts the child), so that direction runs the client on a terminal, which uses
 the reference's pty mode.
+
+## Configuration knobs (`feature/config-knobs`)
+
+- `outgoing = No` on an interface: it still receives, but nothing is sent on it
+  (`rnc_host_config.no_output`). Connections a listener accepts inherit it.
+- `use_implicit_proof = No` in `[reticulum]`: a destination set to prove every
+  packet answers with the 96 byte explicit proof (packet hash and signature)
+  instead of the 64 byte implicit one (`rnc_node_set_implicit_proofs`). The
+  sender accepts both either way.
+- `panic_on_interface_error`: an interface that cannot be opened (a port already
+  in use, a missing serial device) is now logged and skipped, as the reference
+  does by default, and the daemon carries on with the others; with the option
+  set the daemon exits. Before, any such interface stopped the daemon. A TCP
+  client that cannot reach its peer was never affected: it keeps retrying.
+
+Not done: `link_mtu_discovery`. The reference signals the next hop's hardware MTU
+when it opens a link and so can use packets larger than 500 bytes on TCP; links
+here stay at 500 bytes (and peers that signal more are clamped to that), which
+interoperates but moves bulk data in smaller packets.
+
+Evidence: a host test (receive-only client, the same client with output on as a
+control, and a listener's accepted connection), a receipt test for the explicit
+proof format, and daemon tests for the config keys and for skip versus panic.

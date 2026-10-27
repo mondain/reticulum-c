@@ -145,6 +145,11 @@ rnc_result rnc_node_set_proof_strategy(rnc_node *node,
 rnc_result rnc_node_prove(rnc_node *node, const uint8_t destination[16],
                           const rnc_packet *packet, uint32_t interface_id,
                           int implicit, uint64_t unix_seconds, uint64_t now_ms);
+/* The reference's use_implicit_proof (default on): PROVE_ALL answers with the
+ * 64 byte implicit proof, or with the 96 byte explicit proof (packet hash plus
+ * signature) when switched off. The receiver accepts both. */
+rnc_result rnc_node_set_implicit_proofs(rnc_node *node, int implicit);
+int rnc_node_implicit_proofs(const rnc_node *node);
 /* Send a SINGLE DATA packet and track its delivery proof. A route to the
  * destination is required to learn the signer. Exactly one RNC_NODE_RECEIPT
  * event follows: DELIVERED on a valid proof, FAILED after timeout_ms (0 = default). The

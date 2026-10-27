@@ -101,6 +101,9 @@ typedef struct rnc_host_config {
    * instead of HDLC. prefer_ipv6 picks an IPv6 address when a name has both. */
   unsigned reconnect_wait_ms, max_reconnect_tries, connect_timeout_ms;
   int kiss_framing, prefer_ipv6;
+  /* The reference's `outgoing = No`: the interface receives but nothing is
+   * sent on it. Connections a listener accepts inherit it. */
+  int no_output;
 } rnc_host_config;
 typedef struct rnc_host_status {
   uint32_t interface_id, parent_id;

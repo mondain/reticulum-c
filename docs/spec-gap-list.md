@@ -64,7 +64,7 @@ Largest gaps, in priority order:
 | Status | Feature | Notes |
 | --- | --- | --- |
 | PART | Shared instance and RPC server (HMAC, MessagePack GET queries) | Several query names (`blackholed_identities`, `rate_table`, `path_table` fields) are decoded but the host supplies the data; the first two return empty |
-| MISS | `get_instance`, `transport_enabled`, `link_mtu_discovery`, `should_use_implicit_proof` accessors | |
+| PART | `get_instance`, `transport_enabled`, `link_mtu_discovery`, `should_use_implicit_proof` accessors | `rnc_node_implicit_proofs` / `rnc_node_set_implicit_proofs` cover `should_use_implicit_proof`; the rest are Python-instance accessors or concern link MTU discovery (not implemented, links stay at the 500 byte MTU) |
 
 ### Identity
 
@@ -174,7 +174,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | Status | Feature | Notes |
 | --- | --- | --- |
 | IMPL | `type`, `enabled` (daemon), `name`, `bitrate`, `mtu`, IFAC (`networkname`, `passphrase`, `ifac_size`) | |
-| MISS | `outgoing`, `bootstrap_only`, `ifac_netname` / `ifac_netkey` aliases | |
+| PART | `outgoing`, `bootstrap_only`, `ifac_netname` / `ifac_netkey` aliases | `outgoing = No` (receive only, inherited by accepted connections) and `bootstrap_only` are implemented; the `ifac_netname` / `ifac_netkey` aliases are not (the reference reads `network_name`/`networkname` and `passphrase`/`pass_phrase`, which the daemon accepts) |
 | IMPL | Interface modes: full, gateway, access_point, roaming, boundary | `rnc_node_interface_policy`; announce propagation rules follow the reference behavior as recalled, (the manual's table is an image, so the reference source was used). Rules verified against the pinned reference `Transport.py`. Gateway/AP/roaming interfaces now search for unknown paths on behalf of clients. Config keys `mode`/`interface_mode` in the daemon |
 | IMPL | Announce rate control: `announce_cap` | Per-interface via policy and daemon `announce_cap` (percent); default 2% |
 | IMPL | `announce_rate_target` / `grace` / `penalty` | Per-interface policy and daemon keys; blocks rebroadcast only, paths still learned; bounded 128-entry table |
@@ -194,7 +194,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | IMPL | `loglevel` (`[logging]`), `logdestination` (stdout, stderr or a file that rolls over at 5 MiB), `logfile` | Library hook `rnc_log.h`; the daemon formats `[time] [Level] module: message` |
 | PART | `instance_name` | Accepted; the shared instance is TCP only, so it names nothing |
 | IMPL | `respond_to_probes` | Daemon registers `rnstransport.probe` with PROVE_ALL, takes no links; reported as `probe_responder` in interface stats |
-| MISS | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | |
+| PART | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | `panic_on_interface_error` and `use_implicit_proof` implemented; `link_mtu_discovery` is not (links stay at 500 bytes) |
 | IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
 | IMPL | `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval` | |
 | IMPL | `network_identity` | |
@@ -212,7 +212,9 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | PART | `rncp` | `reticulum-c-cp` (examples/reticulum_cp.c) over the new `rnc_transfer` library: listen (`-l`, `-a`, `-n`, `-s`, `-O`, `-F`, `-j`, `-b`), push and fetch (`-f`), compatible with the reference in all four directions. Not implemented: identity allow-list files, `-p`, `-P`, `-C`, `-S`, files over 16 MiB (held in memory), the reference's `--config` (it attaches over `--connect HOST:PORT`) |
 | PART | `rnx` | `reticulum-c-x` (examples/reticulum_x.c): listener with an allow list and client (`-w`, `-m`, `-d`, `-N`, `--stdin`, `--stdout`, `--stderr`), compatible with the reference in both directions. Not implemented: accept-anyone (`-n`, deliberately), interactive mode (`-x`), `-W`, `-p`, allowed-identity files, `--config`; a command is stopped after 25 s and requests/responses are limited to about 64 kB |
 | PART | `rnsh` | `reticulum-c-sh` (examples/reticulum_sh.c): listener (allow list, `-C`, `-A`, default program) and initiator (`-m`, `-N`, `-w`, terminal raw mode, window size, `~.`) speaking protocol 1, compatible with the reference rnsh in both directions. Not implemented: accept-anyone (`-n`, deliberately), line-interactive mode, allowed-identities file, `-p`, `-s`, compression of sent stream data, terminal attribute application on the pty |
-| MISS | `rnodeconf` | |
+| MISS | `rnodeconf` | Needs RNode hardware to test |
+| N/A | `rnir`, `rnpkg`, `RNS.Resolver` | Stubs in the pinned reference: they only start Reticulum or `pass`, so there is nothing to implement |
+| MISS | `rngit` | Git over Reticulum (about 10,000 lines of Python with pages, media and highlighting); not started |
 | IMPL | Remote management, blackhole publishing and subscribing, interface discovery | |
 
 ## 6. Examples (manual ch13)

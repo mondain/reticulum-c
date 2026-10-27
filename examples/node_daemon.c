@@ -78,7 +78,7 @@ typedef struct interface_config {
 } interface_config;
 typedef struct config {
   int transport, share, share_tcp, remote_management, publish_blackhole,
-      respond_to_probes;
+      respond_to_probes, explicit_proofs, panic_on_interface_error;
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
   char network_identity[512]; /* identity file path, empty = none */
@@ -371,6 +371,12 @@ static int interface_key(interface_config *f, const char *key,
       f->host.kiss_framing = b;
     else
       f->host.prefer_ipv6 = b;
+    return 1;
+  }
+  if (!strcmp(key, "outgoing")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->host.no_output = !b;
     return 1;
   }
   if (!strcmp(key, "block_fast_flapping")) {
@@ -960,6 +966,10 @@ static int read_config(const char *path, config *c) {
           c->publish_blackhole = b;
         else if (!strcmp(s, "respond_to_probes"))
           c->respond_to_probes = b;
+        else if (!strcmp(s, "use_implicit_proof"))
+          c->explicit_proofs = !b;
+        else if (!strcmp(s, "panic_on_interface_error"))
+          c->panic_on_interface_error = b;
         else if (!strcmp(s, "discover_interfaces"))
           c->discover_interfaces = b;
         else if (!strcmp(s, "autoconnect_unverified_implementations"))
@@ -1295,6 +1305,8 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
   *host = *node ? rnc_host_new(*node) : NULL;
   if (!*host)
     goto fail;
+  if (c->explicit_proofs)
+    (void)rnc_node_set_implicit_proofs(*node, 0);
   for (i = 0; i < c->count; ++i)
     if (c->interfaces[i].enabled) {
       rnc_host_status status;
@@ -1302,7 +1314,11 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
                        &c->interfaces[i].host) != RNC_OK) {
         fprintf(stderr, "Cannot open interface %s: %s\n", c->interfaces[i].name,
                 strerror(errno));
-        goto fail;
+        /* the reference logs the error and carries on without the interface
+         * unless panic_on_interface_error is set */
+        if (c->panic_on_interface_error)
+          goto fail;
+        continue;
       }
       if (rnc_host_get_status(*host, c->interfaces[i].interface_id, &status) ==
           RNC_OK)

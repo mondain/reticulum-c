@@ -67,6 +67,19 @@ static void cli(const char *exe) {
   CHECK(run_check(exe, path) != 0);
   config_file(path, "[interfaces]\n[[Bad]]\ntype=UnknownInterface\n");
   CHECK(run_check(exe, path) != 0);
+  config_file(path,
+              "[reticulum]\nuse_implicit_proof = No\npanic_on_interface_error = "
+              "No\n[interfaces]\n[[T]]\ntype = TCPServerInterface\n"
+              "listen_port = 0\noutgoing = No\n");
+  CHECK(run_check(exe, path) == 0);
+  config_file(path, "[reticulum]\nuse_implicit_proof = maybe\n");
+  CHECK(run_check(exe, path) != 0);
+  config_file(path, "[reticulum]\npanic_on_interface_error = maybe\n");
+  CHECK(run_check(exe, path) != 0);
+  config_file(path,
+              "[interfaces]\n[[T]]\ntype = TCPServerInterface\n"
+              "listen_port = 0\noutgoing = maybe\n");
+  CHECK(run_check(exe, path) != 0);
   CHECK(!unlink(path) && !rmdir(dir));
   puts("node CLI tests passed");
 }
@@ -3381,6 +3394,60 @@ static void sh_reference(const char *exe, const char *sh, const char *python) {
   remove_tree(dir);
   puts("sh reference tests passed");
 }
+
+/* An interface that cannot be opened is skipped (the reference's default) and
+ * the rest keep working; panic_on_interface_error makes it fatal. */
+static void panic_on_interface(const char *exe) {
+  char dir[] = "/tmp/rnc-node-panic-XXXXXX", cfg[256], key[256], admin[256],
+       text[2048], identity[33], reply[4096];
+  struct sockaddr_in addr;
+  socklen_t size = sizeof(addr);
+  int hold = socket(AF_INET, SOCK_STREAM, 0), fd, status = 0;
+  unsigned busy, tries;
+  pid_t p;
+  CHECK(hold >= 0 && mkdtemp(dir));
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  CHECK(!bind(hold, (struct sockaddr *)&addr, sizeof(addr)) &&
+        !listen(hold, 4) && !getsockname(hold, (struct sockaddr *)&addr, &size));
+  busy = ntohs(addr.sin_port);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[Busy]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n[[Fine]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = 0\n",
+                 busy) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, identity);
+  admin_command(admin, "STATUS", reply, sizeof(reply));
+  CHECK(strstr(reply, "interface id="));
+  stop(p, fd);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "panic_on_interface_error = Yes\n[interfaces]\n[[Busy]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = %u\n",
+                 busy) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  for (tries = 0; tries < 100; ++tries) {
+    struct timespec t = {0, 100000000};
+    if (waitpid(p, &status, WNOHANG) == p)
+      break;
+    nanosleep(&t, NULL);
+  }
+  CHECK(tries < 100 && WIFEXITED(status) && WEXITSTATUS(status) != 0);
+  close(fd);
+  close(hold);
+  remove_tree(dir);
+  puts("node panic tests passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 4 || argc == 5 || argc == 6);
   if (!strcmp(argv[2], "cli"))
@@ -3392,6 +3459,8 @@ int main(int argc, char **argv) {
     sh_reference(argv[1], argv[3], argv[5]);
   else if (!strcmp(argv[2], "x_ref") && argc == 6)
     x_reference(argv[1], argv[3], argv[5]);
+  else if (!strcmp(argv[2], "panic") && argc == 3)
+    panic_on_interface(argv[1]);
   else if (!strcmp(argv[2], "sh_tools") && argc == 4)
     sh_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "x_tools") && argc == 4)

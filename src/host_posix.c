@@ -248,7 +248,7 @@ typedef struct host_interface {
   unsigned tries;
   uint64_t connect_deadline;
   char ax_call[7];
-  int flap_on, flap_pending;
+  int flap_on, flap_pending, no_output;
   uint64_t flap_threshold_ms, flap_expiry_ms, spawned_at;
   unsigned flap_grace;
   char peer_ip[INET6_ADDRSTRLEN];
@@ -1053,6 +1053,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->ready = !c->flow_control;
   f->kiss = c->kiss_framing;
   f->flap_on = c->fast_flap.enabled;
+  f->no_output = c->no_output;
   f->flap_threshold_ms =
       (c->fast_flap.threshold_seconds ? c->fast_flap.threshold_seconds : 20u) *
       1000u;
@@ -1310,7 +1311,7 @@ static rnc_result pump_node(rnc_host *h) {
     }
     if (e.type == RNC_NODE_SEND) {
       f = find_interface(h, e.interface_id);
-      if (!f || !f->node_added) {
+      if (!f || !f->node_added || f->no_output) {
         h->held = 0;
         continue;
       }
@@ -1420,6 +1421,7 @@ static void accept_tcp(rnc_host *h, host_interface *parent) {
   f->accepted = 1;
   f->spawned_at = h->now;
   f->flap_pending = parent->flap_on;
+  f->no_output = parent->no_output;
   (void)snprintf(f->peer_ip, sizeof(f->peer_ip), "%s", ip);
   f->status.kind = RNC_HOST_TCP_CONNECT;
   f->status.interface_id = h->next_id++;
