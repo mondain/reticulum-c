@@ -1278,6 +1278,7 @@ static void route_reply(admin_client *c, const rnc_route *r) {
   append(c, " interface=%u hops=%u expires=%llu\n", r->interface_id,
          (unsigned)r->hops, (unsigned long long)r->expires_ms);
 }
+static void discovery_list(admin_client *c, uint64_t unix_seconds);
 static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
                         const rnc_identity *id, const char *state,
                         uint64_t now) {
@@ -1362,6 +1363,8 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
       append(c, " until=%llu reason=%s\n", (unsigned long long)e.until,
              e.reason);
     }
+  } else if (!strcmp(request, "DISCOVERED")) {
+    discovery_list(c, (uint64_t)time(NULL));
   } else if (!strcmp(request, "NETWORK")) {
     if (network_identity_hash()) {
       append(c, "network identity=");
@@ -1376,7 +1379,7 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
                ? "OK"
                : "ERROR no state path or write failed");
   } else
-    append(c, "ERROR commands: STATUS ROUTES PATH <32hex> BLACKHOLE UNBLACKHOLE BLACKHOLES NETWORK SAVE\n");
+    append(c, "ERROR commands: STATUS ROUTES PATH <32hex> BLACKHOLE UNBLACKHOLE BLACKHOLES NETWORK DISCOVERED SAVE\n");
   if (!c->output_size)
     append(c, "EMPTY\n");
 }
@@ -1521,6 +1524,9 @@ int main(int argc, char **argv) {
       if (snprintf(blackhole_path, sizeof(blackhole_path), "%s.blackhole",
                    state_path) >= (int)sizeof(blackhole_path))
         blackhole_path[0] = 0;
+      if (snprintf(discovery_dir, sizeof(discovery_dir), "%s.discovery",
+                   state_path) >= (int)sizeof(discovery_dir))
+        discovery_dir[0] = 0;
     }
     else if (!strcmp(argv[i], "--version")) {
       puts("reticulum-c-node 0.2 (experimental C router; own admin protocol)");
@@ -1583,6 +1589,7 @@ int main(int argc, char **argv) {
                (mgmt.responder || mgmt.requester)) {
         mgmt_local_event(&event.node, (uint64_t)time(NULL), monotonic_ms());
       } else if (event.node.type == RNC_NODE_ANNOUNCE) {
+        discovery_heard(&event.node, (uint64_t)time(NULL));
         printf("announce destination=");
         print_hex(event.node.route.destination, 16);
         printf(" interface=%u hops=%u\n", event.interface_id,

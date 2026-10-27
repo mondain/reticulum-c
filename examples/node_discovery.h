@@ -3,6 +3,7 @@
  * listening for other nodes' announces. Included by node_daemon.c after
  * node_mgmt.h. */
 #include <reticulum_c/rnc_discovery.h>
+#include <dirent.h>
 #include <poll.h>
 #include <sys/wait.h>
 #define DISCOVERY_IMPL_NAME "reticulum-c"
@@ -21,8 +22,20 @@ typedef struct discovery_job {
   unsigned cost;
   int encrypt;
 } discovery_job;
+#define DISCOVERED_MAX 256u
+#define DISCOVERED_INVALID_CACHE 64u
+typedef struct discovered_entry {
+  int used;
+  rnc_discovery_record record;
+} discovered_entry;
 typedef struct discovery_state {
-  int announcing;
+  int announcing, listening;
+  unsigned required_value;
+  const config *settings_ref;
+  char storage[1100];
+  discovered_entry table[DISCOVERED_MAX];
+  uint8_t invalid[DISCOVERED_INVALID_CACHE][32];
+  size_t invalid_next;
   rnc_identity identity; /* network identity if configured, else transport's */
   rnc_identity network;  /* the network identity (for encryption) */
   int has_network;
@@ -31,6 +44,8 @@ typedef struct discovery_state {
   discovery_job job;
 } discovery_state;
 static discovery_state disc;
+/* where discovered interfaces persist; set from --state, overridable in config */
+static char discovery_dir[1100];
 static void discovery_stop(void) {
   if (disc.job.workblock) {
     OPENSSL_cleanse(disc.job.workblock, disc.job.work_size);
@@ -193,6 +208,7 @@ static int discovery_describe(const interface_config *f, rnc_discovery_info *inf
   (void)c;
   return 1;
 }
+static int discovered_load(void);
 static int discovery_start(const config *c, const rnc_identity *transport,
                            const rnc_identity *network, rnc_node *node) {
   size_t i;
@@ -200,13 +216,23 @@ static int discovery_start(const config *c, const rnc_identity *transport,
   discovery_stop();
   for (i = 0; i < c->count; ++i)
     any |= c->interfaces[i].enabled && c->interfaces[i].discoverable;
-  if (!any)
-    return 1;
-  disc.identity = network ? *network : *transport;
   if (network) {
     disc.network = *network;
     disc.has_network = 1;
   }
+  disc.listening = c->discover_interfaces;
+  disc.required_value = c->required_discovery_value
+                            ? c->required_discovery_value
+                            : RNC_DISCOVERY_DEFAULT_STAMP_VALUE;
+  (void)snprintf(disc.storage, sizeof(disc.storage), "%s",
+                 c->discovery_storage[0] ? c->discovery_storage : discovery_dir);
+  if (disc.listening && !discovered_load()) {
+    discovery_stop();
+    return 0;
+  }
+  if (!any)
+    return 1;
+  disc.identity = network ? *network : *transport;
   if (rnc_node_add_destination(node, &disc.identity,
                                "rnstransport.discovery.interface", NULL, 0,
                                disc.destination) != RNC_OK) {
@@ -312,4 +338,223 @@ static void discovery_step(uint64_t unix_seconds, uint64_t now) {
   }
   if (best < c->count)
     discovery_begin(best, now);
+}
+
+/* ---- listening ---- */
+static void discovered_path(char *out, size_t size,
+                            const rnc_discovery_info *info) {
+  uint8_t hash[32];
+  size_t i, n;
+  (void)rnc_discovery_hash(info, hash);
+  n = (size_t)snprintf(out, size, "%s/", disc.storage);
+  for (i = 0; i < 32 && n + 3 <= size; ++i)
+    n += (size_t)snprintf(out + n, size - n, "%02x", hash[i]);
+}
+static int discovered_same(const rnc_discovery_info *a, const rnc_discovery_info *b) {
+  return !memcmp(a->transport_id, b->transport_id, 16) && !strcmp(a->name, b->name);
+}
+static int discovered_supported(const char *type) {
+  return !strcmp(type, "BackboneInterface") || !strcmp(type, "TCPServerInterface") ||
+         !strcmp(type, "I2PInterface") || !strcmp(type, "RNodeInterface") ||
+         !strcmp(type, "WeaveInterface") || !strcmp(type, "KISSInterface");
+}
+static int discovered_load(void) {
+  DIR *dir;
+  struct dirent *e;
+  if (!disc.storage[0])
+    return 1;
+  dir = opendir(disc.storage);
+  if (!dir)
+    return errno == ENOENT; /* nothing heard yet */
+  while ((e = readdir(dir)) != NULL) {
+    char path[1300];
+    uint8_t data[RNC_DISCOVERY_RECORD_MAX];
+    struct stat st;
+    int fd;
+    ssize_t n;
+    size_t slot;
+    rnc_discovery_record rec;
+    if (e->d_name[0] == '.' ||
+        snprintf(path, sizeof(path), "%s/%s", disc.storage, e->d_name) >=
+            (int)sizeof(path))
+      continue;
+    fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+      continue;
+    n = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+                st.st_size <= (off_t)sizeof(data)
+            ? read(fd, data, sizeof(data))
+            : -1;
+    close(fd);
+    if (n <= 0 || rnc_discovery_record_unpack(data, (size_t)n, &rec) != RNC_OK)
+      continue; /* a corrupt file is left for the user to look at */
+    for (slot = 0; slot < DISCOVERED_MAX && disc.table[slot].used; ++slot) {
+    }
+    if (slot < DISCOVERED_MAX) {
+      disc.table[slot].used = 1;
+      disc.table[slot].record = rec;
+    }
+  }
+  closedir(dir);
+  return 1;
+}
+static void discovered_save(const rnc_discovery_record *rec) {
+  uint8_t data[RNC_DISCOVERY_RECORD_MAX];
+  size_t n;
+  char path[1300];
+  if (!disc.storage[0])
+    return;
+  (void)mkdir(disc.storage, 0700);
+  discovered_path(path, sizeof(path), &rec->info);
+  if (rnc_discovery_record_pack(rec, data, sizeof(data), &n) == RNC_OK)
+    (void)write_file_atomic(path, data, n);
+}
+static int discovered_remove_reason(const discovered_entry *e, double now,
+                                    const config *c, rnc_node *node,
+                                    uint64_t unix_seconds) {
+  const rnc_discovery_record *r = &e->record;
+  size_t i;
+  int listed = 0;
+  if (rnc_discovery_status(now - r->last_heard) < 0)
+    return 1;
+  if (c->disc_source_count) {
+    for (i = 0; i < c->disc_source_count; ++i)
+      listed |= !memcmp(c->disc_sources[i], r->network_id, 16);
+    if (!listed)
+      return 1;
+  }
+  if (!discovered_supported(r->info.type))
+    return 1;
+  if (rnc_node_is_blackholed(node, r->network_id, unix_seconds) ||
+      rnc_node_is_blackholed(node, r->info.transport_id, unix_seconds))
+    return 1;
+  if (r->info.reachable_on[0] &&
+      !rnc_discovery_is_ip_address(r->info.reachable_on) &&
+      !rnc_discovery_is_hostname(r->info.reachable_on))
+    return 1;
+  return 0;
+}
+/* Drops entries the reference would drop when listing. */
+static void discovered_prune(uint64_t unix_seconds) {
+  size_t i;
+  for (i = 0; i < DISCOVERED_MAX; ++i) {
+    char path[1300];
+    if (!disc.table[i].used ||
+        !discovered_remove_reason(&disc.table[i], (double)unix_seconds,
+                                  &mgmt.settings, mgmt.node, unix_seconds))
+      continue;
+    if (disc.storage[0]) {
+      discovered_path(path, sizeof(path), &disc.table[i].record.info);
+      (void)unlink(path);
+    }
+    disc.table[i].used = 0;
+  }
+}
+/* Handles an announce event from the node: stores it if it is a valid, stamped
+ * discovery announce from an authorised network. */
+static void discovery_heard(const rnc_node_event *event, uint64_t unix_seconds) {
+  const rnc_announce *a = &event->route.announce;
+  const config *c = &mgmt.settings;
+  rnc_discovery_record rec;
+  uint8_t stamp[RNC_STAMP_SIZE], digest[32];
+  unsigned value = 0;
+  size_t i, slot = DISCOVERED_MAX, empty = DISCOVERED_MAX;
+  rnc_result r;
+  if (!disc.listening || !rnc_announce_matches_aspect(a, "rnstransport.discovery.interface"))
+    return;
+  if (c->disc_source_count) {
+    int listed = 0;
+    for (i = 0; i < c->disc_source_count; ++i)
+      listed |= !memcmp(c->disc_sources[i], a->identity.hash, 16);
+    if (!listed)
+      return;
+  }
+  if (rnc_hash(a->app_data, a->app_size, digest) != RNC_OK)
+    return;
+  for (i = 0; i < DISCOVERED_INVALID_CACHE; ++i)
+    if (!memcmp(disc.invalid[i], digest, 32))
+      return; /* already rejected for its stamp */
+  r = rnc_discovery_parse(a->app_data, a->app_size, disc.required_value,
+                          disc.has_network ? &disc.network : NULL, &rec.info,
+                          stamp, &value);
+  if (r == RNC_AUTH) {
+    memcpy(disc.invalid[disc.invalid_next++ % DISCOVERED_INVALID_CACHE], digest, 32);
+    return;
+  }
+  if (r != RNC_OK || !discovered_supported(rec.info.type))
+    return;
+  memcpy(rec.stamp, stamp, RNC_STAMP_SIZE);
+  rec.value = value;
+  memcpy(rec.network_id, a->identity.hash, 16);
+  rec.hops = event->route.hops;
+  rec.received = rec.last_heard = rec.discovered = (double)unix_seconds;
+  rec.heard_count = 0;
+#ifdef __APPLE__
+  i = 0; /* no Backbone on macOS: connect as a plain TCP client */
+#else
+  i = 1;
+#endif
+  if (rnc_discovery_config_entry(&rec.info, (int)i, rec.config_entry,
+                                 sizeof(rec.config_entry)) != RNC_OK)
+    rec.config_entry[0] = 0;
+  for (i = 0; i < DISCOVERED_MAX; ++i) {
+    if (disc.table[i].used && discovered_same(&disc.table[i].record.info, &rec.info))
+      slot = i;
+    else if (!disc.table[i].used && empty == DISCOVERED_MAX)
+      empty = i;
+  }
+  if (slot < DISCOVERED_MAX) {
+    rec.discovered = disc.table[slot].record.discovered;
+    rec.heard_count = disc.table[slot].record.heard_count + 1u;
+  } else if (empty < DISCOVERED_MAX)
+    slot = empty;
+  else
+    return; /* table full; pruning frees slots on the next listing */
+  disc.table[slot].used = 1;
+  disc.table[slot].record = rec;
+  discovered_save(&rec);
+  printf("discovered %s \"%s\" value=%u hops=%u\n", rec.info.type,
+         rec.info.name, value, rec.hops);
+}
+/* Admin listing, most available and best-stamped first. */
+static void discovery_list(admin_client *c, uint64_t unix_seconds) {
+  size_t order[DISCOVERED_MAX], count = 0, i, j;
+  discovered_prune(unix_seconds);
+  for (i = 0; i < DISCOVERED_MAX; ++i)
+    if (disc.table[i].used)
+      order[count++] = i;
+  for (i = 1; i < count; ++i) /* insertion sort, descending */
+    for (j = i; j > 0; --j) {
+      const rnc_discovery_record *x = &disc.table[order[j]].record,
+                                 *y = &disc.table[order[j - 1]].record;
+      int sx = rnc_discovery_status((double)unix_seconds - x->last_heard),
+          sy = rnc_discovery_status((double)unix_seconds - y->last_heard);
+      if (sx > sy || (sx == sy && (x->value > y->value ||
+                                   (x->value == y->value && x->last_heard > y->last_heard)))) {
+        size_t t = order[j];
+        order[j] = order[j - 1];
+        order[j - 1] = t;
+      } else
+        break;
+    }
+  for (i = 0; i < count; ++i) {
+    const rnc_discovery_record *r = &disc.table[order[i]].record;
+    int status = rnc_discovery_status((double)unix_seconds - r->last_heard);
+    append(c, "discovered name=%s type=%s status=%s hops=%u value=%u heard=%u",
+           r->info.name, r->info.type,
+           status == RNC_DISCOVERY_STATUS_AVAILABLE ? "available"
+           : status == RNC_DISCOVERY_STATUS_UNKNOWN ? "unknown" : "stale",
+           r->hops, r->value, (unsigned)r->heard_count);
+    append(c, " transport_id=");
+    for (j = 0; j < 16; ++j)
+      append(c, "%02x", r->info.transport_id[j]);
+    append(c, " network_id=");
+    for (j = 0; j < 16; ++j)
+      append(c, "%02x", r->network_id[j]);
+    if (r->info.reachable_on[0])
+      append(c, " reachable_on=%s", r->info.reachable_on);
+    if (r->info.has_port)
+      append(c, " port=%u", (unsigned)r->info.port);
+    append(c, "\n");
+  }
 }
