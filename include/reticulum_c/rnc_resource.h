@@ -56,6 +56,14 @@ rnc_result rnc_resource_read(const rnc_resource *resource, void *data, size_t ca
 rnc_result rnc_resource_metadata(const rnc_resource *resource, void *data, size_t capacity,
                                  size_t *written);
 int rnc_resource_is_complete(const rnc_resource *resource);
+/* Receive window in parts (0 if not receiving) and its current ceiling. The
+ * window starts at 4 (or where the link's previous incoming resource ended),
+ * grows one part per completed request round up to the ceiling, and follows the
+ * reference's rate classes: ceiling 10 normally, 75 after 4 fast rounds (above
+ * 6.25 kB/s), 4 after 2 very slow rounds (below 250 B/s). A timed-out round
+ * shrinks both. */
+size_t rnc_resource_window(const rnc_resource *resource);
+size_t rnc_resource_window_max(const rnc_resource *resource);
 /* Parse a standard advertisement without admitting or allocating a transfer. */
 rnc_result rnc_resource_inspect(const uint8_t *data, size_t size, size_t *transfer_size,
                                 size_t *data_size, uint8_t hash[32], uint8_t original_hash[32],

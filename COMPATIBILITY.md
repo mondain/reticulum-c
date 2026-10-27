@@ -217,3 +217,47 @@ file needs `chmod 600` first.
 
 The network identity's use for interface discovery (encrypted discovery
 announces) is not implemented; only the identity and its destinations are.
+
+## Resource window growth (`feature/resource-window`)
+
+The receiving side now follows the reference's window model (Resource.py):
+start at 4 or at the link's previous incoming window, grow by one part per
+completed request round up to a ceiling of 10, raise the ceiling to 75 after 4
+rounds above 6.25 kB/s, lower it to 4 after 2 rounds below 250 B/s, and back off
+the window and ceiling when a round times out. `rnc_resource_window()` and
+`rnc_resource_window_max()` expose the state; `rnc_link_last_resource_window()`
+carries it between resources on a link.
+
+Local Linux evidence: 159/159 with the pinned RNS oracle (includes the embedded
+reference Resource sender against this receiver), 129/129 without it, sanitizers
+clean (differential cases excluded). Native tests drive the fast, slow, very
+slow and timeout classes with a controlled clock.
+
+Not changed: the retry timer is still a fixed 2 s (the reference derives part
+timeouts from its expected inflight rate, so very slow links retry more often
+here than there), and the sender side was already able to serve windows up to 75.
+The in-process test harness now drains link events in batches because a link
+holds RNC_LINK_EVENTS (64) undelivered events and a 75-part window can exceed
+that if a host feeds a whole round before polling.
+
+### Resource timeouts
+
+The fixed 2 s / 60 s timers are replaced by the reference's rate-based ones:
+the receiver waits `factor x outstanding x SDU x 8 / EIFR` (factor 4 until the
+first part, then 2) plus a hashmap-update allowance, 0.25 s grace and 0.5 s per
+retry used, where EIFR is the measured data rate, else the previous resource's
+on the link, else link set-up cost over RTT. The sender's limits follow the
+link RTT (advertisement RTT x 6 + 1 s, part requests RTT x 96 + 78 s then
+cancel, proof RTT x 3 + 10 s). Link set-up cost is a constant 287 bytes rather
+than the exact byte count; it only seeds the first estimate.
+
+Verified by white-box tests against values computed with the reference's own
+formulas, a wiring test (a measured fast rate shortens the wait from the old
+2 s), the existing drop/retry transfer tests, and the embedded reference
+Resource sender/receiver oracle cases (161/161 with the oracle, 131/131
+without, 128/128 under sanitizers with differential cases excluded).
+
+As in the reference, the first request of a transfer waits only about 0.4 s
+because its formula mixes SDU bytes with a bits-per-second rate, so links with
+a round trip above that see a duplicate first request; rates settle after the
+first round.

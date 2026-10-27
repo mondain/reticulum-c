@@ -22,7 +22,7 @@ Largest gaps, in priority order:
 6. Management plane: blackhole management, remote management destination and probe responder are done; interface discovery and network identities remain.
 7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
 8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
-9. Resource window cap of 10 parts (reference grows to 75).
+9. Resource window growth and rate-based timeouts: done (see section 5).
 10. Logging hook, config options (`instance_name`, `loglevel`, etc.), CLI tools.
 
 ## 2. Protocol (manual ch6, ch9)
@@ -107,7 +107,8 @@ Largest gaps, in priority order:
 | Status | Feature | Notes |
 | --- | --- | --- |
 | IMPL | Advertisement, hashmap/HMU, part requests, proof, cancel, cache request parsing, bz2, metadata, request-id/response flags, multi-segment | `src/resource.c` |
-| PART | Window sizing | Starts at 4, caps at 10 (reference up to 75); retry/timeout logic not audited |
+| IMPL | Window sizing | Receiver window 4 (or the link's previous window), +1 per completed round up to 10, 75 after 4 fast rounds (>6.25 kB/s), 4 after 2 very slow rounds (<250 B/s), shrinks on a timed-out round; remembered per link |
+| IMPL | Retry/timeout logic | Receiver part timeout from the expected inflight rate (`update_eifr`, factor 4 then 2, HMU wait 3.5, grace 0.25 s, +0.5 s per retry); sender advertisement (RTT x 6 + 1 s), part-request (RTT x 96 + 78 s, then cancel) and proof (RTT x 3 + 10 s) timeouts |
 
 ### Channel / MessageBase / Buffer
 
