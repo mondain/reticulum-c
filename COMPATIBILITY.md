@@ -142,3 +142,25 @@ the persisted list round-trips the reference file layout (including a float
 
 Native only: announce dropping, path removal, expiry and table bounds. Blackhole
 sources and publishing the list over a link are not implemented.
+
+## Management plane: link-terminating destinations (`feature/management-plane`)
+
+New library component `rnc_responder` (sans-I/O): accepts link requests for
+registered destinations, runs one request/response service per link and calls
+registered handlers, with ALLOW_ALL / ALLOW_LIST policies. The daemon uses it
+for `rnstransport.remote.management` and `rnstransport.info.blackhole`.
+
+Local Linux evidence: 144/144 with the pinned RNS oracle, 116/116 without it,
+113/113 under sanitizers (differential cases excluded).
+
+Differential: the unmodified reference `rnstatus -R` and `rnpath -R -t` query the
+daemon over a TCP link with an allow-listed identity, and `rnpath -p` reads the
+published blackhole list. Native: an end-to-end C client over TCP (allowed
+identity answered, unlisted identity gets no answer), and in-process responder
+tests (echo, silent handler, allow-list with identification, link teardown).
+
+Limits: `/path` `rates` returns an empty list (the node keeps no rate table for
+reporting); eight concurrent responder links; requests and responses are capped
+at 64 KiB in the daemon. A request on a stale or closed link is not answered.
+The reference reports an empty path table as a failed request; this applies to
+the reference client regardless of server.

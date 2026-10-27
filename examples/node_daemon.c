@@ -10,6 +10,7 @@
 #include <openssl/rand.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_ipc.h>
+#include <reticulum_c/rnc_service.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdarg.h>
@@ -24,6 +25,7 @@
 #include <unistd.h>
 #define CONFIG_INTERFACES 8u
 #define BLACKHOLE_MAX 65536u
+static int decode_hex(const char *s, uint8_t *out);
 #define STATE_MAX (96u + RNC_NODE_ROUTES * (14u + RNC_MTU))
 typedef struct interface_config {
   rnc_host_config host;
@@ -35,7 +37,9 @@ typedef struct interface_config {
   rnc_ifac ifac;
 } interface_config;
 typedef struct config {
-  int transport, share, share_tcp;
+  int transport, share, share_tcp, remote_management, publish_blackhole;
+  uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
+  size_t mgmt_allowed_count;
   uint16_t shared_port, control_port;
   uint8_t rpc_key[RNC_RPC_KEY_MAX];
   size_t rpc_key_size;
@@ -656,6 +660,37 @@ static int read_config(const char *path, config *c) {
           c->shared_port = (uint16_t)n;
         else
           c->control_port = (uint16_t)n;
+      } else if (!strcmp(s, "remote_management_allowed")) {
+        /* identity hashes separated by commas and/or blanks */
+        char *token = value, *end;
+        c->mgmt_allowed_count = 0;
+        while (*token) {
+          size_t len;
+          while (*token == ',' || *token == ' ' || *token == '\t')
+            ++token;
+          if (!*token)
+            break;
+          end = token;
+          while (*end && *end != ',' && *end != ' ' && *end != '\t')
+            ++end;
+          len = (size_t)(end - token);
+          if (len != 32 || c->mgmt_allowed_count == RNC_SERVICE_ALLOWLIST) {
+            valid = 0;
+            break;
+          }
+          {
+            char hex[33];
+            memcpy(hex, token, 32);
+            hex[32] = 0;
+            if (!decode_hex(hex, c->mgmt_allowed[c->mgmt_allowed_count++])) {
+              valid = 0;
+              break;
+            }
+          }
+          token = end;
+        }
+        if (!valid)
+          break;
       } else if (!strcmp(s, "rpc_key")) {
         size_t length = strlen(value), j;
         if (!length || length % 2 || length / 2 > RNC_RPC_KEY_MAX) {
@@ -689,6 +724,10 @@ static int read_config(const char *path, config *c) {
           c->transport = b;
         else if (!strcmp(s, "share_instance"))
           c->share = b;
+        else if (!strcmp(s, "enable_remote_management"))
+          c->remote_management = b;
+        else if (!strcmp(s, "publish_blackhole"))
+          c->publish_blackhole = b;
         else {
           valid = 0;
           break;
@@ -905,6 +944,9 @@ static int blackhole_save(rnc_node *node) {
   free(data);
   return ok;
 }
+static int mgmt_start(const config *c, const rnc_identity *id, rnc_node *node,
+                      rnc_host *host);
+static void mgmt_stop(void);
 static int start_node(config *c, const rnc_identity *id, const char *state,
                       rnc_node **node, rnc_host **host) {
   size_t i;
@@ -948,8 +990,13 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
     fprintf(stderr, "Invalid or unreadable blackhole list\n");
     goto fail;
   }
+  if (!mgmt_start(c, id, *node, *host)) {
+    fprintf(stderr, "Cannot start management destinations\n");
+    goto fail;
+  }
   return 1;
 fail:
+  mgmt_stop();
   rnc_host_free(*host);
   rnc_node_free(*node);
   *host = NULL;
@@ -1206,6 +1253,7 @@ static void admin_step(int listener, admin_client clients[4], rnc_host *host,
   }
 }
 #include "node_rpc.h"
+#include "node_mgmt.h"
 
 int main(int argc, char **argv) {
   const char *config_path = NULL, *key_path = NULL, *admin_path = NULL,
@@ -1298,13 +1346,19 @@ int main(int argc, char **argv) {
       if (event.type == RNC_HOST_UP || event.type == RNC_HOST_DOWN)
         printf("interface id=%u %s error=%d\n", event.interface_id,
                event.type == RNC_HOST_UP ? "up" : "down", event.error_number);
-      else if (event.node.type == RNC_NODE_ANNOUNCE) {
+      else if (event.node.type == RNC_NODE_LOCAL && mgmt.responder) {
+        (void)rnc_responder_input(mgmt.responder, &event.node,
+                                  (uint64_t)time(NULL), monotonic_ms());
+      } else if (event.node.type == RNC_NODE_ANNOUNCE) {
         printf("announce destination=");
         print_hex(event.node.route.destination, 16);
         printf(" interface=%u hops=%u\n", event.interface_id,
                (unsigned)event.node.route.hops);
       }
     }
+    if (mgmt.responder)
+      (void)rnc_responder_tick(mgmt.responder, (uint64_t)time(NULL),
+                               monotonic_ms());
     admin_step(admin, clients, host, node, &id, state_path, monotonic_ms());
     rpc_step(&rpc, host, node, &current, &id, monotonic_ms());
     if (reloading) {
@@ -1316,6 +1370,7 @@ int main(int argc, char **argv) {
           fprintf(stderr, "Reload postponed: cannot save network state\n");
         else {
           rpc_stop(&rpc);
+          mgmt_stop();
           rnc_host_free(host);
           rnc_node_free(node);
           host = NULL;
@@ -1330,6 +1385,7 @@ int main(int argc, char **argv) {
             fprintf(stderr,
                     "Reload failed; restoring previous configuration\n");
             rpc_stop(&rpc);
+            mgmt_stop();
             rnc_host_free(host);
             rnc_node_free(node);
             host = NULL;
@@ -1361,6 +1417,7 @@ done:
         st.st_dev == admin_inode.st_dev && st.st_ino == admin_inode.st_ino)
       (void)unlink(admin_path);
   }
+  mgmt_stop();
   rnc_host_free(host);
   rnc_node_free(node);
   rnc_identity_clear(&id);
