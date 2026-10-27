@@ -137,7 +137,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | Auto | IMPL | IPv6 link-local multicast, `group_id`, discovery/data ports, 1.6s announce, 22s peer timeout, per-peer sub-interfaces |
 | Auto | PART | `multicast_address_type` / scope (only temporary link scope) |
 | Auto | MISS | `allowed_devices`, `ignored_devices`, multiple devices; multi-NIC; Android/Windows specifics; address-change handling |
-| Backbone / BackboneClient | PART | Daemon types map to TCP listen/connect (same HDLC wire format) with 100 Mb/s pacing and fast-flap IP blocking; no epoll data-plane egress/ingress watermarks, `device` binding or `prefer_ipv6` |
+| Backbone / BackboneClient | PART | Verified against the reference in both directions; daemon types map to TCP listen/connect (same HDLC wire format) with 100 Mb/s pacing and fast-flap IP blocking; no epoll data-plane egress/ingress watermarks, `device` binding or `prefer_ipv6` |
 | TCP server | IMPL | Listen, accept, IPv4/IPv6, DNS |
 | TCP server | IMPL | `prefer_ipv6`, TCP keepalive and user timeout on accepted sockets |
 | TCP server | MISS | `i2p_tunneled`, device binding |

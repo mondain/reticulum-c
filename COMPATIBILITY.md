@@ -108,3 +108,22 @@ longer search for unknown paths on behalf of plain `full`-mode interfaces
 (gateway, access-point, roaming, boundary and local interfaces do); link
 keepalive and timeout now scale with RTT instead of fixed 30 s / 180 s; ingress
 control is enabled by default. See `docs/spec-gap-list.md` for what remains.
+
+## Interface additions (`feature/rnode-correctness`)
+
+Local Linux evidence, same toolchain and oracle as above, not yet run in hosted CI:
+129/129 with the pinned RNS oracle (static SDK), host tests clean under
+ASAN/UBSAN/LSAN.
+
+Differential: `reticulum_node_process_backbone` runs the unmodified reference
+`BackboneInterface` / `BackboneClientInterface` against the daemon's Backbone
+types in both directions; the reference announces and the daemon must learn the
+destination. This confirms the HDLC wire format and connection handling only.
+
+Native only (no live RNS peer): RNode bitrate, airtime limits and beacon, Pipe,
+AX.25 KISS, KISS TNC setup, serial frame parameters, TCP keepalive/reconnect
+options, `kiss_framing`, Backbone fast-flap blocking. The `prefer_ipv6` check
+is skipped on hosts whose `localhost` is not dual-stack.
+
+Behavior changes: TCP client reconnect now waits 5 s by default (was 1 s), as
+the reference does; KISS interfaces now send the TNC setup commands on open.

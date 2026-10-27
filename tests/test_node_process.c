@@ -441,6 +441,165 @@ static void shared(const char *exe, const char *reference, const char *python) {
   puts(reference ? "unmodified RNS shared-instance test passed"
                  : "native shared-instance tests passed");
 }
+/* The reference peer: starts RNS from a generated config, prints the hash of a
+ * destination it announces once a second, and exits after `seconds`. */
+static const char *reference_peer =
+    "import RNS, sys, time\n"
+    "r = RNS.Reticulum(configdir=sys.argv[1], loglevel=1)\n"
+    "i = RNS.Identity()\n"
+    "d = RNS.Destination(i, RNS.Destination.IN, RNS.Destination.SINGLE,\n"
+    "                    'reticulum_c', 'backbone')\n"
+    "print(d.hexhash, flush=True)\n"
+    "end = time.time() + float(sys.argv[2])\n"
+    "while time.time() < end:\n"
+    "    d.announce()\n"
+    "    time.sleep(1)\n";
+static pid_t start_reference(const char *python, const char *reference,
+                             const char *dir, unsigned seconds, int *out,
+                             char hash[33]) {
+  int fds[2];
+  pid_t p;
+  char limit[16];
+  size_t n = 0;
+  unsigned tries;
+  CHECK(!pipe(fds));
+  CHECK(snprintf(limit, sizeof(limit), "%u", seconds) > 0);
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+    close(fds[1]);
+    CHECK(!setenv("PYTHONPATH", reference, 1));
+    execl(python, python, "-c", reference_peer, dir, limit, (char *)NULL);
+    _exit(127);
+  }
+  close(fds[1]);
+  /* the hash line follows RNS start-up output; read until 32 hex digits end a
+   * line */
+  for (tries = 0; tries < 200; ++tries) {
+    struct pollfd pf = {fds[0], POLLIN, 0};
+    char buf[4096];
+    char *line;
+    CHECK(poll(&pf, 1, 100) >= 0);
+    if (pf.revents & POLLIN) {
+      ssize_t got = read(fds[0], buf + n, sizeof(buf) - 1 - n);
+      CHECK(got >= 0);
+      n += (size_t)got;
+      buf[n] = 0;
+      for (line = strtok(buf, "\n"); line; line = strtok(NULL, "\n")) {
+        size_t k;
+        if (strlen(line) != 32)
+          continue;
+        for (k = 0; k < 32 && strchr("0123456789abcdef", line[k]); ++k) {
+        }
+        if (k == 32) {
+          memcpy(hash, line, 32);
+          hash[32] = 0;
+          *out = fds[0];
+          return p;
+        }
+      }
+      CHECK(n < sizeof(buf) - 1);
+    }
+  }
+  fprintf(stderr, "reference peer never printed its destination\n");
+  CHECK(0);
+  return p;
+}
+static int admin_has_path(const char *path, const char *hash) {
+  struct sockaddr_un addr;
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0), found;
+  char request[64], buf[512];
+  ssize_t n;
+  CHECK(fd >= 0);
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strcpy(addr.sun_path, path);
+  CHECK(!connect(fd, (struct sockaddr *)&addr, sizeof(addr)));
+  CHECK(snprintf(request, sizeof(request), "PATH %s\n", hash) > 0);
+  CHECK(write(fd, request, strlen(request)) == (ssize_t)strlen(request));
+  n = read(fd, buf, sizeof(buf) - 1);
+  CHECK(n > 0);
+  buf[n] = 0;
+  found = !strncmp(buf, "path destination=", 17);
+  close(fd);
+  return found;
+}
+static void stop_reference(pid_t p, int fd) {
+  int status;
+  (void)kill(p, SIGKILL);
+  CHECK(waitpid(p, &status, 0) == p);
+  close(fd);
+}
+/* One direction of the Backbone check: the reference announces over its
+ * Backbone interface and our daemon, running the matching Backbone type,
+ * must learn the destination. */
+static void backbone_direction(const char *exe, const char *reference,
+                               const char *python, int reference_listens) {
+  char dir[] = "/tmp/rnc-backbone-XXXXXX", rcfg[256], rdir[256], cfg[256],
+       key[256], admin[256], text[1024], identity[33], hash[33];
+  unsigned port = unused_port(), tries;
+  int rfd, dfd, found = 0;
+  pid_t peer, daemon;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  /* reference side */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = "
+                 "No\n[interfaces]\n[[Backbone]]\ntype = %s\nenabled = yes\n"
+                 "%s = 127.0.0.1\n%s = %u\n",
+                 reference_listens ? "BackboneInterface"
+                                   : "BackboneClientInterface",
+                 reference_listens ? "listen_ip" : "target_host",
+                 reference_listens ? "listen_port" : "target_port", port) > 0);
+  config_file(rcfg, text);
+  /* daemon side: the opposite end */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = "
+                 "No\n[interfaces]\n[[Backbone]]\ntype = %s\nenabled = "
+                 "Yes\n%s = 127.0.0.1\n%s = %u\n%s",
+                 reference_listens ? "BackboneClientInterface"
+                                   : "BackboneInterface",
+                 reference_listens ? "target_host" : "listen_ip",
+                 reference_listens ? "target_port" : "port", port,
+                 reference_listens ? "reconnect_wait = 1\n" : "") > 0);
+  config_file(cfg, text);
+  if (reference_listens) {
+    peer = start_reference(python, reference, rdir, 40, &rfd, hash);
+    daemon = start(exe, cfg, key, admin, &dfd);
+  } else {
+    daemon = start(exe, cfg, key, admin, &dfd);
+    ready_line(dfd, identity);
+    peer = start_reference(python, reference, rdir, 40, &rfd, hash);
+  }
+  if (reference_listens)
+    ready_line(dfd, identity);
+  for (tries = 0; tries < 300 && !found; ++tries) {
+    struct timespec t = {0, 100000000};
+    found = admin_has_path(admin, hash);
+    if (!found)
+      nanosleep(&t, NULL);
+  }
+  stop_reference(peer, rfd);
+  stop(daemon, dfd);
+  if (!found)
+    fprintf(stderr, "daemon never learned the reference destination (%s)\n",
+            reference_listens ? "reference listens" : "daemon listens");
+  CHECK(found);
+  remove_tree(dir);
+}
+static void backbone(const char *exe, const char *reference,
+                     const char *python) {
+  backbone_direction(exe, reference, python, 0);
+  backbone_direction(exe, reference, python, 1);
+  puts("unmodified RNS Backbone interop passed in both directions");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 5);
   if (!strcmp(argv[2], "cli"))
@@ -449,6 +608,8 @@ int main(int argc, char **argv) {
     network(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
+  else if (!strcmp(argv[2], "backbone") && argc == 5)
+    backbone(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "rns") && argc == 5)
     shared(argv[1], argv[3], argv[4]);
   else
