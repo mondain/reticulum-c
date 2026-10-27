@@ -58,7 +58,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/reticulum_cConfig.cmake
 if(BUILD_TESTING)
     add_executable(test_node tests/test_node.c)
     target_link_libraries(test_node PRIVATE reticulum_c)
-    foreach(case paths routing mesh discovery guards state local destinations)
+    foreach(case paths routing mesh discovery guards state local destinations destination_data)
         add_test(NAME reticulum_node_${case} COMMAND test_node ${case})
     endforeach()
     add_executable(test_receipt tests/test_receipt.c)
