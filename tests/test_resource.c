@@ -28,8 +28,11 @@ typedef struct pair {
     rnc_resource *tx, *rx;
     rng ar, br, rr;
     unsigned txcomplete, rxcomplete, failed, parts, hmus;
-    int drop_part, drop_proof, drop_adv, reverse, duplicate_hmu;
-    uint64_t now;
+    int drop_part, drop_proof, drop_adv, reverse, duplicate_hmu, no_tick;
+    uint64_t now, step;
+    size_t peak_window, peak_max, low_max;
+    rnc_packet stash[2][160];
+    size_t stash_count[2];
 } pair;
 static rnc_packet outgoing(rnc_link *l) {
     rnc_link_event e;
@@ -91,10 +94,26 @@ static void finish(pair *p) {
     rnc_link_free(p->a);
     rnc_link_free(p->b);
 }
+/* Feeds one event of `link` to the resource that sits on it. */
+static void dispatch(pair *p, rnc_link *link, rnc_resource *resource, rnc_link_event *e) {
+    rnc_result r;
+    (void)link;
+    if (e->type == RNC_LINK_PACKET && e->context == 2)
+        r = rnc_resource_accept(resource, e->data, e->size, p->now);
+    else
+        r = rnc_resource_input(resource, e, p->now);
+    CHECK(r == RNC_OK || r == RNC_AGAIN);
+}
+#define PENDING 160u
 static void transfer(pair *p, rnc_link *from, rnc_link *to, rnc_resource *receiver, int forward) {
     rnc_link_event e;
-    rnc_packet pending[64];
-    size_t n = 0, i;
+    rnc_packet pending[PENDING];
+    size_t n = 0, i, side = from == p->a ? 0 : 1;
+    rnc_resource *to_resource = to == p->b ? p->rx : p->tx;
+    /* packets another transfer() call left behind when it drained `from` */
+    for (i = 0; i < p->stash_count[side]; i++)
+        pending[n++] = p->stash[side][i];
+    p->stash_count[side] = 0;
     while (rnc_link_poll(from, &e) == RNC_OK) {
         if (e.type == RNC_LINK_SEND) {
             if (e.packet.context == 1) {
@@ -114,24 +133,27 @@ static void transfer(pair *p, rnc_link *from, rnc_link *to, rnc_resource *receiv
                 p->drop_adv = 0;
                 continue;
             }
-            CHECK(n < 64);
+            CHECK(n < PENDING);
             pending[n++] = e.packet;
             if (e.packet.context == 4 && p->duplicate_hmu) {
-                CHECK(n < 64);
+                CHECK(n < PENDING);
                 pending[n++] = e.packet;
             }
-        } else if (e.type == RNC_LINK_PACKET || e.type == RNC_LINK_RESOURCE_PACKET) {
-            rnc_result r;
-            if (e.type == RNC_LINK_PACKET && e.context == 2)
-                r = rnc_resource_accept(receiver, e.data, e.size, p->now);
-            else
-                r = rnc_resource_input(receiver, &e, p->now);
-            CHECK(r == RNC_OK || r == RNC_AGAIN);
-        }
+        } else if (e.type == RNC_LINK_PACKET || e.type == RNC_LINK_RESOURCE_PACKET)
+            dispatch(p, from, receiver, &e);
     }
     for (i = 0; i < n; i++) {
         size_t j = p->reverse ? n - i - 1 : i;
         CHECK(rnc_link_input(to, &pending[j], p->now) == RNC_OK);
+        /* drain often: a link holds only RNC_LINK_EVENTS undelivered events */
+        if (i % 16 == 15 || i + 1 == n)
+            while (rnc_link_poll(to, &e) == RNC_OK) {
+                if (e.type == RNC_LINK_SEND) {
+                    CHECK(p->stash_count[!side] < PENDING);
+                    p->stash[!side][p->stash_count[!side]++] = e.packet;
+                } else if (e.type == RNC_LINK_PACKET || e.type == RNC_LINK_RESOURCE_PACKET)
+                    dispatch(p, to, to_resource, &e);
+            }
     }
 }
 static void events(pair *p, rnc_resource *r, int outgoing_) {
@@ -156,9 +178,18 @@ static void run(pair *p, unsigned limit) {
         transfer(p, p->b, p->a, p->rx, 0);
         events(p, p->tx, 1);
         events(p, p->rx, 0);
-        p->now += 10;
-        CHECK(rnc_resource_tick(p->tx, p->now) == RNC_OK);
-        CHECK(rnc_resource_tick(p->rx, p->now) == RNC_OK);
+        if (rnc_resource_window(p->rx) > p->peak_window)
+            p->peak_window = rnc_resource_window(p->rx);
+        if (rnc_resource_window_max(p->rx) > p->peak_max)
+            p->peak_max = rnc_resource_window_max(p->rx);
+        if (rnc_resource_window_max(p->rx) &&
+            (!p->low_max || rnc_resource_window_max(p->rx) < p->low_max))
+            p->low_max = rnc_resource_window_max(p->rx);
+        p->now += p->step ? p->step : 10;
+        if (!p->no_tick) {
+            CHECK(rnc_resource_tick(p->tx, p->now) == RNC_OK);
+            CHECK(rnc_resource_tick(p->rx, p->now) == RNC_OK);
+        }
     }
     CHECK(p->txcomplete == 1 && p->rxcomplete == 1 && !p->failed);
 }
@@ -301,6 +332,94 @@ static void quota_test(void) {
     CHECK(rnc_resource_accept(p.rx, wire, n, p.now) == RNC_PROTOCOL);
     finish(&p);
 }
+/* A transfer big enough to need many request rounds. */
+#define WINDOW_BYTES 300000u
+static uint8_t window_data[WINDOW_BYTES];
+static void start_big(pair *p) {
+    rng r = {0x12345678};
+    rnc_resource_options o = {0};
+    random_bytes(&r, window_data, sizeof(window_data));
+    init(p, 400000);
+    CHECK(rnc_resource_send(p->tx, window_data, sizeof(window_data), &o, p->now) == RNC_OK);
+}
+/* Fast rounds lift the ceiling to 75 and the window follows it. */
+static void window_fast(void) {
+    pair p;
+    start_big(&p);
+    run(&p, 20000);
+    CHECK(p.peak_max == 75);
+    CHECK(p.peak_window > 10 && p.peak_window <= 75);
+    finish(&p);
+}
+/* Between the fast and very slow thresholds the ceiling stays at 10. */
+static void window_slow(void) {
+    pair p;
+    start_big(&p);
+    p.step = 1000; /* ~2 kB per second */
+    p.no_tick = 1; /* the fixed 2 s retry timer is not under test here */
+    run(&p, 20000);
+    CHECK(p.peak_max == 10 && p.peak_window == 10);
+    finish(&p);
+}
+/* Two very slow rounds cap the window at 4 for the rest of the transfer. */
+static void window_very_slow(void) {
+    pair p;
+    start_big(&p);
+    p.step = 20000; /* under 250 B/s */
+    p.no_tick = 1;
+    run(&p, 20000);
+    /* the window had grown to 6 by the time two rounds had been classified; it
+     * is not cut back, but the ceiling drops to 4 so it never grows again */
+    CHECK(p.low_max == 4 && p.peak_window == 6);
+    finish(&p);
+}
+/* A round that times out shrinks the window and its ceiling. */
+static void window_shrinks(void) {
+    pair p;
+    size_t before;
+    unsigned i;
+    start_big(&p);
+    for (i = 0; i < 400 && rnc_resource_window(p.rx) < 8; i++) {
+        CHECK(rnc_resource_pump(p.tx, p.now) == RNC_OK);
+        CHECK(rnc_resource_pump(p.rx, p.now) == RNC_OK);
+        transfer(&p, p.a, p.b, p.tx, 1);
+        transfer(&p, p.b, p.a, p.rx, 0);
+        p.now += 1000;
+        CHECK(rnc_resource_tick(p.tx, p.now) == RNC_OK);
+    }
+    before = rnc_resource_window(p.rx);
+    CHECK(before >= 8);
+    /* silence for longer than the retry timer */
+    p.now += 5000;
+    CHECK(rnc_resource_tick(p.rx, p.now) == RNC_OK);
+    CHECK(rnc_resource_window(p.rx) == before - 1);
+    CHECK(rnc_resource_window_max(p.rx) < 10);
+    finish(&p);
+}
+/* Once a fast rate has been measured the receiver does not sit out the old
+ * fixed two seconds: silence of a fraction of that already counts as a lost
+ * round. */
+static void timeout_follows_rate(void) {
+    pair p;
+    size_t before;
+    unsigned i;
+    start_big(&p);
+    for (i = 0; i < 100 && rnc_resource_window(p.rx) < 6; i++) {
+        CHECK(rnc_resource_pump(p.tx, p.now) == RNC_OK);
+        CHECK(rnc_resource_pump(p.rx, p.now) == RNC_OK);
+        transfer(&p, p.a, p.b, p.tx, 1);
+        transfer(&p, p.b, p.a, p.rx, 0);
+        p.now += 10;
+        CHECK(rnc_resource_tick(p.tx, p.now) == RNC_OK);
+        CHECK(rnc_resource_tick(p.rx, p.now) == RNC_OK);
+    }
+    before = rnc_resource_window(p.rx);
+    CHECK(before >= 6);
+    p.now += 600; /* well under 2 s */
+    CHECK(rnc_resource_tick(p.rx, p.now) == RNC_OK);
+    CHECK(rnc_resource_window(p.rx) < before);
+    finish(&p);
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     if (!strcmp(argv[1], "transfer"))
@@ -315,6 +434,16 @@ int main(int argc, char **argv) {
         quota_test();
     else if (!strcmp(argv[1], "cancel"))
         cancel_test();
+    else if (!strcmp(argv[1], "timeout_rate"))
+        timeout_follows_rate();
+    else if (!strcmp(argv[1], "window_fast"))
+        window_fast();
+    else if (!strcmp(argv[1], "window_slow"))
+        window_slow();
+    else if (!strcmp(argv[1], "window_very_slow"))
+        window_very_slow();
+    else if (!strcmp(argv[1], "window_shrinks"))
+        window_shrinks();
     else
         CHECK(0);
     return 0;

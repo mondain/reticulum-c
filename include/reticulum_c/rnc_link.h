@@ -129,6 +129,13 @@ rnc_result rnc_link_configure_establishment(rnc_link *link, unsigned hops,
 rnc_result rnc_link_rtt(const rnc_link *link, uint64_t *rtt_ms);
 uint64_t rnc_link_keepalive_ms(const rnc_link *link);
 rnc_result rnc_link_age_ms(const rnc_link *link, uint64_t now_ms, uint64_t *age_ms);
+/* Receive window the link's last incoming Resource ended with (0 = none yet);
+ * the next incoming Resource on this link starts from it. */
+size_t rnc_link_last_resource_window(const rnc_link *link);
+void rnc_link_set_last_resource_window(rnc_link *link, size_t window);
+/* Same for the expected inflight rate in bits/s (0 = unknown). */
+uint64_t rnc_link_last_resource_eifr(const rnc_link *link);
+void rnc_link_set_last_resource_eifr(rnc_link *link, uint64_t bits_per_second);
 uint64_t rnc_link_no_inbound_ms(const rnc_link *link, uint64_t now_ms);
 uint64_t rnc_link_no_outbound_ms(const rnc_link *link, uint64_t now_ms);
 

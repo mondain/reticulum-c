@@ -753,3 +753,18 @@ rnc_result rnc_link_close(rnc_link *link, uint64_t now) {
     link->now = now;
     return RNC_OK;
 }
+
+size_t rnc_link_last_resource_window(const rnc_link *link) {
+    return link ? link->last_resource_window : 0;
+}
+void rnc_link_set_last_resource_window(rnc_link *link, size_t window) {
+    if (link)
+        link->last_resource_window = window;
+}
+uint64_t rnc_link_last_resource_eifr(const rnc_link *link) {
+    return link ? link->last_resource_eifr : 0;
+}
+void rnc_link_set_last_resource_eifr(rnc_link *link, uint64_t bits_per_second) {
+    if (link)
+        link->last_resource_eifr = bits_per_second;
+}
