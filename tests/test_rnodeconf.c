@@ -5,6 +5,9 @@
  * the unmodified reference rnodeconf at the same emulator. */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/evp.h>

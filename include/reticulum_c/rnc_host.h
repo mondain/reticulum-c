@@ -150,6 +150,13 @@ typedef struct rnc_host_event {
  * invalid files are never replaced; identity output commits only on success. */
 rnc_result rnc_host_identity_load(const char *path, rnc_random_fn random,
                                   void *random_context, rnc_identity *identity);
+/* Identity.to_file / pub_to_file: writes the raw 64 byte private key (mode
+ * 0600) or, with public_only, the public key (mode 0644). An existing file is
+ * kept and RNC_STATE returned unless overwrite is set, and replacement is atomic
+ * (written beside it and renamed). RNC_INVALID when the identity has no private
+ * key to save. */
+rnc_result rnc_host_identity_save(const char *path, const rnc_identity *identity,
+                                  int public_only, int overwrite);
 rnc_host *rnc_host_new(rnc_node *node);
 void rnc_host_free(rnc_host *host);
 rnc_result rnc_host_add(rnc_host *host, uint32_t interface_id,
@@ -164,6 +171,18 @@ rnc_result rnc_host_status_at(const rnc_host *host, size_t index,
 rnc_result rnc_host_step(rnc_host *host, int timeout_ms, uint64_t unix_seconds,
                          uint64_t now_ms);
 rnc_result rnc_host_poll(rnc_host *host, rnc_host_event *event);
+/* Transport.await_path: asks the network for a path to the destination (on
+ * every interface, again every five seconds once one is online) and runs the
+ * host until the node has one, or timeout_ms passes (RNC_TIMEOUT). It steps the
+ * host itself with the system clocks, so do not step it concurrently or with
+ * other times. callback, if given, receives every host event (the host queue
+ * is drained here, so feed events to your listeners from it) and then NULL once
+ * per pass, the place to tick them. A callback returning nonzero stops the wait
+ * (RNC_AGAIN), for a signal handler's flag. */
+typedef int (*rnc_host_await_fn)(void *context, const rnc_host_event *event);
+rnc_result rnc_host_await_path(rnc_host *host, const uint8_t destination[16],
+                               unsigned timeout_ms, rnc_host_await_fn callback,
+                               void *context);
 #ifdef __cplusplus
 }
 #endif

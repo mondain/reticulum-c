@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <time.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_log.h>
 #include <stdio.h>
@@ -455,6 +456,150 @@ static void keys(void) {
   rnc_identity_clear(&first);
   rnc_identity_clear(&second);
   puts("host identity tests passed");
+}
+/* Identity.to_file and pub_to_file: raw keys, the private one at mode 0600. */
+static void identity_files(void) {
+  char directory[] = "/tmp/rnc-host-idsave-XXXXXX", path[256], pub[256];
+  rnc_identity id, loaded, public_only;
+  uint8_t key[64], bytes[64];
+  struct stat st;
+  unsigned rng = 5;
+  size_t i;
+  int fd;
+  for (i = 0; i < 64; ++i)
+    key[i] = (uint8_t)(i * 3u + 1u);
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  CHECK(rnc_identity_from_public(&public_only, id.public_key) == RNC_OK);
+  CHECK(mkdtemp(directory));
+  CHECK(snprintf(path, sizeof(path), "%s/key", directory) > 0);
+  CHECK(snprintf(pub, sizeof(pub), "%s/key.pub", directory) > 0);
+  CHECK(rnc_host_identity_save(path, &id, 0, 0) == RNC_OK);
+  CHECK(!stat(path, &st) && st.st_size == 64 && (st.st_mode & 0777) == 0600);
+  CHECK(rnc_host_identity_load(path, random_bytes, &rng, &loaded) == RNC_OK &&
+        !memcmp(loaded.private_key, id.private_key, 64) &&
+        !memcmp(loaded.hash, id.hash, 16));
+  /* an existing file is only replaced on request */
+  CHECK(rnc_host_identity_save(path, &id, 0, 0) == RNC_STATE);
+  CHECK(rnc_host_identity_save(path, &id, 0, 1) == RNC_OK);
+  CHECK(!stat(path, &st) && (st.st_mode & 0777) == 0600);
+  /* public key file */
+  CHECK(rnc_host_identity_save(pub, &id, 1, 0) == RNC_OK);
+  CHECK(!stat(pub, &st) && st.st_size == 64 && (st.st_mode & 0777) == 0644);
+  fd = open(pub, O_RDONLY);
+  CHECK(fd >= 0 && read(fd, bytes, 64) == 64 && !memcmp(bytes, id.public_key, 64));
+  close(fd);
+  /* an identity without a private key can only save its public half */
+  CHECK(rnc_host_identity_save(path, &public_only, 0, 1) == RNC_INVALID);
+  CHECK(rnc_host_identity_save(pub, &public_only, 1, 1) == RNC_OK);
+  CHECK(rnc_host_identity_save(NULL, &id, 0, 0) == RNC_INVALID &&
+        rnc_host_identity_save(path, NULL, 0, 0) == RNC_INVALID);
+  CHECK(!unlink(path) && !unlink(pub) && !rmdir(directory));
+  puts("host identity file tests passed");
+}
+/* Transport.await_path: asks the network for a path and waits for it. The
+ * callback runs for every host event and once per loop pass, which is how the
+ * peer in this test is kept alive while the waiter blocks. */
+typedef struct await_peer {
+  rnc_host *host;
+  rnc_node *node;
+  uint8_t destination[16];
+  rnc_identity identity;
+  uint64_t announce_at, started;
+  int announced, stop;
+  unsigned events, idles;
+} await_peer;
+static uint64_t wall_ms(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+}
+static int await_step(void *context, const rnc_host_event *event) {
+  await_peer *p = context;
+  rnc_host_event drop;
+  if (event) {
+    ++p->events;
+    return 0;
+  }
+  ++p->idles;
+  CHECK(rnc_host_step(p->host, 5, (uint64_t)time(NULL), wall_ms()) == RNC_OK);
+  while (rnc_host_poll(p->host, &drop) == RNC_OK) {
+  }
+  if (!p->announced && p->announce_at && wall_ms() >= p->announce_at) {
+    uint8_t made[16];
+    p->announced = 1;
+    /* the destination only comes into being now, so earlier path requests
+     * go unanswered */
+    CHECK(rnc_node_add_destination(p->node, &p->identity, "await.test", NULL, 0,
+                                   made) == RNC_OK &&
+          !memcmp(made, p->destination, 16));
+    CHECK(rnc_node_announce(p->node, p->destination, (uint64_t)time(NULL),
+                            wall_ms()) == RNC_OK);
+  }
+  return p->stop;
+}
+static void await_path_test(void) {
+  uint8_t key_a[64] = {1}, key_b[64] = {2}, unknown[16] = {0x77};
+  unsigned rng = 0;
+  rnc_identity ida, idb;
+  rnc_node *na, *nb;
+  rnc_host *ha, *hb;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  await_peer peer = {0};
+  uint64_t t0;
+  CHECK(rnc_identity_from_private(&ida, key_a) == RNC_OK &&
+        rnc_identity_from_private(&idb, key_b) == RNC_OK);
+  na = rnc_node_new(&ida, 0, random_bytes, &rng);
+  nb = rnc_node_new(&idb, 0, random_bytes, &rng);
+  CHECK(na && nb);
+  hb = rnc_host_new(nb);
+  ha = rnc_host_new(na);
+  CHECK(ha && hb);
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.address = "127.0.0.1";
+  CHECK(rnc_host_add(hb, 1, &cfg) == RNC_OK &&
+        rnc_host_get_status(hb, 1, &status) == RNC_OK && status.bound_port);
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  cfg.address = "127.0.0.1";
+  cfg.port = status.bound_port;
+  CHECK(rnc_host_add(ha, 1, &cfg) == RNC_OK);
+  {
+    uint8_t name_hash[10];
+    CHECK(rnc_destination_hash("await.test", &idb, name_hash,
+                               peer.destination) == RNC_OK);
+  }
+  peer.identity = idb;
+  peer.host = hb;
+  peer.node = nb;
+  peer.announce_at = wall_ms() + 400;
+  /* the peer announces 400 ms in; the waiter returns once the path exists */
+  t0 = wall_ms();
+  CHECK(rnc_host_await_path(ha, peer.destination, 10000, await_step, &peer) ==
+        RNC_OK);
+  CHECK(wall_ms() - t0 >= 300 && wall_ms() - t0 < 6000 && peer.events > 0 &&
+        peer.idles > 0);
+  /* a path already known returns at once */
+  t0 = wall_ms();
+  CHECK(rnc_host_await_path(ha, peer.destination, 10000, NULL, NULL) == RNC_OK);
+  CHECK(wall_ms() - t0 < 200);
+  /* nobody knows this one */
+  t0 = wall_ms();
+  CHECK(rnc_host_await_path(ha, unknown, 600, await_step, &peer) == RNC_TIMEOUT);
+  CHECK(wall_ms() - t0 >= 600 && wall_ms() - t0 < 3000);
+  /* a callback can interrupt the wait */
+  peer.stop = 1;
+  t0 = wall_ms();
+  CHECK(rnc_host_await_path(ha, unknown, 10000, await_step, &peer) == RNC_AGAIN);
+  CHECK(wall_ms() - t0 < 1000);
+  peer.stop = 0;
+  CHECK(rnc_host_await_path(ha, unknown, 0, NULL, NULL) == RNC_INVALID &&
+        rnc_host_await_path(NULL, unknown, 10, NULL, NULL) == RNC_INVALID);
+  rnc_host_free(ha);
+  rnc_host_free(hb);
+  rnc_node_free(na);
+  rnc_node_free(nb);
+  puts("host await path test passed");
 }
 static void policy_test(void) {
   uint8_t private_key[64] = {0};
@@ -1511,6 +1656,10 @@ int main(int argc, char **argv) {
     fast_flap_test();
   else if (!strcmp(argv[1], "connect_late_clock"))
     connect_late_clock_test();
+  else if (!strcmp(argv[1], "await_path"))
+    await_path_test();
+  else if (!strcmp(argv[1], "identity_files"))
+    identity_files();
   else if (!strcmp(argv[1], "no_output"))
     no_output_test();
   else if (!strcmp(argv[1], "tcp_options"))

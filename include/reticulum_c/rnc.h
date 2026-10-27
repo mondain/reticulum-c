@@ -63,6 +63,10 @@ typedef struct rnc_announce {
  * Input/output objects and buffers must not overlap. NULL data is valid only
  * with size zero. Instances and incremental framing state are thread-confined. */
 rnc_result rnc_hash(const void *data, size_t size, uint8_t output[32]);
+/* Identity.truncated_hash: the first 16 bytes of the SHA-256 of data, and
+ * Identity.get_random_hash: that of 16 random bytes. */
+rnc_result rnc_truncated_hash(const void *data, size_t size, uint8_t output[16]);
+rnc_result rnc_random_hash(rnc_random_fn random, void *context, uint8_t output[16]);
 rnc_result rnc_identity_from_private(rnc_identity *identity, const uint8_t key[64]);
 rnc_result rnc_identity_from_public(rnc_identity *identity, const uint8_t key[64]);
 rnc_result rnc_identity_generate(rnc_identity *identity, rnc_random_fn random, void *context);

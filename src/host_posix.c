@@ -145,6 +145,47 @@ rnc_result rnc_host_auto_token(const char *group, const char *ipv6,
   return rnc_hash(material, n + m, out);
 }
 
+rnc_result rnc_host_identity_save(const char *path, const rnc_identity *identity,
+                                  int public_only, int overwrite) {
+  const uint8_t *key;
+  char temporary[4096];
+  mode_t mode = public_only ? 0644 : 0600;
+  size_t used = 0;
+  int fd;
+  struct stat st;
+  if (!path || !identity || (!public_only && !identity->has_private))
+    return RNC_INVALID;
+  key = public_only ? identity->public_key : identity->private_key;
+  if (!overwrite && lstat(path, &st) == 0)
+    return RNC_STATE;
+  if (snprintf(temporary, sizeof(temporary), "%s.tmp-%ld", path,
+               (long)getpid()) >= (int)sizeof(temporary))
+    return RNC_INVALID;
+  fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            mode);
+  if (fd < 0)
+    return RNC_STATE;
+  (void)fchmod(fd, mode); /* not subject to the umask */
+  while (used < 64) {
+    ssize_t n = write(fd, key + used, 64 - used);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0) {
+      close(fd);
+      (void)unlink(temporary);
+      return RNC_STATE;
+    }
+    used += (size_t)n;
+  }
+  if (fsync(fd) < 0 || close(fd) < 0 ||
+      (overwrite ? rename(temporary, path) : link(temporary, path)) < 0) {
+    (void)unlink(temporary);
+    return errno == EEXIST ? RNC_STATE : RNC_STATE;
+  }
+  if (!overwrite)
+    (void)unlink(temporary);
+  return RNC_OK;
+}
 rnc_result rnc_host_identity_load(const char *path, rnc_random_fn random,
                                   void *context, rnc_identity *identity) {
   int fd = -1;
@@ -2070,4 +2111,48 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
   if (r != RNC_OK && r != RNC_AGAIN)
     return r;
   return pump_node(h);
+}
+static uint64_t await_now_ms(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+}
+rnc_result rnc_host_await_path(rnc_host *h, const uint8_t destination[16],
+                               unsigned timeout_ms, rnc_host_await_fn callback,
+                               void *context) {
+  uint64_t start = await_now_ms(), last_request = 0;
+  int requested = 0, stop = 0;
+  rnc_route route;
+  if (!h || !destination || !timeout_ms)
+    return RNC_INVALID;
+  for (;;) {
+    uint64_t now = await_now_ms();
+    rnc_host_event event;
+    rnc_result r;
+    if (rnc_node_lookup(h->node, destination, now, &route) == RNC_OK)
+      return RNC_OK;
+    if (now - start >= timeout_ms)
+      return RNC_TIMEOUT;
+    if (!requested || now - last_request >= 5000u) {
+      rnc_host_status s;
+      size_t i;
+      for (i = 0; i < RNC_HOST_SLOTS; ++i)
+        if (rnc_host_status_at(h, i, &s) == RNC_OK && s.online) {
+          (void)rnc_node_request_path(h->node, destination, now);
+          requested = 1;
+          last_request = now;
+          break;
+        }
+    }
+    r = rnc_host_step(h, 10, (uint64_t)time(NULL), now);
+    if (r != RNC_OK)
+      return r;
+    while (rnc_host_poll(h, &event) == RNC_OK)
+      if (callback && callback(context, &event))
+        stop = 1;
+    if (callback && callback(context, NULL))
+      stop = 1;
+    if (stop)
+      return RNC_AGAIN;
+  }
 }

@@ -840,30 +840,14 @@ static size_t encode_execute(uint8_t *out, size_t cap, int tty_in, int tty_out,
       (void)rnc_rpc_write_nil(&w);
   return rnc_rpc_writer_finish(&w, &n) == RNC_OK ? n : 0;
 }
+static int await_interrupted(void *context, const rnc_host_event *event) {
+  (void)context;
+  (void)event;
+  return stopping != 0;
+}
 static int await_path(app *a, const uint8_t destination[16], double wait) {
-  uint64_t start = monotonic_ms(), last_request = 0;
-  rnc_route route;
-  int requested = 0;
-  while (!stopping && monotonic_ms() - start < (uint64_t)(wait * 1000.0)) {
-    uint64_t unix_now, now;
-    rnc_host_event event;
-    if (!pump_host(a, 0, &unix_now))
-      return 0;
-    now = monotonic_ms();
-    while (rnc_host_poll(a->host, &event) == RNC_OK) {
-    }
-    if (rnc_node_lookup(a->node, destination, now, &route) == RNC_OK)
-      return 1;
-    if (!requested || now - last_request > 5000u) {
-      rnc_host_status s;
-      if (rnc_host_get_status(a->host, 1, &s) == RNC_OK && s.online) {
-        (void)rnc_node_request_path(a->node, destination, now);
-        requested = 1;
-        last_request = now;
-      }
-    }
-  }
-  return 0;
+  return rnc_host_await_path(a->host, destination, (unsigned)(wait * 1000.0),
+                             await_interrupted, NULL) == RNC_OK;
 }
 /* Pumps the node and feeds LOCAL packets for this link; returns link events
  * through the callback-free loop in the caller. */

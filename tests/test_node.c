@@ -515,7 +515,12 @@ static void destination_data(void) {
   p = sent(n, 1);
   CHECK(rnc_announce_verify(&p, &a) == RNC_OK && a.app_size == 14 &&
         !memcmp(a.app_data, "second payload", 14));
+  /* clearing it (clear_default_app_data): the next announce carries none */
   CHECK(rnc_node_set_destination_data(n, single, NULL, 0) == RNC_OK);
+  CHECK(rnc_node_announce(n, single, 1001, 100000) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1001, 100000) == RNC_OK);
+  p = sent(n, 1);
+  CHECK(rnc_announce_verify(&p, &a) == RNC_OK && a.app_size == 0);
   CHECK(rnc_node_set_destination_data(n, single, big, sizeof(big)) ==
         RNC_INVALID);
   CHECK(rnc_node_set_destination_data(n, single, NULL, 3) == RNC_INVALID);
@@ -524,6 +529,107 @@ static void destination_data(void) {
   CHECK(rnc_node_set_destination_data(NULL, single, "x", 1) == RNC_INVALID);
   rnc_node_free(n);
   rnc_identity_clear(&id);
+}
+/* Transport.request_path options: one interface, a chosen tag, and the
+ * recursive form that waits for announce bandwidth and queued announces. */
+static void request_path_options(void) {
+  rnc_identity id = identity();
+  rnc_node *n = rnc_node_new(&id, 0, rng, NULL);
+  uint8_t dest[16] = {9}, tag[16] = {7, 7, 7}, announced[16];
+  rnc_node_event e;
+  rnc_path_request q;
+  unsigned sends = 0;
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK &&
+        rnc_node_add_interface(n, 2, 1000000) == RNC_OK);
+  /* the default reaches every interface */
+  CHECK(rnc_node_request_path(n, dest, 100) == RNC_OK);
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    sends += e.type == RNC_NODE_SEND;
+  CHECK(sends == 2);
+  /* on_interface and a caller's tag */
+  CHECK(rnc_node_request_path_ex(n, dest, 2, tag, 16, 0, 200) == RNC_OK);
+  sends = 0;
+  while (rnc_node_poll(n, &e) == RNC_OK) {
+    CHECK(e.type == RNC_NODE_SEND && e.interface_id == 2);
+    CHECK(rnc_path_request_decode(&e.packet, &q) == RNC_OK &&
+          q.tag_size == 16 && !memcmp(q.tag, tag, 16));
+    ++sends;
+  }
+  CHECK(sends == 1);
+  CHECK(rnc_node_request_path_ex(n, dest, 9, NULL, 0, 0, 200) == RNC_STATE);
+  CHECK(rnc_node_request_path_ex(n, dest, 0, tag, 17, 0, 200) == RNC_INVALID);
+  CHECK(rnc_node_request_path_ex(n, dest, 1, NULL, 0, 0, 100) == RNC_INVALID); /* time went backwards */
+  /* recursive: the second request waits for announce bandwidth (51 bytes at
+   * 1 Mbit/s and 2 percent is 20.4 ms) */
+  CHECK(rnc_node_request_path_ex(n, dest, 1, NULL, 0, 1, 300) == RNC_OK);
+  discard(n);
+  CHECK(rnc_node_request_path_ex(n, dest, 1, NULL, 0, 1, 310) == RNC_AGAIN);
+  CHECK(rnc_node_request_path_ex(n, dest, 1, NULL, 0, 1, 321) == RNC_OK);
+  /* a non-recursive request ignores the limit */
+  CHECK(rnc_node_request_path_ex(n, dest, 1, NULL, 0, 0, 322) == RNC_OK);
+  discard(n);
+  /* queued announces on the interface block it too */
+  CHECK(rnc_node_add_destination(n, &id, "queued.test", NULL, 0, announced) == RNC_OK);
+  CHECK(rnc_node_announce(n, announced, 1000, 1000) == RNC_OK);
+  CHECK(rnc_node_request_path_ex(n, dest, 1, NULL, 0, 1, 1001) == RNC_AGAIN);
+  rnc_node_free(n);
+}
+/* Transport.hops_to: the hop count of a known path, 128 when there is none. */
+static void hops_to(void) {
+  rnc_identity a = identity(), b = identity();
+  rnc_node *na = rnc_node_new(&a, 0, rng, NULL), *nb = rnc_node_new(&b, 0, rng, NULL);
+  uint8_t dest[16];
+  rnc_packet announce;
+  CHECK(na && nb && rnc_node_add_interface(na, 1, 1000000) == RNC_OK &&
+        rnc_node_add_interface(nb, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_add_destination(nb, &b, "hops.test", NULL, 0, dest) == RNC_OK);
+  CHECK(rnc_node_hops_to(na, dest, 10) == RNC_PATHFINDER_MAX_HOPS);
+  CHECK(rnc_node_announce(nb, dest, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_tick(nb, 1000, 5) == RNC_OK);
+  announce = sent(nb, 1);
+  CHECK(rnc_node_input(na, 1, &announce, 1000, 20) == RNC_OK);
+  CHECK(rnc_node_hops_to(na, dest, 30) == 1);
+  rnc_node_free(na);
+  rnc_node_free(nb);
+}
+/* Destination.accepts_links: link requests to a destination that does not
+ * accept them are dropped before the application sees them. */
+static void accepts_links(void) {
+  rnc_identity id = identity();
+  rnc_node *n = rnc_node_new(&id, 0, rng, NULL);
+  uint8_t dest[16], unknown[16] = {5};
+  rnc_packet request = {0};
+  rnc_node_event e;
+  unsigned locals;
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_add_destination(n, &id, "links.test", NULL, 0, dest) == RNC_OK);
+  CHECK(rnc_node_accepts_links(n, dest) == 1 && rnc_node_accepts_links(n, unknown) == 0);
+  request.flags = 2; /* link request */
+  memcpy(request.destination, dest, 16);
+  request.data_size = 67;
+  CHECK(rng(NULL, request.data, 67) == RNC_OK);
+  CHECK(rnc_node_input(n, 1, &request, 1000, 10) == RNC_OK);
+  locals = 0;
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    locals += e.type == RNC_NODE_LOCAL;
+  CHECK(locals == 1);
+  CHECK(rnc_node_set_accepts_links(n, dest, 0) == RNC_OK && rnc_node_accepts_links(n, dest) == 0);
+  CHECK(rng(NULL, request.data, 67) == RNC_OK);
+  (void)rnc_node_input(n, 1, &request, 1000, 20);
+  locals = 0;
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    locals += e.type == RNC_NODE_LOCAL;
+  CHECK(locals == 0);
+  CHECK(rnc_node_set_accepts_links(n, dest, 1) == RNC_OK);
+  CHECK(rng(NULL, request.data, 67) == RNC_OK);
+  CHECK(rnc_node_input(n, 1, &request, 1000, 30) == RNC_OK);
+  locals = 0;
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    locals += e.type == RNC_NODE_LOCAL;
+  CHECK(locals == 1);
+  CHECK(rnc_node_set_accepts_links(n, unknown, 0) == RNC_STATE &&
+        rnc_node_set_accepts_links(n, dest, 2) == RNC_INVALID);
+  rnc_node_free(n);
 }
 int main(int argc, char **argv) {
   CHECK(argc == 2);
@@ -543,6 +649,12 @@ int main(int argc, char **argv) {
     mesh();
   else if (!strcmp(argv[1], "discovery"))
     discovery();
+  else if (!strcmp(argv[1], "request_path_options"))
+    request_path_options();
+  else if (!strcmp(argv[1], "hops_to"))
+    hops_to();
+  else if (!strcmp(argv[1], "accepts_links"))
+    accepts_links();
   else if (!strcmp(argv[1], "destination_data"))
     destination_data();
   else

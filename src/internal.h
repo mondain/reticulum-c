@@ -29,7 +29,8 @@ struct rnc_link {
     rnc_identity ephemeral, peer_signer, remote;
     uint8_t address[16], key[64];
     uint64_t now, started, activity, control, rtt_ms;
-    uint64_t outbound, activated, est_timeout, stale_since;
+    uint64_t outbound, activated, est_timeout, stale_since, data_at;
+    size_t est_cost;
     int stale, teardown, est_set;
     size_t last_resource_window;
     uint64_t last_resource_eifr;

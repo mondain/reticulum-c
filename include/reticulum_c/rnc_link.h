@@ -137,6 +137,16 @@ void rnc_link_set_last_resource_window(rnc_link *link, size_t window);
 uint64_t rnc_link_last_resource_eifr(const rnc_link *link);
 void rnc_link_set_last_resource_eifr(rnc_link *link, uint64_t bits_per_second);
 uint64_t rnc_link_no_inbound_ms(const rnc_link *link, uint64_t now_ms);
+/* Time since application data last crossed the link in either direction
+ * (the reference's no_data_for): keepalives, identification and close traffic
+ * do not count. Measured from activation until the first data. */
+uint64_t rnc_link_no_data_ms(const rnc_link *link, uint64_t now_ms);
+/* The reference's get_mode: 1, AES-256-CBC (the only mode here). */
+unsigned rnc_link_mode(const rnc_link *link);
+/* The reference's get_establishment_rate: the bytes of the link request and
+ * proof over the round trip time, in bits per second. RNC_STATE before the link
+ * is established. */
+rnc_result rnc_link_establishment_rate(const rnc_link *link, uint64_t *bits_per_second);
 uint64_t rnc_link_no_outbound_ms(const rnc_link *link, uint64_t now_ms);
 
 #ifdef __cplusplus

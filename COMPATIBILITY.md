@@ -605,3 +605,44 @@ lines as this tool, reads back what this tool wrote (Bluetooth, WiFi, display,
 interference avoidance, NeoPixel, TNC mode) and this tool reads back what the
 reference wrote, in both directions. Host tests cover detection, silence, the
 1.52 boundary, a newer major version and the refusal of old firmware.
+
+## Smaller gaps (`feature/small-gaps`)
+
+Identity: `rnc_truncated_hash` and `rnc_random_hash` (`truncated_hash`,
+`get_random_hash`); `rnc_host_identity_save` (`to_file`, `pub_to_file`: the raw
+64 byte private key at mode 0600, or the public key at 0644; atomic, and an
+existing file is only replaced on request).
+
+Destination: `rnc_node_set_accepts_links` drops link requests to a destination
+before the application sees them; `rnc_responder_set_max_request_size` limits
+requests per destination, for present and future links (an inline request over
+the limit is dropped, a Resource advertising one is not accepted, and one that
+arrives anyway is dropped before the handler runs); clearing default app data
+is `rnc_node_set_destination_data(node, dest, NULL, 0)`, now covered by a test
+that the next announce carries none.
+
+Transport: `rnc_node_request_path_ex` (`on_interface`, caller tag, `recursive`:
+nothing is sent while announces are queued for the interface or its announce
+bandwidth allowance has not recovered), `rnc_node_hops_to` (128 when unknown)
+and `rnc_host_await_path`, which reticulum-c-cp, -x and -sh now share instead of
+three copies of the same loop. Its callback receives every host event and a
+tick per pass, and can interrupt the wait.
+
+Link: `rnc_link_no_data_ms` (time since application data, excluding keepalive,
+identification and close traffic), `rnc_link_mode` (1, AES-256-CBC) and
+`rnc_link_establishment_rate` (request and proof bytes over the round trip time,
+bits per second). Packets sent through `rnc_link_send_packet` and
+`rnc_link_send_resource_packet` now count as outbound at the time of the call,
+not the previous call.
+
+Reclassified rather than built: packet prioritisation (the reference only
+prioritises announces by hop count, as here), `proof_strategy` and its callback
+(the application answers `PROVE_APP` packets with `rnc_node_prove`),
+ResourceStrategy, `register_message_type` and the Buffer wrappers (the
+application's own policy and registry).
+
+Evidence: unit tests for each (link getters and rates, hash helpers, identity
+files with modes and overwrite rules, request path options and the recursive
+wait, hops, accepts_links, the request size limit, destination data clearing)
+and a host test of `rnc_host_await_path` with a peer that creates its
+destination mid-wait, a timeout, an immediate return and an interrupt.

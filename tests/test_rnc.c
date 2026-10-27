@@ -248,12 +248,28 @@ static void framing_vectors(void) {
     CHECK(rnc_hdlc_feed(&state, 0x7e, decoded, 500, &n) == RNC_PROTOCOL);
 }
 
+/* Identity.truncated_hash and Identity.get_random_hash. */
+static void hash_helpers(void) {
+    uint8_t full[32], truncated[16], a[16], b[16], seed_bytes[16], expected[16];
+    fixed_rng one = {0, {0}, 32}, two = {0, {0}, 32}, three = {0, {0}, 32};
+    CHECK(rnc_hash("abc", 3, full) == RNC_OK);
+    CHECK(rnc_truncated_hash("abc", 3, truncated) == RNC_OK && !memcmp(truncated, full, 16));
+    CHECK(rnc_truncated_hash(NULL, 0, truncated) == RNC_OK);
+    CHECK(rnc_truncated_hash(NULL, 1, truncated) == RNC_INVALID && rnc_truncated_hash("x", 1, NULL) == RNC_INVALID);
+    /* random hash: the truncated hash of 16 random bytes */
+    CHECK(fixed_random(&one, seed_bytes, 16) == RNC_OK);
+    CHECK(rnc_truncated_hash(seed_bytes, 16, expected) == RNC_OK);
+    CHECK(rnc_random_hash(fixed_random, &two, a) == RNC_OK && !memcmp(a, expected, 16));
+    CHECK(rnc_random_hash(fixed_random, &two, b) == RNC_OK && memcmp(a, b, 16));
+    CHECK(rnc_random_hash(NULL, &three, a) == RNC_INVALID && rnc_random_hash(fixed_random, &three, NULL) == RNC_INVALID);
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     if (!strcmp(argv[1], "identity")) identity_vectors();
     else if (!strcmp(argv[1], "packet")) packet_vectors();
     else if (!strcmp(argv[1], "framing")) framing_vectors();
     else if (!strcmp(argv[1], "announce")) announce_vectors();
+    else if (!strcmp(argv[1], "hashes")) hash_helpers();
     else CHECK(0);
     puts("Reticulum C test passed");
     return 0;

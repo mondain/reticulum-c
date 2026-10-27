@@ -381,27 +381,28 @@ static int listen_mode(rnc_identity *id, app *a) {
   }
   return 0;
 }
-/* Waits for a route to the destination, asking the network for one. */
-static int await_path(app *a, const uint8_t destination[16]) {
-  uint64_t start = monotonic_ms(), last_request = 0;
-  rnc_route route;
-  int requested = 0;
-  while (!stopping && monotonic_ms() - start < (uint64_t)opt.wait * 1000u) {
-    uint64_t now = monotonic_ms();
-    if (!pump(a))
-      return 0;
-    if (rnc_node_lookup(a->node, destination, now, &route) == RNC_OK)
-      return 1;
-    if (!requested || now - last_request > 5000u) {
-      rnc_host_status s;
-      if (rnc_host_get_status(a->host, 1, &s) == RNC_OK && s.online) {
-        (void)rnc_node_request_path(a->node, destination, now);
-        requested = 1;
-        last_request = now;
-      }
+/* Feeds what arrives while waiting for a path to the listener and client. */
+static int await_callback(void *context, const rnc_host_event *event) {
+  app *a = context;
+  uint64_t unix_now = (uint64_t)time(NULL), now = monotonic_ms();
+  if (event) {
+    if (event->type == RNC_HOST_NODE && event->node.type == RNC_NODE_LOCAL) {
+      if (a->listener)
+        (void)rnc_transfer_listener_input(a->listener, &event->node, unix_now, now);
+      if (a->client)
+        (void)rnc_transfer_client_input(a->client, &event->node, unix_now, now);
     }
+    return stopping != 0;
   }
-  return 0;
+  if (a->listener)
+    (void)rnc_transfer_listener_tick(a->listener, unix_now, now);
+  if (a->client)
+    (void)rnc_transfer_client_tick(a->client, unix_now, now);
+  return stopping != 0;
+}
+static int await_path(app *a, const uint8_t destination[16]) {
+  return rnc_host_await_path(a->host, destination, opt.wait * 1000u,
+                             await_callback, a) == RNC_OK;
 }
 static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
                       const char *send_path) {

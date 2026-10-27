@@ -49,7 +49,7 @@ Largest gaps, in priority order:
 | IMPL | Announce propagation (6.7.4) | One retry after 5.5s (PATHFINDER_R/G/RW), cancelled after 2 heard neighbour rebroadcasts or when passed on a further hop; single transmission for shared-instance clients; locally originated announces blocked on AP interfaces. Verified against reference `Transport.py` at the pinned commit. Hold-down of announces during path-request answers is not implemented; hop drop remains at wire hops >= 127 (reference allows 128 after increment); `MODE_INTERNAL` not implemented |
 | IMPL | Path expiry | 7 days; AP 1 day, Roaming 6 hours by ingress interface mode |
 | IMPL | Delivery proofs | Endpoint proof creation (implicit 64B / explicit 96B) via `rnc_node_prove` and PROVE_ALL; validation by signer in `rnc_node_send_tracked` receipts (closed in `feature/spec-gap-closure`) |
-| PART | Packet prioritisation | Only the announce queue is ordered |
+| IMPL | Packet prioritisation | The reference prioritises announces with fewer hops (the announce queue here does the same) and scans interfaces fastest first; nothing else is prioritised there either |
 | IMPL | `PacketReceipt` equivalent: `rnc_node_send_tracked` + `RNC_NODE_RECEIPT` event (delivered/failed, RTT, timeout); `rnc_node_set_proof_strategy` (NONE/APP/ALL) | PROVE_APP is signalled by the LOCAL event; no callback API by design |
 | IMPL | Tunnels and tunnel table | Synthesis packet on TCP client connect (not kiss-framed), validation, tunnel table with 8 h expiry, path association and restoration when a tunnel reappears, signed persistence beside the state file (`<state>.tunnels`); verified against the reference's TCP client |
 | N/A | Transport packet cache and cache-request serving | In the reference `Transport.should_cache()` returns False unconditionally ("disabling it for now, until redesigned"), so nothing is ever put in the general cache and a cache request is never served. The announce cache it also keeps is what this node's route table and state checkpoint already do. Context 8 is still sent by Resource, as the reference does |
@@ -72,7 +72,7 @@ Largest gaps, in priority order:
 | --- | --- | --- |
 | IMPL | create, from_bytes, load/get keys, sign, validate, encrypt, decrypt | |
 | IMPL | `from_file` (64B raw, mode 0600, strict checks) | |
-| PART | `to_file` / `pub_to_file`; `truncated_hash` / `get_random_hash` helpers | |
+| IMPL | `to_file` / `pub_to_file`; `truncated_hash` / `get_random_hash` helpers | `rnc_host_identity_save` (private 0600 or public, atomic, no overwrite unless asked), `rnc_truncated_hash`, `rnc_random_hash` |
 | IMPL | `recall`, `recall_app_data` | `rnc_node_recall`: bounded 256-entry store independent of path lifetime, with sealed export/import for host persistence. Ratchet is returned in the recalled announce |
 
 ### Destination
@@ -80,8 +80,9 @@ Largest gaps, in priority order:
 | Status | Feature | Notes |
 | --- | --- | --- |
 | IMPL | `expand_name`, `hash_from_name_and_identity`, announce, path response, request handlers (ALLOW_NONE/ALL/LIST/identified), GROUP keys | |
-| PART | `accepts_links` toggle, `set_max_request_size`, `set/clear_default_app_data`, `enable_ratchets` persistence | App admits link requests; ratchet persistence is caller-owned |
-| MISS | `proof_strategy`, `set_proof_requested_callback` | |
+| IMPL | `accepts_links` toggle, `set_max_request_size`, `set/clear_default_app_data` | `rnc_node_set_accepts_links`, `rnc_responder_set_max_request_size` / `rnc_service_set_max_request_size` (inline requests and Resource-delivered ones), `rnc_node_set_destination_data` (NULL, 0 clears) |
+| PART | `enable_ratchets` persistence | Ratchet persistence is caller-owned |
+| IMPL | `proof_strategy`, `set_proof_requested_callback` | `rnc_node_set_proof_strategy` (NONE, APP, ALL); with APP the packet arrives as a LOCAL event and the application answers with `rnc_node_prove`, which is the callback's decision |
 
 ### Packet / PacketReceipt
 
@@ -99,8 +100,9 @@ Largest gaps, in priority order:
 | IMPL | Keepalive and timeouts | RTT-scaled keepalive (5..360 s), STALE after 2x keepalive, teardown after RTT*4+5 s, configurable establishment timeout (first hop + 6 s per hop); previously fixed 30 s / 180 s. The default establishment timeout without configuration remains 30 s |
 | IMPL | Teardown reason | `rnc_link_teardown_reason`: timeout, initiator closed, destination closed |
 | IMPL | RTT | `rnc_link_rtt` |
-| PART | ResourceStrategy | Explicit `rnc_resource_accept` only, no strategy enum |
-| PART | `get_age`, `no_inbound_for`, `no_outbound_for` | Implemented. Missing: `inactive_for` (data-only idle), establishment/expected rate, `track_phy_stats`, rssi/snr/q, `get_mode` |
+| N/A | ResourceStrategy | By design the application admits each Resource with `rnc_resource_accept` (the ACCEPT_NONE / APP / ALL choice is the application's own policy before it calls it) |
+| IMPL | `get_age`, `no_inbound_for`, `no_outbound_for`, `no_data_for`, `get_mode`, `get_establishment_rate`, `get_expected_rate` | `rnc_link_age_ms`, `rnc_link_no_inbound_ms`, `rnc_link_no_outbound_ms`, `rnc_link_no_data_ms`, `rnc_link_mode`, `rnc_link_establishment_rate`, `rnc_link_last_resource_eifr` |
+| MISS | `track_phy_stats`, rssi/snr/q | Needs interface signal data the host does not collect |
 | IMPL | RequestReceipt status and progress | `rnc_requester_progress` / `rnc_service_request_state`: FAILED, SENT, DELIVERED (request Resource arrived), RECEIVING (0..1 response Resource progress), READY. Callbacks are events/polling |
 
 ### Resource
@@ -117,16 +119,16 @@ Largest gaps, in priority order:
 | --- | --- | --- |
 | IMPL | Channel envelopes, sequencing, receive window 48, adaptive send window, retries, proofs | `src/channel.c` |
 | IMPL | Buffer streams (0xff00), EOF, bz2, bidirectional | `src/stream.c` |
-| PART | `register_message_type` | Application owns the uint16 type registry |
-| PART | Buffer API | Explicit read/write calls; no file-like wrapper or callbacks |
+| N/A | `register_message_type` | The application owns the uint16 type registry and dispatches on `message_type` itself |
+| N/A | Buffer API wrappers | Explicit read/write calls instead of Python's file-like objects and callbacks |
 
 ### Transport class
 
 | Status | Feature | Notes |
 | --- | --- | --- |
-| PART | `has_path` / `hops_to` / `next_hop` | Via `rnc_node_lookup`; `request_path` exists |
+| IMPL | `has_path` / `hops_to` / `next_hop` | `rnc_node_lookup`, `rnc_node_hops_to` (128 when unknown) |
 | PART | `register_announce_handler` with aspect filter | Event-based; `rnc_announce_matches_aspect` provides the filter |
-| MISS | `await_path`; `request_path` on_interface/recursive options | |
+| IMPL | `await_path`; `request_path` on_interface/tag/recursive options | `rnc_host_await_path` (runs the host, asks again every 5 s, optional event callback and interrupt), `rnc_node_request_path_ex` |
 | IMPL | `blackhole_identity` / `unblackhole_identity` / `is_blackholed`, expiry, reference file format | Node API, daemon admin (`BLACKHOLE` / `UNBLACKHOLE` / `BLACKHOLES`), RPC get/set, persisted beside `--state`; verified with the reference `rnpath -B/-b/-U` |
 | IMPL | Blackhole publishing (`rnstransport.info.blackhole`, `/list`, open to all) | Daemon `publish_blackhole`; verified with the reference `rnpath -p` |
 | IMPL | Blackhole sources: `blackhole_sources`, `blackhole_update_interval` (minutes, default 60), first-run wait 20 s | Daemon `BlackholeUpdater` equivalent on `rnc_requester`; lists persist as `<state>.blackhole.<source hash>`; verified against a reference publisher |
@@ -223,7 +225,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | Status | Example | Notes |
 | --- | --- | --- |
 | IMPL | Announce (incl. ratcheted, path request), Broadcast/PLAIN, GROUP, Link, Identification (allow-list), Requests/Responses, Channel, Buffer, Filetransfer | |
-| PART | Echo | Encrypt/decrypt, proofs and receipts with RTT done; no hops helper beyond `rnc_node_lookup` |
+| IMPL | Echo | Encrypt/decrypt, proofs and receipts with RTT, `rnc_node_hops_to` |
 | PART | Callback-style APIs | Provided as events instead (service, resource, link) |
 
 The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`. No example exists for announce, broadcast, echo, link, identification, request, channel, buffer or filetransfer (tests cover them).
