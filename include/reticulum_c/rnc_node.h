@@ -27,13 +27,31 @@ typedef struct rnc_route {
 typedef enum rnc_node_event_type {
   RNC_NODE_SEND = 1,
   RNC_NODE_LOCAL,
-  RNC_NODE_ANNOUNCE
+  RNC_NODE_ANNOUNCE,
+  RNC_NODE_RECEIPT
 } rnc_node_event_type;
+/* Per-destination delivery proof policy for SINGLE DATA packets. PROVE_ALL
+ * makes the node answer every locally delivered packet with an implicit proof;
+ * PROVE_APP leaves it to rnc_node_prove(); PROVE_NONE (default) never proves. */
+typedef enum rnc_proof_strategy {
+  RNC_PROVE_NONE = 0,
+  RNC_PROVE_APP,
+  RNC_PROVE_ALL
+} rnc_proof_strategy;
+typedef enum rnc_receipt_status {
+  RNC_RECEIPT_DELIVERED = 1,
+  RNC_RECEIPT_FAILED
+} rnc_receipt_status;
+#define RNC_NODE_RECEIPTS 32u
 typedef struct rnc_node_event {
   rnc_node_event_type type;
   uint32_t interface_id;
   rnc_packet packet;
   rnc_route route;
+  /* RNC_NODE_RECEIPT only: full packet hash, status and round trip time. */
+  uint8_t receipt_hash[32];
+  rnc_receipt_status receipt_status;
+  uint64_t rtt_ms;
 } rnc_node_event;
 rnc_result rnc_path_request_create(const uint8_t destination[16],
                                    const uint8_t transport_id[16],
@@ -74,6 +92,22 @@ rnc_result rnc_node_add_destination_ex(rnc_node *node,
  * NULL disables ratcheted announces. Applies to normal and path responses. */
 rnc_result rnc_node_set_ratchet(rnc_node *node, const uint8_t destination[16],
                                 const uint8_t public_key[32]);
+rnc_result rnc_node_set_proof_strategy(rnc_node *node,
+                                       const uint8_t destination[16],
+                                       rnc_proof_strategy strategy);
+/* Answer a delivered DATA packet (from a LOCAL event; pass its interface_id)
+ * with an implicit (64 byte) or explicit (96 byte) proof signed by the
+ * destination identity. The proof is queued as a SEND on that interface. */
+rnc_result rnc_node_prove(rnc_node *node, const uint8_t destination[16],
+                          const rnc_packet *packet, uint32_t interface_id,
+                          int implicit, uint64_t unix_seconds, uint64_t now_ms);
+/* Send a SINGLE DATA packet and track its delivery proof. A route to the
+ * destination is required to learn the signer. Exactly one RNC_NODE_RECEIPT
+ * event follows: DELIVERED on a valid proof, FAILED after timeout_ms. The
+ * packet hash (also the receipt key) is returned in hash. */
+rnc_result rnc_node_send_tracked(rnc_node *node, const rnc_packet *packet,
+                                 uint64_t timeout_ms, uint64_t unix_seconds,
+                                 uint64_t now_ms, uint8_t hash[32]);
 rnc_result rnc_node_announce(rnc_node *node, const uint8_t destination[16],
                              uint64_t unix_seconds, uint64_t now_ms);
 rnc_result rnc_node_request_path(rnc_node *node, const uint8_t destination[16],

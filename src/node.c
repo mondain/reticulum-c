@@ -22,7 +22,7 @@ typedef struct node_route {
   rnc_packet packet;
 } node_route;
 typedef struct node_destination {
-  int used, type, has_ratchet;
+  int used, type, has_ratchet, proof;
   uint8_t ratchet[32];
   rnc_identity identity;
   char name[128];
@@ -48,6 +48,12 @@ typedef struct node_link {
   rnc_identity signer;
   uint64_t expiry;
 } node_link;
+typedef struct node_receipt {
+  int used;
+  uint8_t hash[32];
+  rnc_identity signer;
+  uint64_t sent, expiry;
+} node_receipt;
 typedef struct node_request {
   int used, pending;
   uint8_t destination[16], tag[16];
@@ -75,6 +81,7 @@ struct rnc_node {
   size_t next_hash;
   node_reverse reverse[NODE_REVERSE];
   node_request requests[NODE_REQUESTS];
+  node_receipt receipts[RNC_NODE_RECEIPTS];
   node_queued queued[NODE_QUEUE];
   rnc_node_event events[RNC_NODE_EVENTS];
   size_t head, count;
@@ -203,6 +210,48 @@ static size_t queue_free(const rnc_node *n) {
   for (i = 0; i < NODE_QUEUE; i++)
     c += !n->queued[i].used;
   return c;
+}
+/* Build a delivery proof: destination is the truncated packet hash and the
+ * payload is [hash +] Ed25519 signature of the full hash. */
+static rnc_result make_proof(const node_destination *d, const rnc_packet *p,
+                             int implicit, rnc_packet *proof) {
+  uint8_t hash[32], sig[64];
+  rnc_packet out = {0};
+  rnc_result r = rnc_packet_hash(p, hash);
+  if (r == RNC_OK)
+    r = rnc_identity_sign(&d->identity, hash, 32, sig);
+  if (r != RNC_OK)
+    return r;
+  out.flags = (uint8_t)RNC_PROOF;
+  memcpy(out.destination, hash, 16);
+  if (implicit) {
+    memcpy(out.data, sig, 64);
+    out.data_size = 64;
+  } else {
+    memcpy(out.data, hash, 32);
+    memcpy(out.data + 32, sig, 64);
+    out.data_size = 96;
+  }
+  *proof = out;
+  return RNC_OK;
+}
+/* Returns 1 and queues a RECEIPT event when a tracked packet matches. */
+static int receipt_complete(rnc_node *n, const rnc_packet *proof,
+                            uint64_t now) {
+  size_t i;
+  for (i = 0; i < RNC_NODE_RECEIPTS; i++) {
+    node_receipt *t = &n->receipts[i];
+    rnc_node_event *e;
+    if (!t->used || memcmp(t->hash, proof->destination, 16))
+      continue;
+    e = emit(n, RNC_NODE_RECEIPT, 0, NULL);
+    memcpy(e->receipt_hash, t->hash, 32);
+    e->receipt_status = RNC_RECEIPT_DELIVERED;
+    e->rtt_ms = now - t->sent;
+    t->used = 0;
+    return 1;
+  }
+  return 0;
 }
 static int duplicate(const rnc_node *n, const uint8_t hash[32], uint64_t now) {
   size_t i;
@@ -457,7 +506,7 @@ rnc_result rnc_node_poll(rnc_node *n, rnc_node_event *event) {
     memset(&n->events[n->head], 0, sizeof(e));
     n->head = (n->head + 1) % RNC_NODE_EVENTS;
     n->count--;
-    if (!e.interface_id)
+    if (!e.interface_id && e.type != RNC_NODE_RECEIPT)
       continue;
     *event = e;
     return RNC_OK;
@@ -847,6 +896,79 @@ rnc_result rnc_node_send(rnc_node *n, const rnc_packet *packet,
     n->now = now;
   return r;
 }
+rnc_result rnc_node_set_proof_strategy(rnc_node *n,
+                                       const uint8_t address[16],
+                                       rnc_proof_strategy strategy) {
+  node_destination *d;
+  if (!n || !address || strategy < RNC_PROVE_NONE || strategy > RNC_PROVE_ALL)
+    return RNC_INVALID;
+  d = destination_find(n, address);
+  if (!d || d->type != RNC_SINGLE)
+    return RNC_STATE;
+  d->proof = (int)strategy;
+  return RNC_OK;
+}
+rnc_result rnc_node_prove(rnc_node *n, const uint8_t address[16],
+                          const rnc_packet *packet, uint32_t interface_id,
+                          int implicit, uint64_t unix_seconds, uint64_t now) {
+  node_destination *d;
+  rnc_packet proof;
+  rnc_result r;
+  (void)unix_seconds;
+  if (!n || !address || !packet || now < n->now ||
+      !interface(n, interface_id))
+    return RNC_INVALID;
+  d = destination_find(n, address);
+  if (!d || d->type != RNC_SINGLE || !d->identity.has_private ||
+      (packet->flags & 3u) != RNC_DATA || !same(packet->destination, address))
+    return RNC_STATE;
+  if (!room(n, 1))
+    return RNC_AGAIN;
+  r = make_proof(d, packet, implicit != 0, &proof);
+  if (r != RNC_OK)
+    return r;
+  emit(n, RNC_NODE_SEND, interface_id, &proof);
+  n->now = now;
+  return RNC_OK;
+}
+rnc_result rnc_node_send_tracked(rnc_node *n, const rnc_packet *packet,
+                                 uint64_t timeout, uint64_t unix_seconds,
+                                 uint64_t now, uint8_t hash[32]) {
+  node_receipt *t = NULL;
+  node_route *route;
+  uint8_t digest[32];
+  size_t i;
+  rnc_result r;
+  if (!n || !packet || !hash || !timeout || now < n->now)
+    return RNC_INVALID;
+  if ((packet->flags & 3u) != RNC_DATA ||
+      ((packet->flags >> 2) & 3u) != RNC_SINGLE)
+    return RNC_UNSUPPORTED;
+  route = route_find(n, packet->destination, now);
+  if (!route)
+    return RNC_STATE;
+  for (i = 0; i < RNC_NODE_RECEIPTS; i++)
+    if (!n->receipts[i].used) {
+      t = &n->receipts[i];
+      break;
+    }
+  if (!t)
+    return RNC_AGAIN;
+  r = rnc_packet_hash(packet, digest);
+  if (r != RNC_OK)
+    return r;
+  r = rnc_node_send(n, packet, unix_seconds, now);
+  if (r != RNC_OK)
+    return r;
+  memset(t, 0, sizeof(*t));
+  t->used = 1;
+  memcpy(t->hash, digest, 32);
+  t->signer = route->route.announce.identity;
+  t->sent = now;
+  t->expiry = after(now, timeout);
+  memcpy(hash, digest, 32);
+  return RNC_OK;
+}
 rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
                           const rnc_packet *packet, uint64_t unix_seconds,
                           uint64_t now) {
@@ -940,15 +1062,23 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
       if (r == RNC_OK) {
         if (v->in)
           emit(n, RNC_NODE_SEND, v->in, &p);
-        else
+        else if (!receipt_complete(n, &p, now))
           emit(n, RNC_NODE_LOCAL, ingress, &p);
       }
       break;
     }
   } else if (destination_find(n, p.destination) &&
              destination_find(n, p.destination)->type == (int)destination) {
+    node_destination *d = destination_find(n, p.destination);
     emit(n, RNC_NODE_LOCAL, ingress, &p);
     r = RNC_OK;
+    if (type == RNC_DATA && destination == RNC_SINGLE &&
+        d->proof == RNC_PROVE_ALL && d->identity.has_private) {
+      rnc_packet proof;
+      r = make_proof(d, &p, 1, &proof);
+      if (r == RNC_OK)
+        emit(n, RNC_NODE_SEND, ingress, &proof);
+    }
   } else if (destination == RNC_SINGLE &&
              ((n->transport && (p.flags & 0x40u)) ||
               interface(n, ingress)->local ||
@@ -992,6 +1122,14 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
   for (i = 0; i < NODE_REQUESTS; i++)
     if (n->requests[i].used && n->requests[i].expiry <= now)
       n->requests[i].used = 0;
+  for (i = 0; i < RNC_NODE_RECEIPTS && room(n, 1); i++)
+    if (n->receipts[i].used && n->receipts[i].expiry <= now) {
+      rnc_node_event *e = emit(n, RNC_NODE_RECEIPT, 0, NULL);
+      memcpy(e->receipt_hash, n->receipts[i].hash, 32);
+      e->receipt_status = RNC_RECEIPT_FAILED;
+      e->rtt_ms = now - n->receipts[i].sent;
+      n->receipts[i].used = 0;
+    }
   for (i = 0; i < RNC_NODE_INTERFACES && room(n, 1); i++) {
     node_interface *iface = &n->interfaces[i];
     size_t best = NODE_QUEUE, wire;
