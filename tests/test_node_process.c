@@ -3,7 +3,9 @@
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
+#include "i2p_vectors.h"
 #include <arpa/inet.h>
+#include <openssl/sha.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -3492,9 +3494,289 @@ static void interface_mtu(const char *exe) {
   remove_tree(dir);
   puts("node interface MTU tests passed");
 }
+/* The I2PInterface section against a fake SAM router: the key file is named
+ * as the reference names it (the old name wins when such a file exists), the
+ * address comes up in STATUS, and each peer gets a dialler. */
+static pid_t start_fake_sam(const char *fake, const char *log, unsigned *port) {
+  int fds[2];
+  pid_t p;
+  char text[16];
+  ssize_t got;
+  CHECK(!pipe(fds));
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0);
+    close(fds[1]);
+    execl(fake, fake, log, (char *)NULL);
+    _exit(127);
+  }
+  close(fds[1]);
+  got = read(fds[0], text, sizeof(text) - 1);
+  CHECK(got > 0);
+  text[got] = 0;
+  *port = (unsigned)atoi(text);
+  close(fds[0]);
+  return p;
+}
+static unsigned count_of(const char *haystack, const char *needle) {
+  unsigned n = 0;
+  const char *p = haystack;
+  while ((p = strstr(p, needle)) != NULL) {
+    ++n;
+    p += strlen(needle);
+  }
+  return n;
+}
+static void i2p_daemon(const char *exe, const char *fake) {
+  char dir[] = "/tmp/rnc-node-i2p-XXXXXX", cfg[256], key[256], admin[256],
+       state[256], keydir[300], text[2048], identity[33], reply[4096],
+       log[300], path[400], hex[65];
+  uint8_t name_hash[32], once[32], tail[32], both[64], digest[32],
+      id_bytes[16];
+  unsigned port, tries, i;
+  struct stat sb;
+  FILE *f;
+  int fd;
+  pid_t p, router;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(state, sizeof(state), "%s/state", dir) > 0);
+  CHECK(snprintf(keydir, sizeof(keydir), "%s.i2p", state) > 0);
+  CHECK(snprintf(log, sizeof(log), "%s/sam.log", dir) > 0);
+  router = start_fake_sam(fake, log, &port);
+  /* the old-format name, SHA256(SHA256(name)), already holds a key */
+  SHA256((const unsigned char *)"I2P", 3, name_hash);
+  SHA256(name_hash, 32, once);
+  hex_of(once, 32, hex);
+  CHECK(mkdir(keydir, 0700) == 0);
+  CHECK(snprintf(path, sizeof(path), "%s/%s.i2p", keydir, hex) > 0);
+  f = fopen(path, "w");
+  CHECK(f && fputs(V0_PRIV, f) >= 0 && !fclose(f));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                 "[interfaces]\n[[I2P]]\ntype = I2PInterface\n"
+                 "target_host = 127.0.0.1\ntarget_port = %u\n"
+                 "connectable = yes\npeers = %.52s.b32.i2p, %.52s.b32.i2p\n",
+                 port,
+                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") > 0);
+  config_file(cfg, text);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, identity);
+  for (tries = 0; tries < 100; ++tries) {
+    struct timespec t = {0, 100000000};
+    admin_command(admin, "STATUS", reply, sizeof(reply));
+    if (strstr(reply, "i2p=" V0_B32))
+      break;
+    nanosleep(&t, NULL);
+  }
+  CHECK(tries < 100);
+  /* the controller and one dialler per peer; the idle acceptor is not a peer */
+  CHECK(count_of(reply, "interface id=") == 3);
+  /* the stored key was used, and no key of the new name appeared */
+  CHECK(count_of(reply, "online=1") >= 1);
+  for (i = 0; i < 16; ++i) {
+    unsigned v;
+    CHECK(sscanf(identity + 2 * i, "%2x", &v) == 1);
+    id_bytes[i] = (uint8_t)v;
+  }
+  SHA256(id_bytes, 16, tail);
+  memcpy(both, name_hash, 32);
+  memcpy(both + 32, tail, 32);
+  SHA256(both, 64, digest);
+  hex_of(digest, 32, hex);
+  CHECK(snprintf(path, sizeof(path), "%s/%s.i2p", keydir, hex) > 0);
+  CHECK(stat(path, &sb) != 0);
+  stop(p, fd);
+  /* with no stored key, one is generated under the new name */
+  {
+    DIR *d;
+    struct dirent *e;
+    d = opendir(keydir);
+    CHECK(d);
+    while ((e = readdir(d)) != NULL) {
+      if (e->d_name[0] != '.') {
+        char victim[400];
+        CHECK(snprintf(victim, sizeof(victim), "%s/%s", keydir, e->d_name) > 0);
+        CHECK(unlink(victim) == 0);
+      }
+    }
+    closedir(d);
+  }
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, identity);
+  hex_of(digest, 32, hex);
+  CHECK(snprintf(path, sizeof(path), "%s/%s.i2p", keydir, hex) > 0);
+  for (tries = 0; tries < 100 && stat(path, &sb) != 0; ++tries) {
+    struct timespec t = {0, 100000000};
+    nanosleep(&t, NULL);
+  }
+  CHECK(tries < 100 && (sb.st_mode & 077) == 0);
+  stop(p, fd);
+  kill(router, SIGKILL);
+  waitpid(router, NULL, 0);
+  remove_tree(dir);
+  puts("node I2P interface tests passed");
+}
+
+static void make_dirs(const char *path) {
+  char part[400];
+  size_t i;
+  CHECK(strlen(path) < sizeof(part));
+  for (i = 1; path[i]; ++i)
+    if (path[i] == '/') {
+      memcpy(part, path, i);
+      part[i] = 0;
+      (void)mkdir(part, 0700);
+    }
+  (void)mkdir(path, 0700);
+}
+/* One direction of I2P interop with the unmodified reference, both ends
+ * talking through the fake SAM router: the reference announces a destination
+ * and our daemon must learn the path across the I2P stream. */
+static void i2p_reference_run(const char *exe, const char *fake,
+                              const char *reference, const char *python,
+                              int reference_dials) {
+  char dir[] = "/tmp/rnc-i2p-ref-XXXXXX", rdir[256], rcfg[256], cfg[256],
+       key[256], admin[256], state[256], keydir[300], text[2048], id[33],
+       hash[33], log[300], path[500], hex[65], out[256], addr[64];
+  uint8_t name_hash[32], once[32];
+  unsigned port, waited;
+  int fd, pfd, fds[2];
+  pid_t daemon, router, peer;
+  size_t n = 0;
+  FILE *f;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(state, sizeof(state), "%s/state", dir) > 0);
+  CHECK(snprintf(keydir, sizeof(keydir), "%s.i2p", state) > 0);
+  CHECK(snprintf(log, sizeof(log), "%s/sam.log", dir) > 0);
+  router = start_fake_sam(fake, log, &port);
+  SHA256((const unsigned char *)"I2P", 3, name_hash);
+  SHA256(name_hash, 32, once);
+  hex_of(once, 32, hex);
+  CHECK(mkdir(keydir, 0700) == 0);
+  if (reference_dials) {
+    /* our node is connectable under a key whose address is known */
+    CHECK(snprintf(path, sizeof(path), "%s/%s.i2p", keydir, hex) > 0);
+    f = fopen(path, "w");
+    CHECK(f && fputs(V0_PRIV, f) >= 0 && !fclose(f));
+    snprintf(addr, sizeof(addr), "%s", V0_B32);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = Yes\nshare_instance = "
+                   "No\n[interfaces]\n[[I2P]]\ntype = I2PInterface\n"
+                   "target_host = 127.0.0.1\ntarget_port = %u\n"
+                   "connectable = yes\n",
+                   port) > 0);
+    config_file(cfg, text);
+    write_config(rcfg,
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "[interfaces]\n[[I2P]]\ntype = I2PInterface\nenabled = yes\n"
+                 "peers = %s.b32.i2p\n",
+                 addr);
+  } else {
+    char rstore[400];
+    CHECK(snprintf(rstore, sizeof(rstore), "%s/storage/i2p", rdir) > 0);
+    make_dirs(rstore);
+    CHECK(snprintf(path, sizeof(path), "%s/%s.i2p", rstore, hex) > 0);
+    f = fopen(path, "w");
+    CHECK(f && fputs(V1_PRIV, f) >= 0 && !fclose(f));
+    snprintf(addr, sizeof(addr), "%s", V1_B32);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = Yes\nshare_instance = "
+                   "No\n[interfaces]\n[[I2P]]\ntype = I2PInterface\n"
+                   "target_host = 127.0.0.1\ntarget_port = %u\n"
+                   "peers = %s.b32.i2p\n",
+                   port, addr) > 0);
+    config_file(cfg, text);
+    write_config(rcfg,
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "[interfaces]\n[[I2P]]\ntype = I2PInterface\nenabled = yes\n"
+                 "connectable = yes\n");
+  }
+  daemon = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  CHECK(!pipe(fds));
+  peer = fork();
+  CHECK(peer >= 0);
+  if (!peer) {
+    char sam[32];
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+    close(fds[1]);
+    CHECK(snprintf(sam, sizeof(sam), "127.0.0.1:%u", port) > 0);
+    CHECK(!setenv("PYTHONPATH", reference, 1));
+    CHECK(!setenv("I2P_SAM_ADDRESS", sam, 1));
+    execl(python, python, "-c", reference_tunnel_peer, rdir, "announce", "150",
+          (char *)NULL);
+    _exit(127);
+  }
+  close(fds[1]);
+  pfd = fds[0];
+  hash[0] = out[0] = 0;
+  for (waited = 0; waited < 900 && !hash[0]; ++waited) {
+    struct pollfd pf = {pfd, POLLIN, 0};
+    size_t at;
+    CHECK(poll(&pf, 1, 100) >= 0);
+    if (pf.revents & POLLIN) {
+      ssize_t got = read(pfd, out + n, sizeof(out) - 1 - n);
+      if (got <= 0)
+        break;
+      n += (size_t)got;
+      out[n] = 0;
+    }
+    for (at = 0; at + 32 <= n && !hash[0]; ++at) {
+      size_t k;
+      if (at && out[at - 1] != '\n')
+        continue;
+      for (k = 0; k < 32 && strchr("0123456789abcdef", out[at + k]); ++k) {
+      }
+      if (k == 32 && (at + 32 == n || out[at + 32] == '\n')) {
+        memcpy(hash, out + at, 32);
+        hash[32] = 0;
+      }
+    }
+    if (n > sizeof(out) - 64)
+      n = 0;
+  }
+  CHECK(hash[0]);
+  if (!path_within(admin, hash, 120)) {
+    char reply[4096];
+    admin_command(admin, "STATUS", reply, sizeof(reply));
+    fprintf(stderr, "no path; status:\n%s\n", reply);
+    CHECK(0);
+  }
+  (void)kill(peer, SIGKILL);
+  CHECK(waitpid(peer, NULL, 0) == peer);
+  close(pfd);
+  stop(daemon, fd);
+  kill(router, SIGKILL);
+  waitpid(router, NULL, 0);
+  remove_tree(dir);
+}
+static void i2p_reference(const char *exe, const char *fake,
+                          const char *reference, const char *python) {
+  i2p_reference_run(exe, fake, reference, python, 1);
+  i2p_reference_run(exe, fake, reference, python, 0);
+  puts("node I2P interface reference tests passed");
+}
+
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 4 || argc == 5 || argc == 6);
-  if (!strcmp(argv[2], "cli"))
+  if (!strcmp(argv[2], "i2p") && argc == 4)
+    i2p_daemon(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "i2p_ref") && argc == 6)
+    i2p_reference(argv[1], argv[3], argv[4], argv[5]);
+  else if (!strcmp(argv[2], "cli"))
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);

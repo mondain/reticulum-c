@@ -295,7 +295,7 @@ announce. Native: two-daemon listening (stored, restart, stamp requirement,
 authorised sources, encryption with and without the key) and auto-connect with
 bootstrap teardown and fallback.
 
-Not implemented: I2P and Weave announcements, path gravity.
+Not implemented: Weave announcements, path gravity, and announcements for I2P interfaces.
 
 ## Logging hook (`feature/logging-hook`)
 
@@ -701,3 +701,43 @@ Evidence: a host test with a TCP listener acting as the device (detection,
 configuration and acknowledgement, the ping after silence, reconnect and a second
 detection) and the `TCP_NODELAY` option checked on the host's connected socket.
 Not tested against a real WiFi RNode.
+
+## I2P interface (`feature/i2p`)
+
+`I2PInterface` (host kind `RNC_HOST_I2P`) talks to a local I2P router through its
+SAM v3 bridge (127.0.0.1:7656 unless `target_host` and `target_port` say
+otherwise; the reference takes that from an environment variable, which is not
+read here). It keeps one session open, creates it from a stored destination key
+(or has the router generate one and writes it with owner-only access), and then:
+
+- `peers`: a comma separated list of `<52 chars>.b32.i2p` names, bare 52
+  character b32 addresses or full base64 destinations. A name is looked up on a
+  socket of its own and the stream is made on a fresh one, as the reference's
+  i2plib does. Each peer is retried every 15 s.
+- `connectable = yes`: keeps one `STREAM ACCEPT` waiting at the router and
+  replaces it each time someone connects.
+- Streams carry HDLC frames like a TCP connection, with the reference's TCP
+  keepalive options (10 s, 9 s, 5 probes, 45 s), an empty HDLC frame after 10 s
+  without writing, a drop after 110 s without reading, an MTU of 1064 and a
+  nominal 256 kb/s bitrate. The initiating side synthesizes a tunnel on connect.
+- The key file lives in `<state>.i2p/` (or `<identity file>.i2p/`) and is named
+  `hex(SHA256(SHA256(name) + SHA256(transport identity hash)))`; a file named
+  `hex(SHA256(SHA256(name)))`, which older reference versions used, is used when
+  it exists. A file that is not an I2P key is reported and never overwritten.
+- If the router goes away, every stream goes with the session; the session is
+  rebuilt on the same key when the router is back and the peers are redialled.
+
+Evidence: unit tests for the I2P base64 alphabet, destination and b32 handling
+against values the reference's i2plib produced, and SAM reply parsing; a fake
+SAM router (`tests/fake_sam.c`) with host tests for session and key
+persistence, dialling by name, bare b32 and destination, the retry interval,
+router restart, a bad key file and the keepalive and read watchdog (the
+read-timeout and retry tests fail when their constants are changed); daemon tests for key file naming and
+STATUS; and, with the oracle, the unmodified reference's `I2PInterface` and this
+daemon connecting through the fake router in both directions, each learning an
+announce across the I2P stream.
+
+Not tested against a real I2P router (i2pd or Java I2P): the fake implements the
+subset of SAM used here, so behaviours of a real router (tunnel build times,
+`PING`/`PONG` on the session socket, error results) are covered only by what the
+SAM specification and the reference's client imply.

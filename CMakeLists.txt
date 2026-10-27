@@ -19,7 +19,7 @@ if(RNC_COMPRESSION)
 endif()
 add_library(reticulum_c src/crypto.c src/packet.c src/framing.c src/announce.c
     src/link.c src/channel.c src/node.c src/ifac.c src/ratchet.c src/group.c
-    src/stream.c src/resource.c src/service.c src/ipc.c src/responder.c src/requester.c src/transfer.c src/stamp.c src/discovery.c src/log.c)
+    src/stream.c src/resource.c src/service.c src/ipc.c src/responder.c src/requester.c src/transfer.c src/stamp.c src/discovery.c src/log.c src/i2p.c)
 if(RNC_COMPRESSION)
     target_compile_definitions(reticulum_c PRIVATE RNC_HAVE_BZIP2=1)
     target_link_libraries(reticulum_c PRIVATE BZip2::BZip2)
@@ -66,6 +66,9 @@ if(BUILD_TESTING)
     foreach(case prove_all timeout prove_app forged status recycle default_timeout explicit_proof)
         add_test(NAME reticulum_receipt_${case} COMMAND test_receipt ${case})
     endforeach()
+    add_executable(test_i2p tests/test_i2p.c)
+    target_link_libraries(test_i2p PRIVATE reticulum_c)
+    add_test(NAME reticulum_i2p COMMAND test_i2p)
     add_executable(test_policy tests/test_policy.c)
     target_link_libraries(test_policy PRIVATE reticulum_c)
     foreach(case modes expiry cap invalid)
@@ -272,6 +275,14 @@ if(UNIX AND RNC_BUILD_HOST)
             PROPERTIES LABELS pty)
         set_tests_properties(reticulum_host_network reticulum_host_udp reticulum_host_await_path reticulum_host_rnode_tcp
             PROPERTIES LABELS network TIMEOUT 30)
+        add_executable(fake_sam tests/fake_sam.c)
+        target_link_libraries(fake_sam PRIVATE reticulum_c OpenSSL::Crypto)
+        add_executable(test_i2p_host tests/test_i2p_host.c)
+        target_link_libraries(test_i2p_host PRIVATE reticulum_c_host OpenSSL::Crypto)
+        foreach(case session peers peer_forms retry router_restart bad_key keepalive)
+            add_test(NAME reticulum_i2p_host_${case} COMMAND test_i2p_host $<TARGET_FILE:fake_sam> ${case})
+            set_tests_properties(reticulum_i2p_host_${case} PROPERTIES LABELS network TIMEOUT 60)
+        endforeach()
         add_executable(test_host_internal tests/test_host_internal.c)
         target_link_libraries(test_host_internal PRIVATE reticulum_c OpenSSL::Crypto)
         add_test(NAME reticulum_host_internal COMMAND test_host_internal)
@@ -285,6 +296,9 @@ if(UNIX AND RNC_BUILD_HOST)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
+            add_test(NAME reticulum_node_process_i2p COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> i2p $<TARGET_FILE:fake_sam>)
+            set_tests_properties(reticulum_node_process_i2p PROPERTIES LABELS network TIMEOUT 60)
             add_test(NAME reticulum_node_process_sh_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> sh_tools $<TARGET_FILE:reticulum-c-sh>)
             set_tests_properties(reticulum_node_process_sh_tools PROPERTIES LABELS network TIMEOUT 120)
@@ -387,6 +401,12 @@ if(UNIX AND RNC_BUILD_HOST)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_tunnel_ref
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_i2p_ref COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> i2p_ref
+                    $<TARGET_FILE:fake_sam> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_i2p_ref
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 400)
                 set_tests_properties(reticulum_node_process_remote
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 set_tests_properties(reticulum_node_process_backbone
