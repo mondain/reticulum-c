@@ -716,8 +716,8 @@ Evidence: unit tests for the I2P base64 alphabet, destination and b32 handling
 against values the reference's i2plib produced, and SAM reply parsing; a fake
 SAM router (`tests/fake_sam.c`) with host tests for session and key
 persistence, dialling by name, bare b32 and destination, the retry interval,
-router restart, a bad key file and the keepalive and read watchdog (each timing
-test fails with the constant changed); daemon tests for key file naming and
+router restart, a bad key file and the keepalive and read watchdog (the
+read-timeout and retry tests fail when their constants are changed); daemon tests for key file naming and
 STATUS; and, with the oracle, the unmodified reference's `I2PInterface` and this
 daemon connecting through the fake router in both directions, each learning an
 announce across the I2P stream.
