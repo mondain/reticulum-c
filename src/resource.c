@@ -8,8 +8,16 @@
 #include <stdlib.h>
 #include <string.h>
 #define RESOURCE_WINDOW 4u
-#define RESOURCE_MAX_WINDOW 10u
-#define RESOURCE_PEER_MAX_WINDOW 75u
+#define RESOURCE_MIN_WINDOW 2u
+#define RESOURCE_SLOW_WINDOW 10u      /* ceiling by default (WINDOW_MAX_SLOW) */
+#define RESOURCE_VERY_SLOW_WINDOW 4u
+#define RESOURCE_PEER_MAX_WINDOW 75u  /* WINDOW_MAX_FAST */
+#define RESOURCE_WINDOW_FLEXIBILITY 4u
+#define RESOURCE_FAST_ROUNDS 4u       /* FAST_RATE_THRESHOLD */
+#define RESOURCE_VERY_SLOW_ROUNDS 2u
+#define RESOURCE_RATE_FAST 6250u      /* bytes/s: 50 kbit/s */
+#define RESOURCE_RATE_VERY_SLOW 250u  /* bytes/s: 2 kbit/s */
+#define RESOURCE_PACKET_HEADER 19u
 #define RESOURCE_COLLISION_GUARD                                               \
   (2u * RESOURCE_PEER_MAX_WINDOW + RNC_RESOURCE_MAP_BATCH)
 #define RESOURCE_LIMIT (16u * 1024u * 1024u)
@@ -44,6 +52,10 @@ struct rnc_resource {
   uint8_t *data, *wire, *map, *received, *sent, *wanted;
   size_t wire_capacity, data_size, assembled, metadata_size, metadata_prefix;
   size_t known, received_count, sent_count, window, request_end, send_cursor;
+  size_t window_max, window_min, rx_bytes, rx_bytes_at_request, request_bytes;
+  unsigned fast_rounds, very_slow_rounds;
+  uint64_t request_sent;
+  int round_seen;
   size_t hmu_segment, receiver_min_consecutive;
   int advertise_pending, request_pending, hmu_pending, cancel_pending,
       cache_pending, proof_pending;
@@ -95,6 +107,8 @@ static void clear_transfer(rnc_resource *r) {
   r->reason = RNC_OK;
 }
 static void fail(rnc_resource *r, rnc_result reason, int notify) {
+  if (!r->outgoing && r->window)
+    rnc_link_set_last_resource_window(r->link, r->window);
   r->state = RES_FAILED;
   r->reason = reason;
   r->terminal_pending = 1;
@@ -563,7 +577,14 @@ static rnc_result resource_accept_prepared(rnc_resource *r, const uint8_t *data,
   r->outgoing = 0;
   r->known = a.map_size / 4;
   memcpy(r->map, a.map, a.map_size);
-  r->window = RESOURCE_WINDOW;
+  r->window = rnc_link_last_resource_window(r->link);
+  if (!r->window)
+    r->window = RESOURCE_WINDOW;
+  r->window_max = RESOURCE_SLOW_WINDOW;
+  r->window_min = RESOURCE_MIN_WINDOW;
+  r->fast_rounds = r->very_slow_rounds = 0;
+  r->rx_bytes = r->rx_bytes_at_request = 0;
+  r->round_seen = 0;
   r->request_pending = 1;
   r->state = RES_RX_DATA;
   r->now = r->last_activity = now;
@@ -781,9 +802,21 @@ static rnc_result handle_part(rnc_resource *r, const uint8_t *data,
   memcpy(r->wire + i * r->sdu, data, size);
   r->received[i] = 1;
   r->received_count++;
+  r->rx_bytes += size;
   r->progress_pending = 1;
   r->retries = 0;
+  if (!r->round_seen) {
+    /* first part of a round: request and part size over the time between them */
+    uint64_t rtt = r->now > r->request_sent ? r->now - r->request_sent : 0;
+    r->round_seen = 1;
+    if (rtt && r->request_sent &&
+        ((RESOURCE_PACKET_HEADER + size + r->request_bytes) * 1000u) / rtt >
+            RESOURCE_RATE_FAST &&
+        r->fast_rounds < RESOURCE_FAST_ROUNDS && ++r->fast_rounds == RESOURCE_FAST_ROUNDS)
+      r->window_max = RESOURCE_PEER_MAX_WINDOW;
+  }
   if (r->received_count == r->adv.parts) {
+    rnc_link_set_last_resource_window(r->link, r->window);
     result = finish_segment(r);
     if (result != RNC_OK)
       fail(r, result, 1);
@@ -793,9 +826,23 @@ static rnc_result handle_part(rnc_resource *r, const uint8_t *data,
     if (!r->received[i])
       break;
   if (i == r->request_end) {
+    uint64_t rtt = r->now > r->request_sent ? r->now - r->request_sent : 0;
     r->request_pending = 1;
-    if (r->window < RESOURCE_MAX_WINDOW)
+    if (r->window < r->window_max) {
       r->window++;
+      if (r->window - r->window_min > RESOURCE_WINDOW_FLEXIBILITY - 1)
+        r->window_min++;
+    }
+    if (rtt && r->request_sent) {
+      size_t rate = (size_t)(((r->rx_bytes - r->rx_bytes_at_request) * 1000u) / rtt);
+      if (rate > RESOURCE_RATE_FAST && r->fast_rounds < RESOURCE_FAST_ROUNDS &&
+          ++r->fast_rounds == RESOURCE_FAST_ROUNDS)
+        r->window_max = RESOURCE_PEER_MAX_WINDOW;
+      if (!r->fast_rounds && rate < RESOURCE_RATE_VERY_SLOW &&
+          r->very_slow_rounds < RESOURCE_VERY_SLOW_ROUNDS &&
+          ++r->very_slow_rounds == RESOURCE_VERY_SLOW_ROUNDS)
+        r->window_max = RESOURCE_VERY_SLOW_WINDOW;
+    }
   }
   return RNC_OK;
 }
@@ -1021,6 +1068,11 @@ static rnc_result send_request(rnc_resource *r, uint64_t now) {
     r->request_pending = 0;
     r->request_end = last;
     r->last_activity = now;
+    r->request_sent = now;
+    /* encrypted token: IV, PKCS7-padded body, HMAC; plus the packet header */
+    r->request_bytes = RESOURCE_PACKET_HEADER + 16u + ((n / 16u) + 1u) * 16u + 32u;
+    r->rx_bytes_at_request = r->rx_bytes;
+    r->round_seen = 0;
   }
   return result;
 }
@@ -1149,8 +1201,18 @@ rnc_result rnc_resource_tick(rnc_resource *r, uint64_t now) {
     }
     if (r->state == RES_TX_ADV)
       r->advertise_pending = 1;
-    else if (r->state == RES_RX_DATA)
+    else if (r->state == RES_RX_DATA) {
       r->request_pending = 1;
+      /* a timed-out round: back off the window and its ceiling */
+      if (r->window > r->window_min) {
+        r->window--;
+        if (r->window_max > r->window_min) {
+          r->window_max--;
+          if (r->window_max - r->window > RESOURCE_WINDOW_FLEXIBILITY - 1)
+            r->window_max--;
+        }
+      }
+    }
     else if (r->state == RES_TX_PROOF) {
       uint8_t proof[64];
       size_t off = (r->adv.index - 1u) * RNC_RESOURCE_SEGMENT_MAX,
@@ -1272,4 +1334,11 @@ rnc_result rnc_resource_inspect(const uint8_t *data, size_t size,
   *has_request = a.request_set;
   *response = (a.flags & 16) != 0;
   return RNC_OK;
+}
+
+size_t rnc_resource_window(const rnc_resource *r) {
+  return r && !r->outgoing && active(r) ? r->window : 0;
+}
+size_t rnc_resource_window_max(const rnc_resource *r) {
+  return r && !r->outgoing && active(r) ? r->window_max : 0;
 }

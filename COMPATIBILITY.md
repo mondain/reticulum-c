@@ -198,3 +198,25 @@ Local Linux evidence: 155/155 with the pinned RNS oracle, 125/125 without it,
 122/122 under sanitizers (differential cases excluded). Differential: the
 unmodified reference `rnprobe` (two probes) receives valid replies. Native: a C
 client's tracked packet is proved when enabled and gets no proof when disabled.
+
+## Resource window growth (`feature/resource-window`)
+
+The receiving side now follows the reference's window model (Resource.py):
+start at 4 or at the link's previous incoming window, grow by one part per
+completed request round up to a ceiling of 10, raise the ceiling to 75 after 4
+rounds above 6.25 kB/s, lower it to 4 after 2 rounds below 250 B/s, and back off
+the window and ceiling when a round times out. `rnc_resource_window()` and
+`rnc_resource_window_max()` expose the state; `rnc_link_last_resource_window()`
+carries it between resources on a link.
+
+Local Linux evidence: 159/159 with the pinned RNS oracle (includes the embedded
+reference Resource sender against this receiver), 129/129 without it, sanitizers
+clean (differential cases excluded). Native tests drive the fast, slow, very
+slow and timeout classes with a controlled clock.
+
+Not changed: the retry timer is still a fixed 2 s (the reference derives part
+timeouts from its expected inflight rate, so very slow links retry more often
+here than there), and the sender side was already able to serve windows up to 75.
+The in-process test harness now drains link events in batches because a link
+holds RNC_LINK_EVENTS (64) undelivered events and a 75-part window can exceed
+that if a host feeds a whole round before polling.
