@@ -17,6 +17,8 @@ typedef struct rpc_server {
   uint64_t started;
   rpc_client clients[4];
 } rpc_server;
+/* the management module (node_mgmt.h) owns the probe destination */
+static const uint8_t *probe_responder_hash(void);
 static void rpc_close_client(rpc_client *c) {
   if (c->fd >= 0)
     close(c->fd);
@@ -109,6 +111,10 @@ static const char *kind_name(const rnc_host_status *s) {
     return "KISSInterface";
   case RNC_HOST_RNODE:
     return "RNodeInterface";
+  case RNC_HOST_PIPE:
+    return "PipeInterface";
+  case RNC_HOST_AX25:
+    return "AX25KISSInterface";
   default:
     return "Interface";
   }
@@ -236,7 +242,11 @@ static void all_stats(rnc_rpc_writer *w, rnc_host *h, const config *c,
     (void)rnc_rpc_write_bin(w, id->hash, 16);
     key_nil(w, "network_id");
     key_real(w, "transport_uptime", (double)uptime / 1000.0);
-    key_nil(w, "probe_responder");
+    if (probe_responder_hash()) {
+      (void)rnc_rpc_write_string(w, "probe_responder");
+      (void)rnc_rpc_write_bin(w, probe_responder_hash(), 16);
+    } else
+      key_nil(w, "probe_responder");
   }
 }
 static uint32_t lowest_bitrate(rnc_host *h) {
@@ -249,6 +259,62 @@ static uint32_t lowest_bitrate(rnc_host *h) {
       lowest = s.bitrate;
   return lowest;
 }
+/* Path table as the reference reports it: a list of dicts, optionally limited
+ * by hop count and destination. */
+static void write_path_table(rnc_rpc_writer *w, rnc_host *h, rnc_node *node,
+                             int has_max_hops, uint32_t max_hops,
+                             const uint8_t *only, uint64_t now) {
+  rnc_route route;
+  rnc_host_status s;
+  size_t i, count = 0;
+  for (i = 0; rnc_node_route_at(node, i, now, &route) == RNC_OK; ++i)
+    if ((!has_max_hops || route.hops <= max_hops) &&
+        (!only || !memcmp(only, route.destination, 16)))
+      ++count;
+  (void)rnc_rpc_write_array(w, count);
+  for (i = 0; rnc_node_route_at(node, i, now, &route) == RNC_OK; ++i)
+    if ((!has_max_hops || route.hops <= max_hops) &&
+        (!only || !memcmp(only, route.destination, 16))) {
+      (void)rnc_rpc_write_map(w, 6);
+      (void)rnc_rpc_write_string(w, "hash");
+      (void)rnc_rpc_write_bin(w, route.destination, 16);
+      key_real(w, "timestamp", (double)route.announced_at);
+      (void)rnc_rpc_write_string(w, "via");
+      (void)rnc_rpc_write_bin(w, route.next_hop, 16);
+      key_uint(w, "hops", route.hops);
+      key_real(w, "expires",
+               (double)time(NULL) + (double)(route.expires_ms - now) / 1000.0);
+      if (rnc_host_get_status(h, route.interface_id, &s) == RNC_OK)
+        key_string(w, "interface", s.name);
+      else
+        key_string(w, "interface", "unknown");
+    }
+}
+/* identity hash -> {source, until, reason}, as Transport.blackholed_identities */
+static void write_blackhole_list(rnc_rpc_writer *w, rnc_node *node) {
+  rnc_blackhole_entry e;
+  size_t i;
+  uint64_t unix_now = (uint64_t)time(NULL);
+  for (i = 0; rnc_node_blackhole_at(node, i, unix_now, &e) == RNC_OK; ++i) {
+  }
+  (void)rnc_rpc_write_map(w, i);
+  for (i = 0; rnc_node_blackhole_at(node, i, unix_now, &e) == RNC_OK; ++i) {
+    (void)rnc_rpc_write_bin(w, e.identity, 16);
+    (void)rnc_rpc_write_map(w, 3);
+    (void)rnc_rpc_write_string(w, "source");
+    (void)rnc_rpc_write_bin(w, e.source, 16);
+    (void)rnc_rpc_write_string(w, "until");
+    if (e.until)
+      (void)rnc_rpc_write_uint(w, e.until);
+    else
+      (void)rnc_rpc_write_nil(w);
+    (void)rnc_rpc_write_string(w, "reason");
+    if (e.reason[0])
+      (void)rnc_rpc_write_string(w, e.reason);
+    else
+      (void)rnc_rpc_write_nil(w);
+  }
+}
 static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
                         const uint8_t *query, size_t query_size, rnc_host *h,
                         rnc_node *node, const config *c, const rnc_identity *id,
@@ -257,9 +323,28 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
   rnc_rpc_writer w;
   rnc_route route;
   rnc_host_status s;
-  size_t i, count = 0;
   uint32_t bitrate = 0;
   rnc_rpc_writer_init(&w, out, capacity);
+  {
+    /* blackhole_identity / unblackhole_identity return True, None (no change)
+     * or False, like Transport does */
+    rnc_rpc_command command;
+    if (rnc_rpc_decode_command(query, query_size, &command) == RNC_OK) {
+      rnc_result r =
+          command.type == RNC_RPC_BLACKHOLE_IDENTITY
+              ? rnc_node_blackhole(node, command.identity, command.until,
+                                   command.reason, (uint64_t)time(NULL))
+              : rnc_node_unblackhole(node, command.identity);
+      if (r == RNC_OK) {
+        (void)blackhole_save(node);
+        (void)rnc_rpc_write_bool(&w, 1);
+      } else if (r == RNC_STATE)
+        (void)rnc_rpc_write_nil(&w);
+      else
+        (void)rnc_rpc_write_bool(&w, 0);
+      return rnc_rpc_writer_finish(&w, written) == RNC_OK;
+    }
+  }
   if (rnc_rpc_decode_query(query, query_size, &q) != RNC_OK) {
     (void)rnc_rpc_write_nil(&w);
     return rnc_rpc_writer_finish(&w, written) == RNC_OK;
@@ -269,27 +354,7 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
     all_stats(&w, h, c, id, uptime);
     break;
   case RNC_RPC_PATH_TABLE:
-    for (i = 0; rnc_node_route_at(node, i, now, &route) == RNC_OK; ++i)
-      if (!q.has_max_hops || route.hops <= q.max_hops)
-        ++count;
-    (void)rnc_rpc_write_array(&w, count);
-    for (i = 0; rnc_node_route_at(node, i, now, &route) == RNC_OK; ++i)
-      if (!q.has_max_hops || route.hops <= q.max_hops) {
-        (void)rnc_rpc_write_map(&w, 6);
-        (void)rnc_rpc_write_string(&w, "hash");
-        (void)rnc_rpc_write_bin(&w, route.destination, 16);
-        key_real(&w, "timestamp", (double)route.announced_at);
-        (void)rnc_rpc_write_string(&w, "via");
-        (void)rnc_rpc_write_bin(&w, route.next_hop, 16);
-        key_uint(&w, "hops", route.hops);
-        key_real(&w, "expires",
-                 (double)time(NULL) +
-                     (double)(route.expires_ms - now) / 1000.0);
-        if (rnc_host_get_status(h, route.interface_id, &s) == RNC_OK)
-          key_string(&w, "interface", s.name);
-        else
-          key_string(&w, "interface", "unknown");
-      }
+    write_path_table(&w, h, node, q.has_max_hops, q.max_hops, NULL, now);
     break;
   case RNC_RPC_LINK_COUNT:
     (void)rnc_rpc_write_uint(&w, rnc_node_link_count(node, 0));
@@ -324,8 +389,14 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
     (void)rnc_rpc_write_real(&w, bitrate ? 6.0 + 8000.0 / bitrate : 0);
     break;
   case RNC_RPC_RATE_TABLE:
-  case RNC_RPC_BLACKHOLED_IDENTITIES:
     (void)rnc_rpc_write_array(&w, 0);
+    break;
+  case RNC_RPC_BLACKHOLED_IDENTITIES:
+    write_blackhole_list(&w, node);
+    break;
+  case RNC_RPC_IS_BLACKHOLED:
+    (void)rnc_rpc_write_bool(
+        &w, rnc_node_is_blackholed(node, q.identity_hash, (uint64_t)time(NULL)));
     break;
   default:
     (void)rnc_rpc_write_nil(&w);

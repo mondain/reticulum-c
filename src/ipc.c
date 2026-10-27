@@ -415,7 +415,8 @@ rnc_result rnc_rpc_decode_query(const void *payload, size_t size,
       {"lowest_interface_bitrate", RNC_RPC_LOWEST_INTERFACE_BITRATE, 0},
       {"medium_path_timeout", RNC_RPC_MEDIUM_PATH_TIMEOUT, 0},
       {"rate_table", RNC_RPC_RATE_TABLE, 0},
-      {"blackholed_identities", RNC_RPC_BLACKHOLED_IDENTITIES, 0}};
+      {"blackholed_identities", RNC_RPC_BLACKHOLED_IDENTITIES, 0},
+      {"is_blackholed", RNC_RPC_IS_BLACKHOLED, 0}};
   rmp r = {payload, size, 0};
   rnc_rpc_query out = {0};
   const uint8_t *key, *value;
@@ -436,6 +437,8 @@ rnc_result rnc_rpc_decode_query(const void *payload, size_t size,
       bit = 2;
     else if (n == 8 && !memcmp(key, "max_hops", 8))
       bit = 4;
+    else if (n == 13 && !memcmp(key, "identity_hash", 13))
+      bit = 8;
     else
       return RNC_UNSUPPORTED;
     if (seen & bit)
@@ -453,6 +456,11 @@ rnc_result rnc_rpc_decode_query(const void *payload, size_t size,
         return RNC_PROTOCOL;
       memcpy(out.destination_hash, value, 16);
       out.has_destination = 1;
+    } else if (bit == 8) {
+      if (!rmp_bin(&r, &value, &vn) || vn != 16)
+        return RNC_PROTOCOL;
+      memcpy(out.identity_hash, value, 16);
+      out.has_identity = 1;
     } else {
       if (r.i < r.n && r.p[r.i] == 0xc0)
         r.i++;
@@ -469,6 +477,8 @@ rnc_result rnc_rpc_decode_query(const void *payload, size_t size,
   for (j = 0; j < sizeof(methods) / sizeof(methods[0]); j++)
     if (!strcmp(method, methods[j].name)) {
       if (methods[j].destination && !out.has_destination)
+        return RNC_PROTOCOL;
+      if (methods[j].type == RNC_RPC_IS_BLACKHOLED && !out.has_identity)
         return RNC_PROTOCOL;
       out.type = methods[j].type;
       *query = out;
@@ -678,5 +688,82 @@ rnc_result rnc_rpc_writer_finish(rnc_rpc_writer *w, size_t *written) {
   if (w->depth)
     return writer_error(w, RNC_PROTOCOL);
   *written = w->size;
+  return RNC_OK;
+}
+
+/* until: nil, an unsigned integer or a float, as Python sends time.time(). */
+static int command_until(rmp *r, uint64_t *until) {
+  uint64_t bits;
+  *until = 0;
+  if (r->i >= r->n)
+    return 0;
+  if (r->p[r->i] == 0xc0) {
+    r->i++;
+    return 1;
+  }
+  if (r->p[r->i] == 0xcb) {
+    double d;
+    r->i++;
+    if (!rmp_num(r, 8, &bits))
+      return 0;
+    memcpy(&d, &bits, 8);
+    if (d != d)
+      return 0;
+    *until = d > 0 && d < 1e15 ? (uint64_t)d : 0;
+    return 1;
+  }
+  return rmp_uint(r, until);
+}
+rnc_result rnc_rpc_decode_command(const void *payload, size_t size,
+                                  rnc_rpc_command *command) {
+  rmp r = {payload, size, 0};
+  rnc_rpc_command out;
+  const uint8_t *key, *value;
+  size_t n, vn, i;
+  uint64_t count;
+  unsigned seen = 0, bit;
+  memset(&out, 0, sizeof(out));
+  if (!payload || !command || !size || size > RNC_RPC_MESSAGE_MAX)
+    return RNC_INVALID;
+  if (!map_count(&r, &count) || !count || count > 3)
+    return RNC_PROTOCOL;
+  for (i = 0; i < count; i++) {
+    if (!rmp_len(&r, 1, &n) || !rmp_take(&r, n, &key))
+      return RNC_PROTOCOL;
+    if (n == 18 && !memcmp(key, "blackhole_identity", 18)) {
+      bit = 1;
+      out.type = RNC_RPC_BLACKHOLE_IDENTITY;
+    } else if (n == 20 && !memcmp(key, "unblackhole_identity", 20)) {
+      bit = 1;
+      out.type = RNC_RPC_UNBLACKHOLE_IDENTITY;
+    } else if (n == 5 && !memcmp(key, "until", 5))
+      bit = 2;
+    else if (n == 6 && !memcmp(key, "reason", 6))
+      bit = 4;
+    else
+      return RNC_UNSUPPORTED;
+    if (seen & bit)
+      return RNC_PROTOCOL;
+    seen |= bit;
+    if (bit == 1) {
+      if (!rmp_bin(&r, &value, &vn) || vn != 16)
+        return RNC_PROTOCOL;
+      memcpy(out.identity, value, 16);
+    } else if (bit == 2) {
+      if (!command_until(&r, &out.until))
+        return RNC_PROTOCOL;
+    } else if (r.i < r.n && r.p[r.i] == 0xc0)
+      r.i++;
+    else {
+      if (!rmp_len(&r, 1, &vn) || !rmp_take(&r, vn, &value) ||
+          vn >= sizeof(out.reason) || memchr(value, 0, vn))
+        return RNC_PROTOCOL;
+      memcpy(out.reason, value, vn);
+    }
+  }
+  if (!(seen & 1) || r.i != r.n ||
+      (out.type == RNC_RPC_UNBLACKHOLE_IDENTITY && (seen & 6)))
+    return !(seen & 1) ? RNC_UNSUPPORTED : RNC_PROTOCOL;
+  *command = out;
   return RNC_OK;
 }

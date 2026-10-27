@@ -55,12 +55,14 @@ typedef enum rnc_rpc_query_type {
   RNC_RPC_LOWEST_INTERFACE_BITRATE,
   RNC_RPC_MEDIUM_PATH_TIMEOUT,
   RNC_RPC_RATE_TABLE,
-  RNC_RPC_BLACKHOLED_IDENTITIES
+  RNC_RPC_BLACKHOLED_IDENTITIES,
+  RNC_RPC_IS_BLACKHOLED
 } rnc_rpc_query_type;
 typedef struct rnc_rpc_query {
   rnc_rpc_query_type type;
   uint8_t destination_hash[16];
-  int has_destination, has_max_hops;
+  uint8_t identity_hash[16];
+  int has_destination, has_max_hops, has_identity;
   uint32_t max_hops;
 } rnc_rpc_query;
 /* Bounded GET-only MessagePack map parser; rejects mutation methods, duplicate
@@ -69,6 +71,23 @@ typedef struct rnc_rpc_query {
  */
 rnc_result rnc_rpc_decode_query(const void *payload, size_t size,
                                 rnc_rpc_query *query);
+
+/* The two mutating calls the reference RPC accepts for blackholing. They are
+ * decoded separately from queries so a host that only serves reads never sees
+ * them; authorization is the host's (the RPC channel is HMAC-authenticated).
+ * `until` is unix seconds (0 = none); `reason` may be empty. */
+typedef enum rnc_rpc_command_type {
+  RNC_RPC_BLACKHOLE_IDENTITY = 1,
+  RNC_RPC_UNBLACKHOLE_IDENTITY
+} rnc_rpc_command_type;
+typedef struct rnc_rpc_command {
+  rnc_rpc_command_type type;
+  uint8_t identity[16];
+  uint64_t until;
+  char reason[64];
+} rnc_rpc_command;
+rnc_result rnc_rpc_decode_command(const void *payload, size_t size,
+                                  rnc_rpc_command *command);
 
 /* Native response writer. Init, append exactly one complete value, finish,
  * then pass the completed bytes to rnc_rpc_send(). Container cardinalities are

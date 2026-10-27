@@ -136,6 +136,57 @@ static void query(void) {
     CHECK(rnc_rpc_decode_query(unsupported, sizeof(unsupported), &q) != RNC_OK);
   }
 }
+static size_t unhex(const char *hex, uint8_t *out) {
+  size_t i, n = strlen(hex) / 2;
+  for (i = 0; i < n; ++i) {
+    unsigned v;
+    CHECK(sscanf(hex + 2 * i, "%2x", &v) == 1);
+    out[i] = (uint8_t)v;
+  }
+  return n;
+}
+/* Bytes below were produced by RNS.vendor.umsgpack (reference RPC clients). */
+static void blackhole_rpc(void) {
+  uint8_t msg[256], id[16];
+  rnc_rpc_query q;
+  rnc_rpc_command c;
+  size_t n;
+  memset(id, 0x11, 16);
+  n = unhex("82a3676574ad69735f626c61636b686f6c6564ad6964656e746974795f68617368"
+            "c41011111111111111111111111111111111",
+            msg);
+  CHECK(rnc_rpc_decode_query(msg, n, &q) == RNC_OK &&
+        q.type == RNC_RPC_IS_BLACKHOLED && q.has_identity &&
+        !memcmp(q.identity_hash, id, 16));
+  /* is_blackholed needs the identity */
+  n = unhex("81a3676574ad69735f626c61636b686f6c6564", msg);
+  CHECK(rnc_rpc_decode_query(msg, n, &q) == RNC_PROTOCOL);
+  /* mutating calls are not queries */
+  n = unhex("81b4756e626c61636b686f6c655f6964656e74697479c410"
+            "11111111111111111111111111111111",
+            msg);
+  CHECK(rnc_rpc_decode_query(msg, n, &q) != RNC_OK);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_OK &&
+        c.type == RNC_RPC_UNBLACKHOLE_IDENTITY && !memcmp(c.identity, id, 16));
+  n = unhex("83b2626c61636b686f6c655f6964656e74697479c4101111111111111111111111"
+            "1111111111a5756e74696cc0a6726561736f6ec0",
+            msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_OK &&
+        c.type == RNC_RPC_BLACKHOLE_IDENTITY && c.until == 0 &&
+        c.reason[0] == 0 && !memcmp(c.identity, id, 16));
+  n = unhex("83b2626c61636b686f6c655f6964656e74697479c4101111111111111111111111"
+            "1111111111a5756e74696ccb41edcd6500100000a6726561736f6ea47370616d",
+            msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_OK &&
+        c.type == RNC_RPC_BLACKHOLE_IDENTITY && c.until == 4000000000u &&
+        !strcmp(c.reason, "spam"));
+  /* wrong identity size and queries are rejected without output */
+  n = unhex("81b2626c61636b686f6c655f6964656e74697479c4021111", msg);
+  memset(&c, 0, sizeof(c));
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_PROTOCOL && !c.type);
+  n = unhex("81a3676574aa6c696e6b5f636f756e74", msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_UNSUPPORTED);
+}
 static void writer(void) {
   uint8_t out[128], tiny = 42;
   rnc_rpc_writer w;
@@ -312,6 +363,8 @@ int main(int argc, char **argv) {
     bounds();
   else if (!strcmp(argv[1], "query"))
     query();
+  else if (!strcmp(argv[1], "blackhole"))
+    blackhole_rpc();
   else if (!strcmp(argv[1], "writer"))
     writer();
   else

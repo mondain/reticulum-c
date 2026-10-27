@@ -10,6 +10,8 @@
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_ipc.h>
+#include <reticulum_c/rnc_link.h>
+#include <reticulum_c/rnc_service.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -398,6 +400,511 @@ static void rns_status(const char *python, const char *reference,
     CHECK(0);
   }
 }
+static pid_t start_with_state(const char *exe, const char *cfg,
+                              const char *key, const char *admin,
+                              const char *state, int *out) {
+  int fds[2];
+  pid_t p;
+  CHECK(!pipe(fds));
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0);
+    close(fds[1]);
+    execl(exe, exe, "--config", cfg, "--identity", key, "--admin", admin,
+          "--state", state, (char *)NULL);
+    _exit(127);
+  }
+  close(fds[1]);
+  *out = fds[0];
+  return p;
+}
+static void admin_command(const char *path, const char *command, char *reply,
+                          size_t size) {
+  struct sockaddr_un addr;
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  char line[256];
+  ssize_t n;
+  CHECK(fd >= 0 && size > 1);
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strcpy(addr.sun_path, path);
+  CHECK(!connect(fd, (struct sockaddr *)&addr, sizeof(addr)));
+  CHECK(snprintf(line, sizeof(line), "%s\n", command) > 0);
+  CHECK(write(fd, line, strlen(line)) == (ssize_t)strlen(line));
+  n = read(fd, reply, size - 1);
+  CHECK(n > 0);
+  reply[n] = 0;
+  close(fd);
+}
+/* Blackhole entries are managed from the admin socket and survive a restart. */
+static void blackhole(const char *exe) {
+  char dir[] = "/tmp/rnc-node-bh-XXXXXX", cfg[256], key[256], admin[256],
+       state[256], file[300], reply[1024], id[33];
+  const char *hash = "11111111111111111111111111111111";
+  int fd;
+  pid_t p;
+  struct stat st;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(state, sizeof(state), "%s/state", dir) > 0);
+  CHECK(snprintf(file, sizeof(file), "%s.blackhole", state) > 0);
+  config_file(cfg, valid);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "EMPTY", 5));
+  admin_command(admin, "BLACKHOLE 11111111111111111111111111111111 0 spam run",
+                reply, sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  admin_command(admin, "BLACKHOLE 11111111111111111111111111111111", reply,
+                sizeof(reply));
+  CHECK(strstr(reply, "EXISTS"));
+  admin_command(admin, "BLACKHOLE not-hex", reply, sizeof(reply));
+  CHECK(strstr(reply, "ERROR"));
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, hash) && strstr(reply, "reason=spam run"));
+  CHECK(!stat(file, &st) && (st.st_mode & 0777) == 0600);
+  stop(p, fd);
+  /* restart: the entry is loaded back */
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, hash) && strstr(reply, "reason=spam run"));
+  admin_command(admin, "UNBLACKHOLE 11111111111111111111111111111111", reply,
+                sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  admin_command(admin, "UNBLACKHOLE 11111111111111111111111111111111", reply,
+                sizeof(reply));
+  CHECK(strstr(reply, "NOT_FOUND"));
+  stop(p, fd);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "EMPTY", 5));
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node blackhole tests passed");
+}
+/* Runs a reference utility against the shared instance and returns its
+ * output; fails the test if it exits non-zero. */
+static void reference_tool(const char *python, const char *reference,
+                           const char *module, char *const args[], char *out,
+                           size_t size) {
+  int fds[2], status;
+  pid_t child;
+  size_t used = 0;
+  unsigned tries;
+  char *argv[16];
+  size_t k = 0, a;
+  CHECK(!pipe(fds));
+  argv[k++] = (char *)python;
+  argv[k++] = "-m";
+  argv[k++] = (char *)module;
+  for (a = 0; args[a] && k < 14; ++a)
+    argv[k++] = args[a];
+  argv[k] = NULL;
+  child = fork();
+  CHECK(child >= 0);
+  if (!child) {
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+    close(fds[1]);
+    CHECK(!setenv("PYTHONPATH", reference, 1));
+    execv(python, argv);
+    _exit(127);
+  }
+  close(fds[1]);
+  for (tries = 0; tries < 300; ++tries) {
+    struct pollfd p = {fds[0], POLLIN, 0};
+    CHECK(poll(&p, 1, 50) >= 0);
+    if (p.revents & (POLLIN | POLLHUP)) {
+      ssize_t n = read(fds[0], out + used, size - 1 - used);
+      CHECK(n >= 0);
+      if (!n)
+        break;
+      used += (size_t)n;
+      CHECK(used < size - 1);
+    }
+  }
+  CHECK(tries < 300);
+  out[used] = 0;
+  close(fds[0]);
+  CHECK(waitpid(child, &status, 0) == child);
+  if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+    fprintf(stderr, "%s failed:\n%s\n", module, out);
+    CHECK(0);
+  }
+}
+/* The reference's rnpath manages the blackhole list over the shared-instance
+ * RPC: add with duration and reason, list, then lift. */
+static void rns_blackhole(const char *python, const char *reference,
+                          const char *dir, const char *admin) {
+  const char *hash = "22222222222222222222222222222222";
+  char out[8192], reply[1024];
+  char *add[] = {"--config", (char *)dir, "-B", (char *)hash, "--duration",
+                 "1",        "--reason", "oracle", NULL};
+  char *list[] = {"--config", (char *)dir, "-b", NULL};
+  char *lift[] = {"--config", (char *)dir, "-U", (char *)hash, NULL};
+  reference_tool(python, reference, "RNS.Utilities.rnpath", add, out,
+                 sizeof(out));
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, hash) && strstr(reply, "reason=oracle") &&
+        !strstr(reply, "until=0"));
+  reference_tool(python, reference, "RNS.Utilities.rnpath", list, out,
+                 sizeof(out));
+  if (!strstr(out, "22222222") || !strstr(out, "oracle")) {
+    fprintf(stderr, "rnpath -b output:\n%s\n", out);
+    CHECK(0);
+  }
+  reference_tool(python, reference, "RNS.Utilities.rnpath", lift, out,
+                 sizeof(out));
+  admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(!strncmp(reply, "EMPTY", 5));
+}
+/* End-to-end remote management: a C client reaches the daemon's
+ * rnstransport.remote.management destination over TCP, identifies, and asks
+ * for /status. Only allow-listed identities get an answer. */
+typedef struct mgmt_client {
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_link *link;
+  rnc_service *service;
+  unsigned seed;
+} mgmt_client;
+static rnc_result mgmt_rng(void *context, uint8_t *out, size_t size) {
+  unsigned *s = context;
+  size_t i;
+  for (i = 0; i < size; ++i) {
+    *s = *s * 1664525u + 1013904223u;
+    out[i] = (uint8_t)(*s >> 24);
+  }
+  return RNC_OK;
+}
+/* Returns 1 with the response copied out, 0 if the request timed out. */
+static int mgmt_status(unsigned port, const uint8_t daemon_private[64],
+                       uint8_t *response, size_t capacity, size_t *size) {
+  mgmt_client c = {0};
+  rnc_identity daemon_id;
+  rnc_host_config tcp = {0};
+  rnc_route route;
+  rnc_service_event event;
+  uint8_t destination[16], link_address[16], request_id[16], name_hash[10];
+  const uint8_t include_link_count[2] = {0x91, 0xc3}; /* [true] */
+  uint64_t now = 1000, deadline;
+  int done = 0, result = 0, path_requested = 0, request_sent = 0;
+  c.seed = 42;
+  CHECK(rnc_identity_generate(&c.id, mgmt_rng, &c.seed) == RNC_OK);
+  CHECK(rnc_identity_from_private(&daemon_id, daemon_private) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.remote.management", &daemon_id,
+                             name_hash, destination) == RNC_OK);
+  c.node = rnc_node_new(&c.id, 0, mgmt_rng, &c.seed);
+  c.host = c.node ? rnc_host_new(c.node) : NULL;
+  CHECK(c.host);
+  tcp.kind = RNC_HOST_TCP_CONNECT;
+  tcp.address = "127.0.0.1";
+  tcp.port = (uint16_t)port;
+  CHECK(rnc_host_add(c.host, 1, &tcp) == RNC_OK);
+  deadline = now + 8000;
+  while (!done && now < deadline) {
+    rnc_host_event he;
+    rnc_link_event le;
+    now += 10;
+    CHECK(rnc_host_step(c.host, 5, (uint64_t)time(NULL), now) == RNC_OK);
+    if (!c.link && (!path_requested || now % 500 == 0)) {
+      (void)rnc_node_request_path(c.node, destination, now);
+      path_requested = 1;
+    }
+    if (!c.link && rnc_node_lookup(c.node, destination, now, &route) == RNC_OK) {
+      c.link = rnc_link_new(mgmt_rng, &c.seed);
+      CHECK(c.link && rnc_link_open(c.link, &route.announce, now) == RNC_OK);
+      CHECK(rnc_link_address(c.link, link_address) == RNC_OK);
+      CHECK(rnc_node_bind_link_on(c.node, link_address, route.interface_id) ==
+            RNC_OK);
+      c.service = rnc_service_new(c.link, 65536, mgmt_rng, &c.seed);
+      CHECK(c.service);
+    }
+    while (rnc_host_poll(c.host, &he) == RNC_OK)
+      if (he.type == RNC_HOST_NODE && he.node.type == RNC_NODE_LOCAL && c.link)
+        CHECK(rnc_link_input(c.link, &he.node.packet, now) == RNC_OK);
+    if (!c.link)
+      continue;
+    CHECK(rnc_link_tick(c.link, now) == RNC_OK);
+    while (rnc_link_poll(c.link, &le) == RNC_OK) {
+      if (le.type == RNC_LINK_SEND)
+        CHECK(rnc_node_send(c.node, &le.packet, (uint64_t)time(NULL), now) ==
+              RNC_OK);
+      else if (le.type == RNC_LINK_PACKET ||
+               le.type == RNC_LINK_RESOURCE_PACKET ||
+               le.type == RNC_LINK_CLOSED)
+        (void)rnc_service_input(c.service, &le, now);
+    }
+    if (rnc_link_is_active(c.link) && !request_sent) {
+      CHECK(rnc_link_identify(c.link, &c.id, now) == RNC_OK);
+      CHECK(rnc_service_request(c.service, "/status", include_link_count, 2,
+                                (double)time(NULL), now, 3000,
+                                request_id) == RNC_OK);
+      request_sent = 1;
+    }
+    (void)rnc_service_pump(c.service, now);
+    (void)rnc_service_tick(c.service, now);
+    for (;;) {
+      size_t got = 0;
+      if (rnc_service_poll(c.service, &event, response, capacity, &got) !=
+          RNC_OK)
+        break;
+      if (event.type == RNC_SERVICE_RESPONSE) {
+        *size = got;
+        result = 1;
+        done = 1;
+      } else if (event.type == RNC_SERVICE_TIMEOUT)
+        done = 1;
+    }
+  }
+  if (c.service)
+    rnc_service_free(c.service);
+  if (c.link)
+    rnc_link_free(c.link);
+  rnc_host_free(c.host);
+  rnc_node_free(c.node);
+  return result;
+}
+static void management(const char *exe) {
+  char dir[] = "/tmp/rnc-node-mgmt-XXXXXX", cfg[256], key[256], admin[256],
+       text[1024], id[33];
+  unsigned port = unused_port(), seed = 42;
+  rnc_identity client;
+  uint8_t private_key[64], response[65536];
+  char allowed[33];
+  size_t size, k, i;
+  int fd, keyfd;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  /* the client the test will use is the first identity from seed 42 */
+  CHECK(rnc_identity_generate(&client, mgmt_rng, &seed) == RNC_OK);
+  for (k = 0; k < 16; ++k)
+    CHECK(snprintf(allowed + 2 * k, 3, "%02x", client.hash[k]) == 2);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "enable_remote_management = Yes\n"
+                 "remote_management_allowed = %s\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 allowed, port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  keyfd = open(key, O_RDONLY);
+  CHECK(keyfd >= 0 && read(keyfd, private_key, 64) == 64);
+  close(keyfd);
+  CHECK(mgmt_status(port, private_key, response, sizeof(response), &size));
+  /* [ {interfaces: [...], ...}, link_count ] */
+  CHECK(size > 20 && response[0] == 0x92 &&
+        (response[1] == 0xde || (response[1] & 0xf0) == 0x80));
+  {
+    int found = 0;
+    for (i = 0; i + 10 <= size; ++i)
+      if (!memcmp(response + i, "interfaces", 10))
+        found = 1;
+    CHECK(found);
+  }
+  stop(p, fd);
+  /* a client that is not on the list gets nothing */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "enable_remote_management = Yes\n"
+                 "remote_management_allowed = 00000000000000000000000000000001\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  CHECK(!mgmt_status(port, private_key, response, sizeof(response), &size));
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node remote management tests passed");
+}
+/* Blackhole sources: a daemon subscribed to another daemon's published list
+ * picks up its entries, keeps them across a restart, and never lets a source
+ * override what it listed itself. */
+static void wait_for(const char *admin, const char *command, const char *needle,
+                     unsigned seconds, char *reply, size_t size) {
+  unsigned waited;
+  for (waited = 0; waited < seconds * 10; ++waited) {
+    struct timespec t = {0, 100000000};
+    admin_command(admin, command, reply, size);
+    if (strstr(reply, needle))
+      return;
+    nanosleep(&t, NULL);
+  }
+  fprintf(stderr, "never saw \"%s\"; last reply:\n%s\n", needle, reply);
+  CHECK(0);
+}
+static void blackhole_sources(const char *exe) {
+  char dir[] = "/tmp/rnc-node-src-XXXXXX", acfg[256], akey[256], aadmin[256],
+       bcfg[256], bkey[256], badmin[256], bstate[256], text[1024], aid[33],
+       bid[33], reply[2048], source_file[300];
+  unsigned port = unused_port();
+  int afd, bfd;
+  pid_t a, b;
+  struct stat st;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(acfg, sizeof(acfg), "%s/a.config", dir) > 0);
+  CHECK(snprintf(akey, sizeof(akey), "%s/a.identity", dir) > 0);
+  CHECK(snprintf(aadmin, sizeof(aadmin), "%s/a.admin", dir) > 0);
+  CHECK(snprintf(bcfg, sizeof(bcfg), "%s/b.config", dir) > 0);
+  CHECK(snprintf(bkey, sizeof(bkey), "%s/b.identity", dir) > 0);
+  CHECK(snprintf(badmin, sizeof(badmin), "%s/b.admin", dir) > 0);
+  CHECK(snprintf(bstate, sizeof(bstate), "%s/b.state", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "publish_blackhole = Yes\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = %u\n",
+                 port) > 0);
+  config_file(acfg, text);
+  a = start(exe, acfg, akey, aadmin, &afd);
+  ready_line(afd, aid);
+  admin_command(aadmin,
+                "BLACKHOLE 55555555555555555555555555555555 0 from source",
+                reply, sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "blackhole_sources = %s\nblackhole_initial_wait = 1\n"
+                 "[interfaces]\n[[Upstream]]\ntype = TCPClientInterface\n"
+                 "target_host = 127.0.0.1\ntarget_port = %u\n"
+                 "reconnect_wait = 1\n",
+                 aid, port) > 0);
+  config_file(bcfg, text);
+  b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+  ready_line(bfd, bid);
+  /* B asks for a path to A's list, links, requests it and merges the result */
+  admin_command(badmin,
+                "BLACKHOLE 66666666666666666666666666666666 0 mine", reply,
+                sizeof(reply));
+  CHECK(!strncmp(reply, "OK", 2));
+  wait_for(badmin, "BLACKHOLES", "55555555555555555555555555555555", 40, reply,
+           sizeof(reply));
+  CHECK(strstr(reply, "reason=from source"));
+  {
+    char expected[64];
+    CHECK(snprintf(expected, sizeof(expected), "source=%s", aid) > 0);
+    CHECK(strstr(reply, expected)); /* attributed to the subscribed source */
+  }
+  CHECK(snprintf(source_file, sizeof(source_file), "%s.blackhole.%s", bstate,
+                 aid) > 0);
+  CHECK(!stat(source_file, &st) && (st.st_mode & 0777) == 0600);
+  stop(b, bfd);
+  stop(a, afd);
+  /* with the source gone, a restart still has its entries */
+  b = start_with_state(exe, bcfg, bkey, badmin, bstate, &bfd);
+  ready_line(bfd, bid);
+  admin_command(badmin, "BLACKHOLES", reply, sizeof(reply));
+  CHECK(strstr(reply, "55555555555555555555555555555555") &&
+        strstr(reply, "66666666666666666666666666666666"));
+  stop(b, bfd);
+  remove_tree(dir);
+  puts("node blackhole source tests passed");
+}
+/* Probe responder: a C client sends a DATA packet to rnstransport.probe and
+ * must get a valid delivery proof back. */
+static int probe_delivered(unsigned port, const uint8_t daemon_private[64]) {
+  mgmt_client c = {0};
+  rnc_identity daemon_id;
+  rnc_host_config tcp = {0};
+  rnc_route route;
+  uint8_t destination[16], name_hash[10], hash[32];
+  uint64_t now = 1000, deadline = 9000;
+  int sent = 0, result = 0, done = 0;
+  c.seed = 7;
+  CHECK(rnc_identity_generate(&c.id, mgmt_rng, &c.seed) == RNC_OK);
+  CHECK(rnc_identity_from_private(&daemon_id, daemon_private) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.probe", &daemon_id, name_hash,
+                             destination) == RNC_OK);
+  c.node = rnc_node_new(&c.id, 0, mgmt_rng, &c.seed);
+  c.host = c.node ? rnc_host_new(c.node) : NULL;
+  CHECK(c.host);
+  tcp.kind = RNC_HOST_TCP_CONNECT;
+  tcp.address = "127.0.0.1";
+  tcp.port = (uint16_t)port;
+  CHECK(rnc_host_add(c.host, 1, &tcp) == RNC_OK);
+  while (!done && now < deadline) {
+    rnc_host_event he;
+    now += 10;
+    CHECK(rnc_host_step(c.host, 5, (uint64_t)time(NULL), now) == RNC_OK);
+    if (!sent && now % 500 == 0)
+      (void)rnc_node_request_path(c.node, destination, now);
+    if (!sent && rnc_node_lookup(c.node, destination, now, &route) == RNC_OK) {
+      rnc_packet probe = {0};
+      probe.flags = 0; /* SINGLE DATA, header 1 */
+      memcpy(probe.destination, destination, 16);
+      probe.data_size = 16;
+      memset(probe.data, 0x5a, 16);
+      /* the payload is encrypted to the destination in real probes; the
+       * responder proves any delivered packet, so a raw body suffices here */
+      CHECK(rnc_node_send_tracked(c.node, &probe, 5000,
+                                  (uint64_t)time(NULL), now, hash) == RNC_OK);
+      sent = 1;
+    }
+    while (rnc_host_poll(c.host, &he) == RNC_OK)
+      if (he.type == RNC_HOST_NODE && he.node.type == RNC_NODE_RECEIPT) {
+        result = he.node.receipt_status == RNC_RECEIPT_DELIVERED &&
+                 !memcmp(he.node.receipt_hash, hash, 32);
+        done = 1;
+      }
+  }
+  rnc_host_free(c.host);
+  rnc_node_free(c.node);
+  return result;
+}
+static void probe(const char *exe) {
+  char dir[] = "/tmp/rnc-node-probe-XXXXXX", cfg[256], key[256], admin[256],
+       text[1024], id[33];
+  unsigned port = unused_port();
+  uint8_t private_key[64];
+  int fd, keyfd;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "respond_to_probes = Yes\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  keyfd = open(key, O_RDONLY);
+  CHECK(keyfd >= 0 && read(keyfd, private_key, 64) == 64);
+  close(keyfd);
+  CHECK(probe_delivered(port, private_key));
+  stop(p, fd);
+  /* disabled by default: no destination, so no proof */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  CHECK(!probe_delivered(port, private_key));
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node probe responder tests passed");
+}
 static void shared(const char *exe, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-node-shared-XXXXXX", cfg[256], keypath[256],
        admin[256], storage[256], text[2048], identity[33];
@@ -434,8 +941,10 @@ static void shared(const char *exe, const char *reference, const char *python) {
   key[0] ^= 1;
   rpc_client_test(control, key, 0);
   shared_data_test(port, world);
-  if (reference)
+  if (reference) {
     rns_status(python, reference, dir);
+    rns_blackhole(python, reference, dir, admin);
+  }
   stop(process, fd);
   remove_tree(dir);
   puts(reference ? "unmodified RNS shared-instance test passed"
@@ -600,14 +1109,292 @@ static void backbone(const char *exe, const char *reference,
   backbone_direction(exe, reference, python, 1);
   puts("unmodified RNS Backbone interop passed in both directions");
 }
+/* The reference's rnstatus and rnpath manage a remote transport instance over
+ * rnstransport.remote.management; the daemon must serve them, to the
+ * allow-listed identity only. */
+static void remote_management_reference(const char *exe, const char *reference,
+                                        const char *python) {
+  char dir[] = "/tmp/rnc-mgmt-ref-XXXXXX", rdir[256], rcfg[256], rid[256],
+       cfg[256], key[256], admin[256], text[1024], out[16384], daemon[33],
+       hash[33], port_text[16];
+  unsigned port = unused_port();
+  int fd;
+  char *c;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(rid, sizeof(rid), "%s/identity", dir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/node-identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(port_text, sizeof(port_text), "%u", port) > 0);
+  {
+    char *generate[] = {"-g", rid, NULL};
+    reference_tool(python, reference, "RNS.Utilities.rnid", generate, out,
+                   sizeof(out));
+    c = strchr(out, '<');
+    CHECK(c && strlen(c) > 33 && c[33] == '>');
+    memcpy(hash, c + 1, 32);
+    hash[32] = 0;
+  }
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = "
+                 "No\n[interfaces]\n[[Daemon]]\ntype = TCPClientInterface\n"
+                 "enabled = yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+                 port) > 0);
+  config_file(rcfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "enable_remote_management = Yes\npublish_blackhole = Yes\n"
+                 "remote_management_allowed = %s\n"
+                 "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 hash, port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, daemon);
+  {
+    char *status[] = {"--config", rdir, "-R", daemon, "-i", rid,
+                      "-w",       "20", NULL};
+    char *table[] = {"--config", rdir, "-R", daemon, "-i", rid,
+                     "-W",       "20", "-t", NULL};
+    int status_ok, table_ok, list_ok;
+    char *list[] = {"--config", rdir, "-p", daemon, "-w", "20", NULL};
+    char reply[256];
+    /* the reference treats an empty table as a failed request, so give the
+     * daemon one path: a locally built announce sent over its TCP interface */
+    uint8_t seed_key[64] = {9}, raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+    unsigned entropy = 5, waited;
+    rnc_identity announcer;
+    rnc_packet announce;
+    size_t raw_size, framed_size, k;
+    char announced[33];
+    int feed;
+    CHECK(rnc_identity_from_private(&announcer, seed_key) == RNC_OK &&
+          rnc_announce_create(&announcer, "reticulum_c.mgmt.table", NULL, 0,
+                              (uint64_t)time(NULL), rng, &entropy,
+                              &announce) == RNC_OK);
+    CHECK(rnc_packet_encode(&announce, raw, sizeof(raw), &raw_size) == RNC_OK &&
+          rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, raw_size, framed,
+                                sizeof(framed), &framed_size) == RNC_OK);
+    for (k = 0; k < 16; ++k)
+      CHECK(snprintf(announced + 2 * k, 3, "%02x", announce.destination[k]) ==
+            2);
+    feed = tcp_connect(port);
+    CHECK(write(feed, framed, framed_size) == (ssize_t)framed_size);
+    for (waited = 0; waited < 100 && !admin_has_path(admin, announced); ++waited) {
+      struct timespec t = {0, 50000000};
+      nanosleep(&t, NULL);
+    }
+    CHECK(waited < 100);
+    reference_tool(python, reference, "RNS.Utilities.rnstatus", status, out,
+                   sizeof(out));
+    status_ok = strstr(out, "Status    : Up") && strstr(out, " TCP");
+    if (!status_ok)
+      fprintf(stderr, "rnstatus -R output:\n%s\n", out);
+    reference_tool(python, reference, "RNS.Utilities.rnpath", table, out,
+                   sizeof(out));
+    table_ok = strstr(out, announced) != NULL;
+    if (!table_ok)
+      fprintf(stderr, "rnpath -R -t output:\n%s\n", out);
+    /* the published blackhole list is open to anyone, no identity needed */
+    admin_command(admin,
+                  "BLACKHOLE 33333333333333333333333333333333 0 published spam",
+                  reply, sizeof(reply));
+    CHECK(!strncmp(reply, "OK", 2));
+    reference_tool(python, reference, "RNS.Utilities.rnpath", list, out,
+                   sizeof(out));
+    list_ok = strstr(out, "33333333333333333333333333333333") &&
+              strstr(out, "blackholed indefinitely") &&
+              strstr(out, "published spam");
+    if (!list_ok)
+      fprintf(stderr, "rnpath -p output:\n%s\n", out);
+    close(feed);
+    stop(p, fd); /* never leave the daemon holding the test's pipes */
+    CHECK(status_ok && table_ok && list_ok);
+  }
+  remove_tree(dir);
+  puts("unmodified RNS rnstatus/rnpath remote management passed");
+}
+/* The reference as the publishing end: it blackholes an identity and serves its
+ * list; the daemon, subscribed to the reference's transport identity, must pick
+ * it up. */
+static const char *reference_publisher =
+    "import RNS, sys, time\n"
+    "r = RNS.Reticulum(configdir=sys.argv[1], loglevel=1)\n"
+    "RNS.Transport.blackhole_identity(bytes.fromhex(sys.argv[3]),\n"
+    "                                 reason='reference list')\n"
+    "print('IDENTITY ' + RNS.Transport.identity.hexhash, flush=True)\n"
+    "time.sleep(float(sys.argv[2]))\n";
+static void blackhole_source_reference(const char *exe, const char *reference,
+                                       const char *python) {
+  char dir[] = "/tmp/rnc-bh-ref-XXXXXX", rdir[256], rcfg[256], cfg[256],
+       key[256], admin[256], text[1024], daemon[33], publisher_id[33],
+       out[4096], reply[2048], limit[16], hash[] =
+           "77777777777777777777777777777777";
+  unsigned port = unused_port(), tries;
+  int pfd, dfd, found = 0;
+  size_t used = 0;
+  pid_t publisher, d;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(limit, sizeof(limit), "60") > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = "
+                 "No\npublish_blackhole = Yes\n[interfaces]\n[[Server]]\n"
+                 "type = TCPServerInterface\nenabled = yes\nlisten_ip = "
+                 "127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(rcfg, text);
+  {
+    int fds[2];
+    CHECK(!pipe(fds));
+    publisher = fork();
+    CHECK(publisher >= 0);
+    if (!publisher) {
+      close(fds[0]);
+      CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 &&
+            dup2(fds[1], STDERR_FILENO) >= 0);
+      close(fds[1]);
+      CHECK(!setenv("PYTHONPATH", reference, 1));
+      execl(python, python, "-c", reference_publisher, rdir, limit, hash,
+            (char *)NULL);
+      _exit(127);
+    }
+    close(fds[1]);
+    pfd = fds[0];
+  }
+  out[0] = 0;
+  for (tries = 0; tries < 300 && !strstr(out, "IDENTITY "); ++tries) {
+    struct pollfd pf = {pfd, POLLIN, 0};
+    CHECK(poll(&pf, 1, 100) >= 0);
+    if (pf.revents & POLLIN) {
+      ssize_t n = read(pfd, out + used, sizeof(out) - 1 - used);
+      CHECK(n >= 0);
+      used += (size_t)n;
+    }
+    out[used] = 0;
+  }
+  if (!strstr(out, "IDENTITY ")) {
+    fprintf(stderr, "reference publisher output:\n%s\n", out);
+    (void)kill(publisher, SIGKILL);
+    CHECK(0);
+  }
+  memcpy(publisher_id, strstr(out, "IDENTITY ") + 9, 32);
+  publisher_id[32] = 0;
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "blackhole_sources = %s\nblackhole_initial_wait = 1\n"
+                 "[interfaces]\n[[Upstream]]\ntype = TCPClientInterface\n"
+                 "target_host = 127.0.0.1\ntarget_port = %u\n"
+                 "reconnect_wait = 1\n",
+                 publisher_id, port) > 0);
+  config_file(cfg, text);
+  d = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, daemon);
+  for (tries = 0; tries < 400 && !found; ++tries) {
+    struct timespec t = {0, 100000000};
+    admin_command(admin, "BLACKHOLES", reply, sizeof(reply));
+    found = strstr(reply, hash) && strstr(reply, "reason=reference list");
+    if (!found)
+      nanosleep(&t, NULL);
+  }
+  if (!found)
+    fprintf(stderr, "daemon never merged the reference's list:\n%s\n", reply);
+  (void)kill(publisher, SIGKILL);
+  CHECK(waitpid(publisher, NULL, 0) == publisher);
+  close(pfd);
+  stop(d, dfd);
+  CHECK(found);
+  remove_tree(dir);
+  puts("unmodified RNS published blackhole list subscribed by the daemon "
+       "passed");
+}
+/* The reference's rnprobe against the daemon's probe responder. */
+static void probe_reference(const char *exe, const char *reference,
+                            const char *python) {
+  char dir[] = "/tmp/rnc-probe-ref-XXXXXX", rdir[256], rcfg[256], cfg[256],
+       key[256], admin[256], text[1024], daemon[33], out[8192], hex[33];
+  unsigned port = unused_port();
+  uint8_t destination[16], name_hash[10];
+  rnc_identity identity = {0};
+  size_t k;
+  int fd, ok;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0);
+  CHECK(!mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = "
+                 "No\n[interfaces]\n[[Daemon]]\ntype = TCPClientInterface\n"
+                 "enabled = yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+                 port) > 0);
+  config_file(rcfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+                 "respond_to_probes = Yes\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, daemon);
+  for (k = 0; k < 16; ++k) {
+    unsigned v;
+    CHECK(sscanf(daemon + 2 * k, "%2x", &v) == 1);
+    identity.hash[k] = (uint8_t)v;
+  }
+  CHECK(rnc_destination_hash("rnstransport.probe", &identity, name_hash,
+                             destination) == RNC_OK);
+  for (k = 0; k < 16; ++k)
+    CHECK(snprintf(hex + 2 * k, 3, "%02x", destination[k]) == 2);
+  {
+    char *args[] = {"--config", rdir, "-t", "20", "-n", "2", "-w", "1",
+                    "rnstransport.probe", hex, NULL};
+    reference_tool(python, reference, "RNS.Utilities.rnprobe", args, out,
+                   sizeof(out));
+  }
+  ok = strstr(out, "Valid reply from") != NULL && !strstr(out, "timed out");
+  if (!ok)
+    fprintf(stderr, "rnprobe output:\n%s\n", out);
+  stop(p, fd);
+  CHECK(ok);
+  remove_tree(dir);
+  puts("unmodified RNS rnprobe against the probe responder passed");
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3 || argc == 5);
   if (!strcmp(argv[2], "cli"))
     cli(argv[1]);
   else if (!strcmp(argv[2], "network"))
     network(argv[1]);
+  else if (!strcmp(argv[2], "probe") && argc == 3)
+    probe(argv[1]);
+  else if (!strcmp(argv[2], "sources") && argc == 3)
+    blackhole_sources(argv[1]);
+  else if (!strcmp(argv[2], "management") && argc == 3)
+    management(argv[1]);
+  else if (!strcmp(argv[2], "blackhole") && argc == 3)
+    blackhole(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
+  else if (!strcmp(argv[2], "probe_ref") && argc == 5)
+    probe_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "source_ref") && argc == 5)
+    blackhole_source_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "remote") && argc == 5)
+    remote_management_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "backbone") && argc == 5)
     backbone(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "rns") && argc == 5)

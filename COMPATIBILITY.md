@@ -127,3 +127,74 @@ is skipped on hosts whose `localhost` is not dual-stack.
 
 Behavior changes: TCP client reconnect now waits 5 s by default (was 1 s), as
 the reference does; KISS interfaces now send the TNC setup commands on open.
+
+## Management plane: blackholing (`feature/management-plane`)
+
+Local Linux evidence: 137/137 with the pinned RNS oracle, 113/113 under
+sanitizers (differential cases excluded as before).
+
+Differential: the unmodified reference `rnpath` adds (`-B` with `--duration` and
+`--reason`), lists (`-b`) and lifts (`-U`) blackholed identities on the daemon's
+shared instance over RPC. RPC decoding of `is_blackholed`, `blackhole_identity`
+and `unblackhole_identity` uses bytes produced by the reference `umsgpack`, and
+the persisted list round-trips the reference file layout (including a float
+`until`).
+
+Native only: announce dropping, path removal, expiry and table bounds. Blackhole
+sources and publishing the list over a link are not implemented.
+
+## Management plane: link-terminating destinations (`feature/management-plane`)
+
+New library component `rnc_responder` (sans-I/O): accepts link requests for
+registered destinations, runs one request/response service per link and calls
+registered handlers, with ALLOW_ALL / ALLOW_LIST policies. The daemon uses it
+for `rnstransport.remote.management` and `rnstransport.info.blackhole`.
+
+Local Linux evidence: 144/144 with the pinned RNS oracle, 116/116 without it,
+113/113 under sanitizers (differential cases excluded).
+
+Differential: the unmodified reference `rnstatus -R` and `rnpath -R -t` query the
+daemon over a TCP link with an allow-listed identity, and `rnpath -p` reads the
+published blackhole list. Native: an end-to-end C client over TCP (allowed
+identity answered, unlisted identity gets no answer), and in-process responder
+tests (echo, silent handler, allow-list with identification, link teardown).
+
+Limits: `/path` `rates` returns an empty list (the node keeps no rate table for
+reporting); eight concurrent responder links; requests and responses are capped
+at 64 KiB in the daemon. A request on a stale or closed link is not answered.
+The reference reports an empty path table as a failed request; this applies to
+the reference client regardless of server.
+
+## Management plane: blackhole sources (`feature/management-plane`)
+
+New library component `rnc_requester` (sans-I/O): opens a link to a destination
+the node has a route to, optionally identifies, sends one request, returns the
+response and closes the link. Four concurrent jobs. The daemon's blackhole
+updater uses it: after an initial wait it asks for a path, requests `/list`
+from each subscribed source once per interval, merges identities nobody has
+listed yet (a local entry is never overridden) and stores the list.
+
+Local Linux evidence: 153/153 with the pinned RNS oracle, 124/124 without it,
+121/121 under sanitizers (differential cases excluded).
+
+Differential: the daemon, subscribed to the transport identity of an unmodified
+reference instance with `publish_blackhole`, picks up an identity the reference
+blackholed. Native: requester tests (echo, no route, silent handler, identify
+with an allow list, job limit, argument checks), merge semantics, and two
+daemons (publisher and subscriber) including persistence across a restart.
+
+Differences from the reference updater: the daemon re-asks for a missing path
+every 5 s for up to 25 s instead of one blocking wait; the first-run delay can
+be set with `blackhole_initial_wait` (seconds, reference fixed at 20); lists are
+stored as `<state>.blackhole.<hex>` beside `--state`.
+
+## Management plane: probe responder (`feature/management-plane`)
+
+`respond_to_probes = Yes` registers `rnstransport.probe` on the transport
+identity with PROVE_ALL and no link acceptance, and reports its hash as
+`probe_responder` in RPC interface stats.
+
+Local Linux evidence: 155/155 with the pinned RNS oracle, 125/125 without it,
+122/122 under sanitizers (differential cases excluded). Differential: the
+unmodified reference `rnprobe` (two probes) receives valid replies. Native: a C
+client's tracked packet is proved when enabled and gets no proof when disabled.

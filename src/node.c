@@ -1,4 +1,6 @@
 #include <openssl/crypto.h>
+#include "service_msgpack.h"
+#include <reticulum_c/rnc_ipc.h>
 #include <reticulum_c/rnc_node.h>
 #include <reticulum_c/rnc_security.h>
 #include <stdlib.h>
@@ -42,6 +44,10 @@ typedef struct node_known {
   rnc_announce announce;
   uint64_t heard, stamp;
 } node_known;
+typedef struct node_blackhole {
+  int used;
+  rnc_blackhole_entry entry;
+} node_blackhole;
 typedef struct node_held {
   int used;
   uint32_t iface;
@@ -131,6 +137,7 @@ struct rnc_node {
   node_announce announces[NODE_ANNOUNCES];
   node_held held[NODE_HELD];
   node_known known[RNC_NODE_KNOWN];
+  node_blackhole blackhole[RNC_NODE_BLACKHOLE];
   const rnc_packet *input_packet;
   int releasing;
   node_rate rates[NODE_RATES];
@@ -1044,6 +1051,8 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   r = rnc_announce_verify(p, &a);
   if (r != RNC_OK)
     return r;
+  if (rnc_node_is_blackholed(n, a.identity.hash, unix_seconds))
+    return RNC_OK;
   if (destination_find(n, p->destination) &&
       destination_find(n, p->destination)->type == RNC_SINGLE)
     return RNC_OK;
@@ -1165,6 +1174,9 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
   route = route_find(n, request.destination, now);
   if (route && !n->transport && !interface(n, ingress)->local &&
       !interface(n, route->route.interface_id)->local)
+    route = NULL;
+  if (route && rnc_node_is_blackholed(n, route->route.announce.identity.hash,
+                                      unix_seconds))
     route = NULL;
   if (!d && !route) {
     /* Unknown destination: only interfaces that discover paths for their
@@ -1609,6 +1621,10 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
   size_t i, j;
   if (!n || now < n->now)
     return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_BLACKHOLE; i++)
+    if (n->blackhole[i].used && n->blackhole[i].entry.until &&
+        unix_seconds >= n->blackhole[i].entry.until)
+      n->blackhole[i].used = 0;
   for (i = 0; i < RNC_NODE_ROUTES; i++)
     if (n->routes[i].used && n->routes[i].route.expires_ms <= now)
       n->routes[i].used = 0;
@@ -1900,4 +1916,265 @@ rnc_result rnc_node_state_import(rnc_node *n, const rnc_identity *owner,
 done:
   free(routes);
   return r;
+}
+
+/* Identity blackholing. */
+static int blackhole_live(const node_blackhole *b, uint64_t unix_seconds) {
+  return b->used && (!b->entry.until || unix_seconds < b->entry.until);
+}
+static node_blackhole *blackhole_find(const rnc_node *n,
+                                      const uint8_t identity[16]) {
+  size_t i;
+  for (i = 0; i < RNC_NODE_BLACKHOLE; i++)
+    if (n->blackhole[i].used &&
+        same(n->blackhole[i].entry.identity, identity))
+      return (node_blackhole *)&n->blackhole[i];
+  return NULL;
+}
+static void blackhole_drop_paths(rnc_node *n, const uint8_t identity[16]) {
+  size_t i;
+  for (i = 0; i < RNC_NODE_ROUTES; i++)
+    if (n->routes[i].used &&
+        same(n->routes[i].route.announce.identity.hash, identity))
+      n->routes[i].used = 0;
+}
+/* Adds or replaces an entry; RNC_STATE if a live one exists and !replace. */
+static rnc_result blackhole_set(rnc_node *n, const uint8_t identity[16],
+                                const uint8_t source[16], uint64_t until,
+                                const char *reason, size_t reason_size,
+                                int replace, uint64_t unix_seconds) {
+  node_blackhole *b = blackhole_find(n, identity);
+  size_t i;
+  if (b && !blackhole_live(b, unix_seconds))
+    b->used = 0, b = NULL;
+  if (b && !replace)
+    return RNC_STATE;
+  if (!b) {
+    for (i = 0; i < RNC_NODE_BLACKHOLE && n->blackhole[i].used; i++)
+      if (!blackhole_live(&n->blackhole[i], unix_seconds))
+        n->blackhole[i].used = 0;
+    for (i = 0; i < RNC_NODE_BLACKHOLE && n->blackhole[i].used; i++) {
+    }
+    if (i == RNC_NODE_BLACKHOLE)
+      return RNC_AGAIN;
+    b = &n->blackhole[i];
+  }
+  memset(b, 0, sizeof(*b));
+  b->used = 1;
+  memcpy(b->entry.identity, identity, 16);
+  memcpy(b->entry.source, source, 16);
+  b->entry.until = until;
+  if (reason_size >= RNC_BLACKHOLE_REASON)
+    reason_size = RNC_BLACKHOLE_REASON - 1;
+  if (reason_size)
+    memcpy(b->entry.reason, reason, reason_size);
+  blackhole_drop_paths(n, identity);
+  return RNC_OK;
+}
+rnc_result rnc_node_blackhole(rnc_node *n, const uint8_t identity[16],
+                              uint64_t until, const char *reason,
+                              uint64_t unix_seconds) {
+  if (!n || !identity)
+    return RNC_INVALID;
+  return blackhole_set(n, identity, n->id, until, reason,
+                       reason ? strlen(reason) : 0, 0, unix_seconds);
+}
+rnc_result rnc_node_unblackhole(rnc_node *n, const uint8_t identity[16]) {
+  node_blackhole *b;
+  if (!n || !identity)
+    return RNC_INVALID;
+  b = blackhole_find(n, identity);
+  if (!b)
+    return RNC_STATE;
+  b->used = 0;
+  return RNC_OK;
+}
+int rnc_node_is_blackholed(const rnc_node *n, const uint8_t identity[16],
+                           uint64_t unix_seconds) {
+  const node_blackhole *b;
+  if (!n || !identity)
+    return 0;
+  b = blackhole_find(n, identity);
+  return b && blackhole_live(b, unix_seconds);
+}
+rnc_result rnc_node_blackhole_at(const rnc_node *n, size_t index,
+                                 uint64_t unix_seconds,
+                                 rnc_blackhole_entry *entry) {
+  size_t i;
+  if (!n || !entry)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_BLACKHOLE; i++)
+    if (blackhole_live(&n->blackhole[i], unix_seconds) && !index--) {
+      *entry = n->blackhole[i].entry;
+      return RNC_OK;
+    }
+  return RNC_AGAIN;
+}
+rnc_result rnc_node_blackhole_export(const rnc_node *n, void *output,
+                                     size_t capacity, size_t *written) {
+  rnc_rpc_writer w;
+  size_t i, count = 0;
+  rnc_result r;
+  if (written)
+    *written = 0;
+  if (!n || !output || !written)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_BLACKHOLE; i++)
+    if (n->blackhole[i].used && same(n->blackhole[i].entry.source, n->id))
+      count++;
+  rnc_rpc_writer_init(&w, output, capacity);
+  r = rnc_rpc_write_map(&w, count);
+  for (i = 0; r == RNC_OK && i < RNC_NODE_BLACKHOLE; i++) {
+    const rnc_blackhole_entry *e = &n->blackhole[i].entry;
+    if (!n->blackhole[i].used || !same(e->source, n->id))
+      continue;
+    r = rnc_rpc_write_bin(&w, e->identity, 16);
+    if (r == RNC_OK)
+      r = rnc_rpc_write_map(&w, 3);
+    if (r == RNC_OK)
+      r = rnc_rpc_write_string(&w, "source");
+    if (r == RNC_OK)
+      r = rnc_rpc_write_bin(&w, e->source, 16);
+    if (r == RNC_OK)
+      r = rnc_rpc_write_string(&w, "until");
+    if (r == RNC_OK)
+      r = e->until ? rnc_rpc_write_uint(&w, e->until) : rnc_rpc_write_nil(&w);
+    if (r == RNC_OK)
+      r = rnc_rpc_write_string(&w, "reason");
+    if (r == RNC_OK)
+      r = e->reason[0] ? rnc_rpc_write_string(&w, e->reason)
+                       : rnc_rpc_write_nil(&w);
+  }
+  if (r == RNC_OK)
+    r = rnc_rpc_writer_finish(&w, written);
+  if (r != RNC_OK)
+    *written = 0;
+  return r == RNC_INVALID && capacity ? RNC_NO_SPACE : r;
+}
+static int rmp_map_header(rmp *r, size_t *pairs) {
+  const uint8_t *p;
+  uint64_t v;
+  if (!rmp_take(r, 1, &p))
+    return 0;
+  if ((*p & 0xf0) == 0x80) {
+    *pairs = *p & 15u;
+    return 1;
+  }
+  if ((*p == 0xde && rmp_num(r, 2, &v)) || (*p == 0xdf && rmp_num(r, 4, &v))) {
+    *pairs = (size_t)v;
+    return v <= 4096;
+  }
+  return 0;
+}
+/* until: nil, an unsigned integer or a float (Python stores time.time()). */
+static int rmp_until(rmp *r, uint64_t *until) {
+  const uint8_t *p;
+  uint64_t bits;
+  if (r->i >= r->n)
+    return 0;
+  if (r->p[r->i] == 0xc0) {
+    r->i++;
+    *until = 0;
+    return 1;
+  }
+  if (r->p[r->i] == 0xcb) {
+    double d;
+    r->i++;
+    if (!rmp_num(r, 8, &bits))
+      return 0;
+    memcpy(&d, &bits, 8);
+    *until = d > 0 && d < 1e15 ? (uint64_t)d : 0;
+    return d == d; /* reject NaN */
+  }
+  if (r->p[r->i] == 0xca) {
+    float f;
+    uint32_t b32;
+    r->i++;
+    if (!rmp_num(r, 4, &bits))
+      return 0;
+    b32 = (uint32_t)bits;
+    memcpy(&f, &b32, 4);
+    *until = f > 0 && f < 1e15f ? (uint64_t)f : 0;
+    return f == f;
+  }
+  (void)p;
+  return rmp_uint(r, until);
+}
+static rnc_result blackhole_parse(rnc_node *n, const void *input, size_t size,
+                                  const uint8_t source[16],
+                                  uint64_t unix_seconds, int apply,
+                                  int only_new, size_t *added) {
+  rmp r = {input, size, 0};
+  size_t pairs, i;
+  rnc_result result = RNC_OK;
+  if (!rmp_map_header(&r, &pairs))
+    return RNC_PROTOCOL;
+  for (i = 0; i < pairs; i++) {
+    const uint8_t *key, *text;
+    size_t key_size, fields, f, reason_size = 0;
+    uint64_t until = 0;
+    const char *reason = "";
+    if (!rmp_bin(&r, &key, &key_size) || !rmp_map_header(&r, &fields))
+      return RNC_PROTOCOL;
+    for (f = 0; f < fields; f++) {
+      size_t name_size;
+      if (!rmp_len(&r, 1, &name_size) || !rmp_take(&r, name_size, &text))
+        return RNC_PROTOCOL;
+      if (name_size == 5 && !memcmp(text, "until", 5)) {
+        if (!rmp_until(&r, &until))
+          return RNC_PROTOCOL;
+      } else if (name_size == 6 && !memcmp(text, "reason", 6)) {
+        if (r.i < r.n && r.p[r.i] == 0xc0)
+          r.i++;
+        else if (rmp_len(&r, 1, &reason_size) &&
+                 rmp_take(&r, reason_size, &text))
+          reason = (const char *)text;
+        else
+          return RNC_PROTOCOL;
+      } else if (!rmp_skip_depth(&r, 0))
+        return RNC_PROTOCOL;
+    }
+    if (key_size != 16)
+      continue; /* the reference ignores wrong-sized keys */
+    if (until && unix_seconds >= until)
+      continue;
+    if (apply) {
+      const node_blackhole *old = blackhole_find(n, key);
+      int live = old && blackhole_live(old, unix_seconds);
+      rnc_result s;
+      if (live && (only_new || same(old->entry.source, n->id)))
+        continue; /* a local entry is never overridden */
+      s = blackhole_set(n, key, source ? source : n->id, until, reason,
+                        reason_size, 1, unix_seconds);
+      if (s == RNC_AGAIN)
+        result = RNC_NO_SPACE;
+      else if (s == RNC_OK && added)
+        ++*added;
+    }
+  }
+  return r.i == r.n ? result : RNC_PROTOCOL;
+}
+rnc_result rnc_node_blackhole_import(rnc_node *n, const void *input,
+                                     size_t size, const uint8_t source[16],
+                                     uint64_t unix_seconds) {
+  rnc_result r;
+  if (!n || !input || !size)
+    return RNC_INVALID;
+  r = blackhole_parse(n, input, size, source, unix_seconds, 0, 0, NULL);
+  if (r != RNC_OK)
+    return r;
+  return blackhole_parse(n, input, size, source, unix_seconds, 1, 0, NULL);
+}
+rnc_result rnc_node_blackhole_merge(rnc_node *n, const void *input,
+                                    size_t size, const uint8_t source[16],
+                                    uint64_t unix_seconds, size_t *added) {
+  rnc_result r;
+  if (added)
+    *added = 0;
+  if (!n || !input || !size)
+    return RNC_INVALID;
+  r = blackhole_parse(n, input, size, source, unix_seconds, 0, 1, NULL);
+  if (r != RNC_OK)
+    return r;
+  return blackhole_parse(n, input, size, source, unix_seconds, 1, 1, added);
 }

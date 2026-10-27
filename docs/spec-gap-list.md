@@ -19,7 +19,7 @@ Largest gaps, in priority order:
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
 4. Missing interface types: I2P, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits and callsign beacon done; remaining): detection/firmware check.
-6. Management plane: blackhole management, remote management destination, interface discovery, network identities, probe responder.
+6. Management plane: blackhole management, remote management destination and probe responder are done; interface discovery and network identities remain.
 7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
 8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
 9. Resource window cap of 10 parts (reference grows to 75).
@@ -125,8 +125,11 @@ Largest gaps, in priority order:
 | PART | `has_path` / `hops_to` / `next_hop` | Via `rnc_node_lookup`; `request_path` exists |
 | PART | `register_announce_handler` with aspect filter | Event-based; `rnc_announce_matches_aspect` provides the filter |
 | MISS | `await_path`; `request_path` on_interface/recursive options | |
-| MISS | `blackhole_identity` / `unblackhole_identity` / sources / publish | |
-| MISS | `remote_management_enabled`, `discovered_interfaces`, discovery sources | |
+| IMPL | `blackhole_identity` / `unblackhole_identity` / `is_blackholed`, expiry, reference file format | Node API, daemon admin (`BLACKHOLE` / `UNBLACKHOLE` / `BLACKHOLES`), RPC get/set, persisted beside `--state`; verified with the reference `rnpath -B/-b/-U` |
+| IMPL | Blackhole publishing (`rnstransport.info.blackhole`, `/list`, open to all) | Daemon `publish_blackhole`; verified with the reference `rnpath -p` |
+| IMPL | Blackhole sources: `blackhole_sources`, `blackhole_update_interval` (minutes, default 60), first-run wait 20 s | Daemon `BlackholeUpdater` equivalent on `rnc_requester`; lists persist as `<state>.blackhole.<source hash>`; verified against a reference publisher |
+| IMPL | `remote_management_enabled` | `rnstransport.remote.management` with `/status` and `/path` (table; rates is empty), identity allow list |
+| MISS | `discovered_interfaces`, discovery sources | |
 
 ## 4. Interfaces (manual ch7, ch8)
 
@@ -185,9 +188,11 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | --- | --- | --- |
 | IMPL | `enable_transport`, `share_instance`, `shared_instance_type` / `shared_instance_port`, `instance_control_port`, `rpc_key` | |
 | MISS | `instance_name`, `loglevel` | No logging subsystem |
-| MISS | `panic_on_interface_error`, `use_implicit_proof`, `respond_to_probes`, `link_mtu_discovery` | |
-| MISS | `enable_remote_management`, `remote_management_allowed` | |
-| MISS | `discover_interfaces` and related, `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval`, `network_identity` | |
+| IMPL | `respond_to_probes` | Daemon registers `rnstransport.probe` with PROVE_ALL, takes no links; reported as `probe_responder` in interface stats |
+| MISS | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | |
+| IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
+| IMPL | `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval` | |
+| MISS | `discover_interfaces` and related, `network_identity` | |
 | MISS | `~/.reticulum` config/storage layout | Daemon uses `--identity` and `--state` |
 
 ### Utilities (lower priority for an SDK)
@@ -196,9 +201,9 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | --- | --- | --- |
 | PART | `rnsd` | `examples/node_daemon.c`: config, `--check`, SIGHUP reload, checkpoints, shared instance, RPC |
 | PART | `rnstatus`, `rnpath` | Backends via RPC exist; no CLI; RPC is GET-only (no drop path / drop announce queues, no blackhole mutation) |
-| MISS | `rnprobe` | Needs proofs |
+| IMPL | `rnprobe` target | Reference `rnprobe` gets valid replies from the daemon; the SDK has no `rnprobe` client tool of its own |
 | MISS | `rncp`, `rnx`, `rnsh`, `rnid`, `rnodeconf` | Library primitives exist for `rncp`, `rnid`, `rnx` |
-| MISS | Remote management destination, blackhole federation, interface discovery | |
+| PART | Remote management, blackhole publishing and subscribing done; interface discovery missing | |
 
 ## 6. Examples (manual ch13)
 

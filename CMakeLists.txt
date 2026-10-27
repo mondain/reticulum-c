@@ -19,7 +19,7 @@ if(RNC_COMPRESSION)
 endif()
 add_library(reticulum_c src/crypto.c src/packet.c src/framing.c src/announce.c
     src/link.c src/channel.c src/node.c src/ifac.c src/ratchet.c src/group.c
-    src/stream.c src/resource.c src/service.c src/ipc.c)
+    src/stream.c src/resource.c src/service.c src/ipc.c src/responder.c src/requester.c)
 if(RNC_COMPRESSION)
     target_compile_definitions(reticulum_c PRIVATE RNC_HAVE_BZIP2=1)
     target_link_libraries(reticulum_c PRIVATE BZip2::BZip2)
@@ -86,6 +86,21 @@ if(BUILD_TESTING)
     foreach(case recall refresh bounded persistence aspect)
         add_test(NAME reticulum_recall_${case} COMMAND test_recall ${case})
     endforeach()
+    add_executable(test_blackhole tests/test_blackhole.c)
+    target_link_libraries(test_blackhole PRIVATE reticulum_c)
+    foreach(case announces paths bounds expiry persistence reference_file merge)
+        add_test(NAME reticulum_blackhole_${case} COMMAND test_blackhole ${case})
+    endforeach()
+    add_executable(test_responder tests/test_responder.c)
+    target_link_libraries(test_responder PRIVATE reticulum_c)
+    foreach(case echo quiet allow_list close arguments)
+        add_test(NAME reticulum_responder_${case} COMMAND test_responder ${case})
+    endforeach()
+    add_executable(test_requester tests/test_requester.c)
+    target_link_libraries(test_requester PRIVATE reticulum_c)
+    foreach(case echo no_route silent identify busy arguments)
+        add_test(NAME reticulum_requester_${case} COMMAND test_requester ${case})
+    endforeach()
     add_executable(test_security tests/test_security.c)
     target_link_libraries(test_security PRIVATE reticulum_c OpenSSL::Crypto)
     foreach(case ifac ratchet group)
@@ -135,7 +150,7 @@ if(BUILD_TESTING)
     add_test(NAME reticulum_service_expiry COMMAND test_service_expiry)
     add_executable(test_ipc tests/test_ipc.c)
     target_link_libraries(test_ipc PRIVATE reticulum_c)
-    foreach(case handshake bounds query writer)
+    foreach(case handshake bounds query blackhole writer)
         add_test(NAME reticulum_ipc_${case} COMMAND test_ipc ${case})
     endforeach()
     add_executable(test_rnc tests/test_rnc.c)
@@ -205,12 +220,13 @@ if(UNIX AND RNC_BUILD_HOST)
         if(RNC_BUILD_EXAMPLES)
             add_executable(test_node_process tests/test_node_process.c)
             target_link_libraries(test_node_process PRIVATE reticulum_c_host OpenSSL::Crypto)
-            foreach(case cli network shared)
+            foreach(case cli network shared blackhole management sources probe)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
             set_tests_properties(reticulum_node_process_cli PROPERTIES TIMEOUT 20)
-            set_tests_properties(reticulum_node_process_network reticulum_node_process_shared
+            set_tests_properties(reticulum_node_process_network reticulum_node_process_shared reticulum_node_process_management
+                reticulum_node_process_sources reticulum_node_process_probe
                 PROPERTIES LABELS network TIMEOUT 60)
             if(RNC_INTEROP_TESTS)
                 add_test(NAME reticulum_node_process_rns COMMAND ${CMAKE_COMMAND} -E env
@@ -223,6 +239,24 @@ if(UNIX AND RNC_BUILD_HOST)
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> backbone
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                add_test(NAME reticulum_node_process_remote COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> remote
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                add_test(NAME reticulum_node_process_source_ref COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> source_ref
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_source_ref
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_probe_ref COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> probe_ref
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_probe_ref
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                set_tests_properties(reticulum_node_process_remote
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 set_tests_properties(reticulum_node_process_backbone
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
             endif()
