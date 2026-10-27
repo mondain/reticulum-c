@@ -17,7 +17,7 @@ Largest gaps, in priority order:
 1. Endpoint packet delivery proofs and `PacketReceipt` (PROVE_NONE/APP/ALL, implicit/explicit proofs, timeouts). Blocks the Echo and rnprobe patterns.
 2. Interface policy: interface modes, configurable `announce_cap`, per-destination announce rate limiting, new-destination rate limiting, path request burst control, ingress control.
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
-4. Missing interface types: RNode Multi, Weave (I2P is done). Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
+4. Missing interface types: Weave (I2P and RNode Multi are done). Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits, callsign beacon, detection and the firmware check are done).
 6. Management plane: blackhole management, remote management destination, probe responder, network identities and interface discovery are done (see sections 3 and 4).
 7. Persistent known-destination store (`Identity.recall`) and tunnels are done. The transport packet cache is deliberately not built: see section 3.
@@ -162,7 +162,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | RNode LoRa | IMPL | RSSI (dBm), SNR (dB) and link quality (percent from SNR and spreading factor) of the last frame: `rnc_host_status`, on each host event for a received packet, and the RPC interface stats (`rssi`, `snr`, `q`, shown by `reticulum-c-ctl status`) |
 | RNode LoRa | MISS | BLE RNode, battery, temperature and channel statistics |
 | RNode LoRa | IMPL | WiFi RNode over TCP: `port = tcp://host` (port 7633, or `rnc_host_config.port`); the same KISS protocol, detection and radio setup once the socket opens, a detection ping after 3.5 s of silence, reconnect after a drop |
-| RNode Multi | MISS | Sub-interfaces (only `kiss_port` in the command byte) |
+| RNode Multi | IMPL | `RNodeMultiInterface`: one serial device, radios found by the device itself (`CMD_INTERFACES`) and selected with `CMD_SEL_INT` before each command and frame, `[[[radio]]]` sections (`vport`, frequency, bandwidth, txpower, spreadingfactor, codingrate, flow_control, airtime limits, outgoing, interface_enabled), per radio RSSI/SNR/quality, firmware 1.74 or newer, 5 s reconnect. Command streams match the unmodified reference against the same emulated device; not tested on real hardware |
+| RNode Multi | MISS | The shared station-ID timer (each radio keeps its own), IFAC on the radios (the reference gives them none either), display/framebuffer, TCP/BLE transport |
 | Serial | IMPL | HDLC over termios, speed |
 | Serial | IMPL | databits, parity, stopbits (daemon `databits` / `parity` / `stopbits`) |
 | Serial | MISS | hardware flow control, port locking |
@@ -247,7 +248,7 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 
 1. RNode detection and firmware check: done (with bitrate, airtime limits, beacon).
 2. Backbone, TCP hardening, KISS TNC parameters, serial parameters, UDP broadcast.
-3. Pipe, AX.25 KISS, I2P (done), RNode Multi; Auto allow/ignore lists.
+3. Pipe, AX.25 KISS, I2P and RNode Multi (done); Auto allow/ignore lists.
 
 **Phase C: management plane**
 

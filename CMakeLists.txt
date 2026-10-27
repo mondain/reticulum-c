@@ -281,6 +281,10 @@ if(UNIX AND RNC_BUILD_HOST)
             add_test(NAME reticulum_rnode_multi_${case} COMMAND test_rnode_multi ${case})
             set_tests_properties(reticulum_rnode_multi_${case} PROPERTIES LABELS pty TIMEOUT 60)
         endforeach()
+        if(RNC_BUILD_EXAMPLES)
+            add_test(NAME reticulum_rnode_multi_daemon COMMAND test_rnode_multi daemon $<TARGET_FILE:reticulum-c-node>)
+            set_tests_properties(reticulum_rnode_multi_daemon PROPERTIES LABELS pty TIMEOUT 60)
+        endif()
         add_executable(fake_sam tests/fake_sam.c)
         target_link_libraries(fake_sam PRIVATE reticulum_c OpenSSL::Crypto)
         add_executable(test_i2p_host tests/test_i2p_host.c)
@@ -407,6 +411,10 @@ if(UNIX AND RNC_BUILD_HOST)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_tunnel_ref
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_rnode_multi_reference COMMAND
+                    $<TARGET_FILE:test_rnode_multi> reference ${Python3_EXECUTABLE} "${RNC_REFERENCE_DIR}")
+                set_tests_properties(reticulum_rnode_multi_reference
+                    PROPERTIES LABELS "reticulum_interop;pty" TIMEOUT 120)
                 add_test(NAME reticulum_node_process_i2p_ref COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> i2p_ref

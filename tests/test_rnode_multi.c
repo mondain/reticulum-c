@@ -4,10 +4,16 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
 #include <reticulum_c/rnc_host.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define CHECK(x)                                                               \
@@ -60,9 +66,19 @@ static void emu_write(emu *e, uint8_t command, const uint8_t *data,
 static void emu_select(emu *e, uint8_t index) {
   emu_write(e, 0x1f, &index, 1);
 }
-static void emu_log(emu *e, const char *fmt, unsigned a, unsigned b) {
-  size_t used = strlen(e->log);
-  (void)snprintf(e->log + used, sizeof(e->log) - used, fmt, a, b);
+/* One token per frame a radio received: "radio:command:data". */
+static void emu_log(emu *e, unsigned radio, unsigned command,
+                    const uint8_t *data, size_t size) {
+  size_t used = strlen(e->log), k;
+  int n = snprintf(e->log + used, sizeof(e->log) - used, "%u:%02x:", radio,
+                   command);
+  if (n < 0 || used + (size_t)n + 2u * size + 2u > sizeof(e->log))
+    return;
+  used += (size_t)n;
+  for (k = 0; k < size && k < 8u; ++k)
+    used += (size_t)sprintf(e->log + used, "%02x", data[k]);
+  e->log[used++] = ' ';
+  e->log[used] = 0;
 }
 static void emu_drain(emu *e) {
   uint8_t bytes[1024], data[RNC_HOST_FRAME_MAX], command;
@@ -112,7 +128,8 @@ static void emu_drain(emu *e) {
       continue;
     {
       radio_seen *r = &e->radio[e->selected];
-      emu_log(e, "%u:%02x ", e->selected, command);
+      if (command != 0x00)
+        emu_log(e, e->selected, command, data, size);
       switch (command) {
       case 0x01:
         CHECK(size == 4);
@@ -436,6 +453,235 @@ static void refusals(void) {
   puts("rnode multi refusal tests passed");
 }
 
+static int token_order(const void *a, const void *b) {
+  return strcmp(*(char *const *)a, *(char *const *)b);
+}
+/* The frames a radio received, sorted: the order in which a client sends the
+ * parameters of one radio is its own business, the set is the protocol. */
+static void sorted_log(const char *log, char *out, size_t cap) {
+  char copy[8192], *tokens[512], *at, *save = NULL;
+  size_t n = 0, k;
+  snprintf(copy, sizeof(copy), "%s", log);
+  for (at = strtok_r(copy, " ", &save); at && n < 512;
+       at = strtok_r(NULL, " ", &save))
+    tokens[n++] = at;
+  qsort(tokens, n, sizeof(*tokens), token_order);
+  out[0] = 0;
+  for (k = 0; k < n; ++k) {
+    strncat(out, tokens[k], cap - strlen(out) - 2u);
+    strcat(out, " ");
+  }
+}
+/* The unmodified reference's RNodeMultiInterface and this host drive the same
+ * emulated device: the commands each radio receives must be identical. */
+static void reference(const char *python, const char *reference_dir) {
+  static const uint8_t types[2] = {0x00, 0x20};
+  rnc_host_subradio subs[2];
+  rnc_host_config c;
+  rig r;
+  char ours[8192], theirs[8192], dir[] = "/tmp/rnc-multi-ref-XXXXXX",
+                                  path[300], text[2048];
+  uint64_t t;
+  pid_t child;
+  FILE *f;
+  subs[0] = sub("LoRa", 0, 915000000, 125000, 10, 7, 5);
+  subs[1] = sub("2.4", 1, 2400000000u, 812500, 12, 8, 6);
+  subs[0].airtime_limit_short = 5.5;
+  subs[0].airtime_limit_long = 10.0;
+  subs[1].flow_control = 1;
+  rig_start(&r, 1, 1, 74, types, 2);
+  c = multi_config(ptsname(r.e.master), subs, 2);
+  CHECK(rnc_host_add(r.host, 1, &c) == RNC_OK);
+  rig_run(&r, 2000);
+  sorted_log(r.e.log, ours, sizeof(ours));
+  rig_stop(&r);
+  CHECK(mkdtemp(dir));
+  rig_start(&r, 1, 1, 74, types, 2);
+  snprintf(path, sizeof(path), "%s/config", dir);
+  snprintf(text, sizeof(text),
+           "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+           "[interfaces]\n  [[Multi]]\n    type = RNodeMultiInterface\n"
+           "    enabled = yes\n    port = %s\n"
+           "    [[[LoRa]]]\n      vport = 0\n      frequency = 915000000\n"
+           "      bandwidth = 125000\n      txpower = 10\n"
+           "      spreadingfactor = 7\n      codingrate = 5\n"
+           "      airtime_limit_short = 5.5\n      airtime_limit_long = 10\n"
+           "    [[[2.4]]]\n      vport = 1\n      frequency = 2400000000\n"
+           "      bandwidth = 812500\n      txpower = 12\n"
+           "      spreadingfactor = 8\n      codingrate = 6\n"
+           "      flow_control = true\n",
+           ptsname(r.e.master));
+  f = fopen(path, "w");
+  CHECK(f && fputs(text, f) >= 0 && !fclose(f));
+  child = fork();
+  CHECK(child >= 0);
+  if (!child) {
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      (void)dup2(devnull, STDOUT_FILENO);
+      (void)dup2(devnull, STDERR_FILENO);
+    }
+    CHECK(!setenv("PYTHONPATH", reference_dir, 1));
+    execl(python, python, "-c",
+          "import RNS,sys,time\n"
+          "RNS.Reticulum(configdir=sys.argv[1], loglevel=1)\n"
+          "time.sleep(12)\n",
+          dir, (char *)NULL);
+    _exit(127);
+  }
+  for (t = 0; t < 11000; t += 10) {
+    emu_drain(&r.e);
+    {
+      struct timespec ts = {0, 10000000};
+      nanosleep(&ts, NULL);
+    }
+  }
+  kill(child, SIGKILL);
+  waitpid(child, NULL, 0);
+  sorted_log(r.e.log, theirs, sizeof(theirs));
+  rig_stop(&r);
+  if (strcmp(ours, theirs)) {
+    fprintf(stderr, "ours:   %s\nreference: %s\n", ours, theirs);
+    CHECK(0);
+  }
+  CHECK(strstr(ours, "0:01:3689cac0") || strstr(ours, "0:01:"));
+  CHECK(strstr(ours, "1:06:01") && strstr(ours, "0:0b:0226"));
+  puts("rnode multi reference test passed");
+}
+
+static int check_config(const char *exe, const char *path, const char *text) {
+  FILE *f = fopen(path, "w");
+  pid_t p;
+  int status = 0;
+  CHECK(f && fputs(text, f) >= 0 && !fclose(f));
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      (void)dup2(devnull, STDOUT_FILENO);
+      (void)dup2(devnull, STDERR_FILENO);
+    }
+    execl(exe, exe, "--config", path, "--check", (char *)NULL);
+    _exit(127);
+  }
+  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  return WEXITSTATUS(status);
+}
+/* The daemon reads an RNodeMultiInterface section with [[[radio]]] children,
+ * and brings both radios up on the emulated device. */
+static void daemon_config(const char *exe) {
+  static const uint8_t types[2] = {0x00, 0x20};
+  char dir[] = "/tmp/rnc-multi-daemon-XXXXXX", cfg[300], key[300], admin[300],
+       text[2048], reply[2048];
+  rig r;
+  pid_t p;
+  unsigned i;
+  int fd = -1;
+  struct sockaddr_un addr;
+  ssize_t got;
+  CHECK(mkdtemp(dir));
+  snprintf(cfg, sizeof(cfg), "%s/config", dir);
+  snprintf(key, sizeof(key), "%s/identity", dir);
+  snprintf(admin, sizeof(admin), "%s/admin", dir);
+  /* a radio without a vport, a section under another type, and no radio
+   * enabled are all refused */
+  CHECK(check_config(exe, cfg,
+                     "[reticulum]\nshare_instance = No\n[interfaces]\n"
+                     "[[M]]\ntype = RNodeMultiInterface\nenabled = yes\n"
+                     "port = /dev/null\n[[[A]]]\nfrequency = 915000000\n"
+                     "bandwidth = 125000\ntxpower = 10\nspreadingfactor = 7\n"
+                     "codingrate = 5\n") == 2);
+  CHECK(check_config(exe, cfg,
+                     "[reticulum]\nshare_instance = No\n[interfaces]\n"
+                     "[[T]]\ntype = TCPServerInterface\nlisten_ip = "
+                     "127.0.0.1\n[[[A]]]\nvport = 0\n") == 2);
+  CHECK(check_config(exe, cfg,
+                     "[reticulum]\nshare_instance = No\n[interfaces]\n"
+                     "[[M]]\ntype = RNodeMultiInterface\nport = /dev/null\n"
+                     "[[[A]]]\nvport = 0\nfrequency = 915000000\n"
+                     "bandwidth = 125000\ntxpower = 10\nspreadingfactor = 7\n"
+                     "codingrate = 5\n") == 2);
+  CHECK(check_config(exe, cfg,
+                     "[reticulum]\nshare_instance = No\n[interfaces]\n"
+                     "[[M]]\ntype = RNodeMultiInterface\nport = /dev/null\n"
+                     "[[[A]]]\nvport = 0\ninterface_enabled = yes\n"
+                     "frequency = 915000000\nbandwidth = 125000\n"
+                     "txpower = 10\nspreadingfactor = 7\ncodingrate = 5\n") == 0);
+  rig_start(&r, 1, 1, 74, types, 2);
+  snprintf(text, sizeof(text),
+           "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+           "[interfaces]\n[[Multi]]\ntype = RNodeMultiInterface\n"
+           "port = %s\n"
+           "[[[LoRa]]]\ninterface_enabled = yes\nvport = 0\n"
+           "frequency = 915000000\nbandwidth = 125000\ntxpower = 10\n"
+           "spreadingfactor = 7\ncodingrate = 5\n"
+           "[[[Off]]]\ninterface_enabled = no\nvport = 1\n"
+           "frequency = 868000000\nbandwidth = 125000\ntxpower = 10\n"
+           "spreadingfactor = 7\ncodingrate = 5\n"
+           "[[[Band]]]\ninterface_enabled = yes\nvport = 1\n"
+           "frequency = 2400000000\nbandwidth = 812500\ntxpower = 12\n"
+           "spreadingfactor = 8\ncodingrate = 6\noutgoing = no\n",
+           ptsname(r.e.master));
+  {
+    FILE *f = fopen(cfg, "w");
+    CHECK(f && fputs(text, f) >= 0 && !fclose(f));
+  }
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0)
+      (void)dup2(devnull, STDOUT_FILENO);
+    execl(exe, exe, "--config", cfg, "--identity", key, "--admin", admin,
+          (char *)NULL);
+    _exit(127);
+  }
+  for (i = 0; i < 600 && !(r.e.radio[0].state && r.e.radio[1].state); ++i) {
+    struct timespec ts = {0, 10000000};
+    emu_drain(&r.e);
+    nanosleep(&ts, NULL);
+  }
+  CHECK(r.e.radio[0].freq == 915000000 && r.e.radio[1].freq == 2400000000u);
+  CHECK(r.e.radio[1].sf == 8 && r.e.unselected == 0);
+  /* the disabled section was never configured: nothing reached a third radio
+   * and vport 1 carries the enabled section's parameters */
+  CHECK(r.e.radio[1].bw == 812500);
+  for (i = 0; i < 50 && fd < 0; ++i) {
+    struct timespec ts = {0, 100000000};
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(s >= 0);
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, admin);
+    if (!connect(s, (struct sockaddr *)&addr, sizeof(addr)))
+      fd = s;
+    else {
+      close(s);
+      emu_drain(&r.e);
+      nanosleep(&ts, NULL);
+    }
+  }
+  CHECK(fd >= 0 && write(fd, "STATUS\n", 7) == 7);
+  got = read(fd, reply, sizeof(reply) - 1);
+  CHECK(got > 0);
+  reply[got] = 0;
+  close(fd);
+  {
+    unsigned lines = 0;
+    const char *at = reply;
+    while ((at = strstr(at, "interface id=")) != NULL) {
+      ++lines;
+      ++at;
+    }
+    CHECK(lines == 3); /* the device and its two radios */
+  }
+  kill(p, SIGTERM);
+  waitpid(p, NULL, 0);
+  rig_stop(&r);
+  puts("rnode multi daemon test passed");
+}
+
 int main(int argc, char **argv) {
   if (argc < 2)
     return 2;
@@ -447,6 +693,10 @@ int main(int argc, char **argv) {
     receive();
   else if (!strcmp(argv[1], "refusals"))
     refusals();
+  else if (!strcmp(argv[1], "daemon") && argc == 3)
+    daemon_config(argv[2]);
+  else if (!strcmp(argv[1], "reference") && argc == 4)
+    reference(argv[2], argv[3]);
   else
     return 2;
   return 0;
