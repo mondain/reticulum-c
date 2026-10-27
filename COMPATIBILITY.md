@@ -296,3 +296,18 @@ authorised sources, encryption with and without the key) and auto-connect with
 bootstrap teardown and fallback.
 
 Not implemented: I2P and Weave announcements, path gravity.
+
+## Logging hook (`feature/logging-hook`)
+
+`rnc_log.h` adds a process-wide hook: `rnc_log_set_handler`, `rnc_log_set_level`
+and `rnc_logf`, with RNS's levels (NONE to EXTREME, default NOTICE) and its
+`[Notice]  `-style labels. The library is silent until a handler is set. It now
+reports learned paths and announces dropped for blackholed identities (node,
+debug), link establishment, closure and staleness (link), failed transfers
+(resource) and interface up/down and refused fast-flapping peers (host).
+
+The daemon reads `[logging]` (`loglevel` 0-8, `logdestination` stdout / stderr /
+file, `logfile`) and writes `[time] [Level]   module: message`; stderr is the
+default so the machine-readable lines on stdout are unaffected. The reference's
+per-call `RNS.log` messages are far more numerous; this covers the main events,
+not every message.

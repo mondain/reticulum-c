@@ -23,7 +23,7 @@ Largest gaps, in priority order:
 7. Persistent known-destination store (`Identity.recall`), tunnels, transport packet cache.
 8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
 9. Resource window growth and rate-based timeouts: done (see section 5).
-10. Logging hook, config options (`instance_name`, `loglevel`, etc.), CLI tools.
+10. CLI tools and examples. (Logging hook and the `loglevel` / `instance_name` options are done.)
 
 ## 2. Protocol (manual ch6, ch9)
 
@@ -190,7 +190,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | Status | Option | Notes |
 | --- | --- | --- |
 | IMPL | `enable_transport`, `share_instance`, `shared_instance_type` / `shared_instance_port`, `instance_control_port`, `rpc_key` | |
-| MISS | `instance_name`, `loglevel` | No logging subsystem |
+| IMPL | `loglevel` (`[logging]`), `logdestination` (stdout, stderr or a file that rolls over at 5 MiB), `logfile` | Library hook `rnc_log.h`; the daemon formats `[time] [Level] module: message` |
+| PART | `instance_name` | Accepted; the shared instance is TCP only, so it names nothing |
 | IMPL | `respond_to_probes` | Daemon registers `rnstransport.probe` with PROVE_ALL, takes no links; reported as `probe_responder` in interface stats |
 | MISS | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | |
 | IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
@@ -239,6 +240,6 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 
 1. Blackhole table with filtering, then publish/subscribe.
 2. Remote management destination and ACL; mutating admin calls.
-3. Logging hook.
+3. (done)
 
 **Phase D:** transport packet cache, tunnels, Resource window growth, examples, CLI tools.

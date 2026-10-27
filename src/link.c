@@ -456,6 +456,12 @@ static rnc_result accept_proof(rnc_link *link, const rnc_packet *packet, uint64_
     rnc_emit_packet(link, &reply);
     rnc_emit(link, RNC_LINK_ACTIVE);
     memcpy(rnc_emit(link, RNC_LINK_IDENTIFIED)->identity_hash, link->remote.hash, 16);
+    {
+        char label[33];
+        rnc_logf(RNC_LOG_INFO, "link", "link %s established as responder, rtt %llu ms",
+                 rnc_hex_label(link->address, 16, label),
+                 (unsigned long long)link->rtt_ms);
+    }
 done:
     OPENSSL_cleanse(key, sizeof(key));
     return result;
@@ -472,6 +478,12 @@ void rnc_link_end(rnc_link *link, rnc_result reason, const rnc_packet *last_pack
     if (last_packet)
         rnc_emit_packet(link, last_packet);
     rnc_emit(link, RNC_LINK_CLOSED)->reason = reason;
+    {
+        char label[33];
+        rnc_logf(reason == RNC_OK ? RNC_LOG_INFO : RNC_LOG_VERBOSE, "link",
+                 "link %s closed (reason %d)", rnc_hex_label(link->address, 16, label),
+                 (int)reason);
+    }
 }
 rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now) {
     uint8_t plain[RNC_LINK_MAX_MDU];
@@ -554,6 +566,12 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
                 link->state = RNC_LINK_RUNNING;
                 link->activated = now;
                 rnc_emit(link, RNC_LINK_ACTIVE);
+                {
+                    char label[33];
+                    rnc_logf(RNC_LOG_INFO, "link", "link %s established, rtt %llu ms",
+                             rnc_hex_label(link->address, 16, label),
+                             (unsigned long long)link->rtt_ms);
+                }
                 result = RNC_OK;
             }
         } else if (packet->context == 251 && !link->initiator) {
@@ -683,8 +701,12 @@ rnc_result rnc_link_tick(rnc_link *link, uint64_t now) {
             link->control = now;
         }
         if (now - link->activity >= 2u * keepalive) {
+            char label[33];
             link->stale = 1;
             link->stale_since = now;
+            rnc_logf(RNC_LOG_WARNING, "link", "link %s is stale, no traffic for %llu ms",
+                     rnc_hex_label(link->address, 16, label),
+                     (unsigned long long)(now - link->activity));
         }
     }
     link->now = now;

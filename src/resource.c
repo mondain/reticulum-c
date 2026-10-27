@@ -4,6 +4,7 @@
 #endif
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <reticulum_c/rnc_log.h>
 #include <reticulum_c/rnc_resource.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,6 +127,9 @@ static void remember_receive_state(const rnc_resource *r) {
     rnc_link_set_last_resource_eifr(r->link, r->data_rate * 8u);
 }
 static void fail(rnc_resource *r, rnc_result reason, int notify) {
+  rnc_logf(RNC_LOG_WARNING, "resource", "%s transfer failed (reason %d, %zu of %zu parts)",
+           r->outgoing ? "outgoing" : "incoming", (int)reason, r->received_count,
+           r->adv.parts);
   if (!r->outgoing && r->window)
     remember_receive_state(r);
   r->state = RES_FAILED;

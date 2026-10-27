@@ -1,3 +1,4 @@
+#include "internal.h"
 #include <openssl/crypto.h>
 #include "service_msgpack.h"
 #include <reticulum_c/rnc_ipc.h>
@@ -1051,8 +1052,12 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   r = rnc_announce_verify(p, &a);
   if (r != RNC_OK)
     return r;
-  if (rnc_node_is_blackholed(n, a.identity.hash, unix_seconds))
+  if (rnc_node_is_blackholed(n, a.identity.hash, unix_seconds)) {
+    char label[33];
+    rnc_logf(RNC_LOG_DEBUG, "node", "dropped announce from blackholed identity %s",
+             rnc_hex_label(a.identity.hash, 16, label));
     return RNC_OK;
+  }
   if (destination_find(n, p->destination) &&
       destination_find(n, p->destination)->type == RNC_SINGLE)
     return RNC_OK;
@@ -1114,6 +1119,12 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
     memcpy(fresh.route.next_hop,
            (p->flags & 0x40) ? p->transport_id : p->destination, 16);
     n->routes[slot] = fresh;
+    {
+      char label[33];
+      rnc_logf(RNC_LOG_DEBUG, "node", "learned path to %s via interface %u, %u hop(s)",
+               rnc_hex_label(p->destination, 16, label), (unsigned)ingress,
+               (unsigned)p->hops);
+    }
     emit(n, RNC_NODE_ANNOUNCE, ingress, p)->route = fresh.route;
     if (targets && p->context == 0 &&
         !rate_blocked(n, interface(n, ingress), p->destination, now)) {

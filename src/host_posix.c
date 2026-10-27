@@ -13,6 +13,7 @@
 #include <openssl/crypto.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
+#include <reticulum_c/rnc_log.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -370,6 +371,7 @@ static rnc_result activate(rnc_host *h, host_interface *f) {
   f->status.last_errno = 0;
   f->status.bound_port = f->fd >= 0 ? bound_port(f->fd) : 0;
   (void)emit_host(h, RNC_HOST_UP, f->status.interface_id, 0, NULL);
+  rnc_logf(RNC_LOG_INFO, "host", "interface %s is up", f->status.name);
   return RNC_OK;
 }
 static int flap_expired(const host_interface *l, const host_flap *e,
@@ -430,6 +432,11 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
     (void)rnc_node_remove_interface(h->node, f->status.interface_id);
     f->node_added = 0;
     (void)emit_host(h, RNC_HOST_DOWN, f->status.interface_id, error, NULL);
+    if (error)
+      rnc_logf(RNC_LOG_WARNING, "host", "interface %s is down: %s",
+               f->status.name, strerror(error));
+    else
+      rnc_logf(RNC_LOG_INFO, "host", "interface %s is down", f->status.name);
   }
   f->status.online = 0;
   if (f->status.kind == RNC_HOST_RNODE) {
@@ -1383,6 +1390,9 @@ static void accept_tcp(rnc_host *h, host_interface *parent) {
     (void)inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&peer)->sin6_addr, ip,
                     sizeof(ip));
   if (parent->flap_on && flap_blocked(parent, ip, h->now)) {
+    rnc_logf(RNC_LOG_NOTICE, "host",
+             "refusing connection from fast-flapping address %s on %s", ip,
+             parent->status.name);
     close(fd);
     ++parent->status.dropped_packets;
     return;

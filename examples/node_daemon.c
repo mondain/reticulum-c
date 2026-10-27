@@ -10,6 +10,7 @@
 #include <openssl/rand.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_ipc.h>
+#include <reticulum_c/rnc_log.h>
 #include <reticulum_c/rnc_service.h>
 #include <signal.h>
 #include <stddef.h>
@@ -78,6 +79,9 @@ typedef struct config {
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
   char network_identity[512]; /* identity file path, empty = none */
+  char instance_name[64];     /* accepted; the shared instance is TCP only */
+  int loglevel;               /* [logging]; RNC_LOG_NOTICE when absent */
+  char logdestination[16], logfile[512];
   /* interface discovery: listening, authorised sources, auto-connect */
   int discover_interfaces, autoconnect_unverified, has_autoconnect_mode;
   unsigned required_discovery_value, autoconnect_max, discovery_job_interval,
@@ -717,6 +721,7 @@ static int read_config(const char *path, config *c) {
   memset(c, 0, sizeof(*c));
   c->shared_port = 37428;
   c->control_port = 37429;
+  c->loglevel = RNC_LOG_NOTICE;
   file = fopen(path, "r");
   if (!file)
     return 0;
@@ -762,6 +767,9 @@ static int read_config(const char *path, config *c) {
     if (*s == '[') {
       if (!strcmp(s, "[reticulum]")) {
         section = 1;
+        current = NULL;
+      } else if (!strcmp(s, "[logging]")) {
+        section = 4;
         current = NULL;
       } else if (!strcmp(s, "[interfaces]")) {
         section = 2;
@@ -882,6 +890,11 @@ static int read_config(const char *path, config *c) {
           valid = 0;
           break;
         }
+      } else if (!strcmp(s, "instance_name")) {
+        if (!text_copy(c->instance_name, sizeof(c->instance_name), value)) {
+          valid = 0;
+          break;
+        }
       } else if (!strcmp(s, "network_identity")) {
         const char *home = getenv("HOME");
         int n;
@@ -954,6 +967,30 @@ static int read_config(const char *path, config *c) {
           valid = 0;
           break;
         }
+      }
+    } else if (section == 4) {
+      unsigned long n;
+      if (!strcmp(s, "loglevel")) {
+        if (!number(value, RNC_LOG_EXTREME, &n)) {
+          valid = 0;
+          break;
+        }
+        c->loglevel = (int)n;
+      } else if (!strcmp(s, "logdestination")) {
+        if (strcmp(value, "stdout") && strcmp(value, "stderr") &&
+            strcmp(value, "file")) {
+          valid = 0;
+          break;
+        }
+        (void)snprintf(c->logdestination, sizeof(c->logdestination), "%s", value);
+      } else if (!strcmp(s, "logfile")) {
+        if (!text_copy(c->logfile, sizeof(c->logfile), value)) {
+          valid = 0;
+          break;
+        }
+      } else {
+        valid = 0;
+        break;
       }
     } else if (section == 3 && current) {
       if (!interface_key(current, s, value)) {
@@ -1517,6 +1554,57 @@ static void admin_step(int listener, admin_client clients[4], rnc_host *host,
     }
   }
 }
+/* Log output: "[time] [Level]   module: message" like RNS, to stderr (default),
+ * stdout or a file that rolls over at 5 MiB. The daemon's own machine-readable
+ * lines stay on stdout. */
+#define LOG_MAXSIZE (5u * 1024u * 1024u)
+static struct {
+  int to_stdout, to_file;
+  char path[512];
+} logsink;
+static void daemon_log_handler(void *context, int level, const char *module,
+                               const char *message) {
+  char stamp[32], line[RNC_LOG_MESSAGE_MAX + 96];
+  time_t now = time(NULL);
+  struct tm tm;
+  (void)context;
+  if (!localtime_r(&now, &tm) ||
+      strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm) == 0)
+    stamp[0] = 0;
+  (void)snprintf(line, sizeof(line), "[%s] %s %s%s%s\n", stamp,
+                 rnc_log_level_name(level), module, module[0] ? ": " : "",
+                 message);
+  if (logsink.to_file) {
+    FILE *f = fopen(logsink.path, "a");
+    if (f) {
+      long size;
+      (void)fputs(line, f);
+      size = ftell(f);
+      (void)fclose(f);
+      if (size > (long)LOG_MAXSIZE) {
+        char previous[sizeof(logsink.path) + 3];
+        (void)snprintf(previous, sizeof(previous), "%s.1", logsink.path);
+        (void)unlink(previous);
+        (void)rename(logsink.path, previous);
+      }
+      return;
+    }
+    logsink.to_file = 0; /* cannot write the file: fall back to the console */
+  }
+  (void)fputs(line, logsink.to_stdout ? stdout : stderr);
+  if (logsink.to_stdout)
+    (void)fflush(stdout);
+}
+static void log_apply(const config *c) {
+  memset(&logsink, 0, sizeof(logsink));
+  logsink.to_stdout = !strcmp(c->logdestination, "stdout");
+  if (!strcmp(c->logdestination, "file") && c->logfile[0]) {
+    logsink.to_file = 1;
+    (void)snprintf(logsink.path, sizeof(logsink.path), "%s", c->logfile);
+  }
+  rnc_log_set_handler(daemon_log_handler, NULL);
+  rnc_log_set_level(c->loglevel);
+}
 #include "node_rpc.h"
 #include "node_mgmt.h"
 #include "node_discovery.h"
@@ -1582,6 +1670,8 @@ int main(int argc, char **argv) {
   }
   umask(077);
   setvbuf(stdout, NULL, _IOLBF, 0);
+  log_apply(&current);
+  rnc_logf(RNC_LOG_NOTICE, "daemon", "starting, log level %d", current.loglevel);
   if (rnc_host_identity_load(key_path, secure_random, NULL, &id) != RNC_OK) {
     fprintf(stderr, "Cannot load private identity: %s\n", strerror(errno));
     goto done;
@@ -1633,6 +1723,7 @@ int main(int argc, char **argv) {
       config replacement;
       reloading = 0;
       if (read_config(config_path, &replacement)) {
+        log_apply(&replacement);
         if (!save_state(state_path, node, &id, (uint64_t)time(NULL),
                         monotonic_ms()))
           fprintf(stderr, "Reload postponed: cannot save network state\n");
