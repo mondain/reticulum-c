@@ -159,7 +159,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | RNode LoRa | IMPL | Radio setup over KISS, `radio_ready` ack, flow control, serial reopen |
 | RNode LoRa | IMPL | Detection (DETECT, firmware version, platform and MCU asked first; the radio is configured when the device answers, and the interface drops after 5 s of silence) and the firmware check (at least 1.52, otherwise the interface is refused and not retried) |
 | RNode LoRa | IMPL | RSSI (dBm), SNR (dB) and link quality (percent from SNR and spreading factor) of the last frame: `rnc_host_status`, on each host event for a received packet, and the RPC interface stats (`rssi`, `snr`, `q`, shown by `reticulum-c-ctl status`) |
-| RNode LoRa | MISS | BLE RNode (and TCP RNode until its PR is merged), battery, temperature and channel statistics |
+| RNode LoRa | MISS | BLE RNode, battery, temperature and channel statistics |
+| RNode LoRa | IMPL | WiFi RNode over TCP: `port = tcp://host` (port 7633, or `rnc_host_config.port`); the same KISS protocol, detection and radio setup once the socket opens, a detection ping after 3.5 s of silence, reconnect after a drop |
 | RNode Multi | MISS | Sub-interfaces (only `kiss_port` in the command byte) |
 | Serial | IMPL | HDLC over termios, speed |
 | Serial | IMPL | databits, parity, stopbits (daemon `databits` / `parity` / `stopbits`) |
