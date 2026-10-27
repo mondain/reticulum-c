@@ -127,6 +127,25 @@ static size_t peer_count(rnc_host *h, uint32_t parent) {
       ++count;
   return count;
 }
+/* Interface mode as the reference numbers it: FULL=1, ACCESS_POINT=3,
+ * ROAMING=4, BOUNDARY=5, GATEWAY=6, and 7 for the internal shared-instance
+ * interface. */
+static unsigned mode_number(const rnc_host_status *s) {
+  if (s->local)
+    return 7u;
+  switch (s->mode) {
+  case RNC_MODE_ACCESS_POINT:
+    return 3u;
+  case RNC_MODE_ROAMING:
+    return 4u;
+  case RNC_MODE_BOUNDARY:
+    return 5u;
+  case RNC_MODE_GATEWAY:
+    return 6u;
+  default:
+    return 1u;
+  }
+}
 static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
                             const rnc_host_status *s) {
   static const char *zeros[] = {"rxs",
@@ -161,7 +180,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
   (void)rnc_rpc_write_bin(w, s->hash, 32);
   key_bool(w, "status",
            s->online && (s->kind != RNC_HOST_RNODE || s->radio_ready));
-  key_uint(w, "mode", s->local ? 7u : 1u);
+  key_uint(w, "mode", mode_number(s));
   key_uint(w, "bitrate", s->bitrate);
   key_uint(w, "mtu", s->mtu);
   if (s->kind == RNC_HOST_TCP_LISTEN)

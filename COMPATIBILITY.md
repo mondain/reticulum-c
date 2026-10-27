@@ -311,3 +311,37 @@ file, `logfile`) and writes `[time] [Level]   module: message`; stderr is the
 default so the machine-readable lines on stdout are unaffected. The reference's
 per-call `RNS.log` messages are far more numerous; this covers the main events,
 not every message.
+
+## Operator tools (`feature/cli-tools`)
+
+`reticulum-c-ctl` (examples/reticulum_ctl.c, installed with the examples) is one
+binary with three subcommands:
+
+- `status [-j]` and `path [-t] [-m hops] [-j] [hash] [-b] [-B hash --duration
+  hours --reason text] [-U hash]` talk to the daemon's RPC port
+  (`instance_control_port`, default 37429) with the same HMAC-authenticated
+  MessagePack calls the reference uses. The key is derived from the daemon's
+  identity file (`--identity`), given as hex (`--rpc-key`) or read from a
+  config file (`--config`: `rpc_key`, `instance_control_port`). Interface mode
+  numbers in the RPC now follow the reference (FULL 1, ACCESS_POINT 3, ROAMING
+  4, BOUNDARY 5, GATEWAY 6, internal 7), so `status` shows real modes.
+- `id` handles reference-format identity files (raw 64-byte private key, mode
+  0600): `-g`, `-i -p [-P]`, `-x/-X`, `-H aspects`, `-s FILE --raw` and
+  `-V SIG -r FILE --raw` (raw 64-byte signature, `.rsg`), `-e` and `-d`
+  (16 MiB chunks, `.rfe`) with `-w` and `-f`. Exit codes follow rnid (10 for an
+  invalid signature, 12 for a failed decryption, 11 for an existing file).
+
+Differences: an empty path table is a successful empty result here (the
+reference reports a failed remote request); `path <hash>` filters the table
+client-side and exits 1 when nothing matches; the RPC is still the shared
+instance's TCP control port only. The envelope signature format of `rnid`
+(without `--raw`), embedded messages and metadata, and the other text encodings
+are not implemented, and the tool says so instead of writing a different format.
+
+Evidence: a daemon process test drives all three subcommands (text and JSON
+status, a wrong RPC key failing, an announce fed in then listed by `path -t` and
+`path <hash>`, blackhole add/list/remove checked against the admin socket,
+identity generation, signing, tampering, encryption and corruption). Differential
+against the unmodified reference `rnid`: hashes and aspect hashes agree, the
+reference validates our raw signature and ours validates the reference's, and
+encrypted files decrypt in both directions.
