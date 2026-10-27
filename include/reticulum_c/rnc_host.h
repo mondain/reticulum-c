@@ -20,8 +20,20 @@ typedef enum rnc_host_kind {
   RNC_HOST_RNODE,
   RNC_HOST_PIPE, /* address = command line; HDLC over the child's stdio */
   RNC_HOST_AX25, /* address = serial path; AX.25 UI frames inside KISS */
-  RNC_HOST_I2P   /* address/port = SAM bridge of a local I2P router */
+  RNC_HOST_I2P,  /* address/port = SAM bridge of a local I2P router */
+  RNC_HOST_RNODE_MULTI /* address = serial path; several radios on one device */
 } rnc_host_kind;
+#define RNC_HOST_SUBRADIOS 11u
+/* One radio of an RNODE_MULTI device. vport is its position in the device's
+ * own list (0 and up, in the order the device reports its radios). */
+typedef struct rnc_host_subradio {
+  const char *name;
+  unsigned vport;
+  uint32_t frequency, bandwidth;
+  int tx_power, flow_control, no_output;
+  unsigned spreading_factor, coding_rate;
+  double airtime_limit_short, airtime_limit_long; /* percent, 0 = default */
+} rnc_host_subradio;
 typedef enum rnc_host_framing {
   RNC_HOST_HDLC = 1,
   RNC_HOST_KISS_FRAMING
@@ -112,6 +124,12 @@ typedef struct rnc_host_config {
    * full base64 destination, and is dialled through the router; with
    * i2p_connectable other nodes may connect in. Peers spawned this way are
    * children of the I2P interface, as with a TCP listener. */
+  /* RNODE_MULTI: the device is opened like a serial RNode, detected, and each
+   * entry of subradios becomes a child interface once the device has reported
+   * its radios. id_callsign/id_interval, mode and the announce settings apply
+   * to every child. */
+  const rnc_host_subradio *subradios;
+  size_t subradio_count;
   const char *i2p_key_path;
   const char *const *i2p_peers;
   size_t i2p_peer_count;
