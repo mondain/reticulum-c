@@ -640,7 +640,10 @@ static rnc_result accept_link(app *a, const rnc_identity *id,
   s->link = rnc_link_new(secure_random, NULL);
   if (!s->link)
     return RNC_NO_SPACE;
-  r = rnc_link_accept(s->link, id, destination, &event->packet, now);
+  r = rnc_link_configure_mtu(
+      s->link, rnc_node_link_mtu_on(a->node, event->interface_id));
+  if (r == RNC_OK)
+    r = rnc_link_accept(s->link, id, destination, &event->packet, now);
   if (r == RNC_OK)
     r = rnc_link_address(s->link, s->id);
   if (r == RNC_OK)
@@ -902,7 +905,10 @@ static int run_initiator(rnc_identity *id, app *a, const uint8_t destination[16]
   if (rnc_node_lookup(a->node, destination, monotonic_ms(), &route) != RNC_OK)
     return EXIT_NO_PATH;
   link = rnc_link_new(secure_random, NULL);
-  if (!link || rnc_link_open(link, &route.announce, monotonic_ms()) != RNC_OK ||
+  if (!link ||
+      rnc_link_configure_mtu(link, rnc_node_link_mtu_to(a->node, destination,
+                                                        monotonic_ms())) != RNC_OK ||
+      rnc_link_open(link, &route.announce, monotonic_ms()) != RNC_OK ||
       rnc_link_address(link, link_id) != RNC_OK ||
       rnc_node_bind_link_on(a->node, link_id, route.interface_id) != RNC_OK) {
     rnc_link_free(link);

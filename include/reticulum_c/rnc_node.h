@@ -145,6 +145,20 @@ rnc_result rnc_node_set_proof_strategy(rnc_node *node,
 rnc_result rnc_node_prove(rnc_node *node, const uint8_t destination[16],
                           const rnc_packet *packet, uint32_t interface_id,
                           int implicit, uint64_t unix_seconds, uint64_t now_ms);
+/* Link MTU discovery (the reference's link_mtu_discovery, default on). A link
+ * that applications open or accept on this node should be configured with
+ * rnc_link_configure_mtu() using the first function below (initiator, the MTU
+ * of the interface the route to `destination` leaves by) or the second
+ * (responder, the interface the link request arrived on), before
+ * rnc_link_open() / rnc_link_accept(). Both return 500 when discovery is off or
+ * the interface or route is unknown, so interfaces left at the default 500 byte
+ * MTU change nothing. The negotiated MTU is then the smaller of both ends, and
+ * transport nodes clamp a link request to their own interfaces. */
+rnc_result rnc_node_set_link_mtu_discovery(rnc_node *node, int enabled);
+int rnc_node_link_mtu_discovery(const rnc_node *node);
+size_t rnc_node_link_mtu_to(rnc_node *node, const uint8_t destination[16],
+                            uint64_t now_ms);
+size_t rnc_node_link_mtu_on(rnc_node *node, uint32_t interface_id);
 /* The reference's use_implicit_proof (default on): PROVE_ALL answers with the
  * 64 byte implicit proof, or with the 96 byte explicit proof (packet hash plus
  * signature) when switched off. The receiver accepts both. */

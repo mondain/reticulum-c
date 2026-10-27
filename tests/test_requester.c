@@ -21,6 +21,10 @@ static rnc_result rng(void *ctx, uint8_t *p, size_t n) {
   }
   return RNC_OK;
 }
+/* Interface MTUs and the discovery switch for the next setup(), and the largest
+ * packet seen on the wire. */
+static size_t client_mtu = 500, server_mtu = 500, max_wire;
+static int discovery = 1;
 typedef struct net {
   rnc_identity client_id, server_id;
   rnc_node *client, *server;
@@ -56,16 +60,28 @@ static void pump(net *n, unsigned steps) {
     CHECK(rnc_responder_tick(n->responder, UNIX, n->now) == RNC_OK);
     CHECK(rnc_requester_tick(n->requester, UNIX, n->now) == RNC_OK);
     while (rnc_node_poll(n->client, &e) == RNC_OK) {
-      if (e.type == RNC_NODE_SEND)
+      if (e.type == RNC_NODE_SEND) {
+        uint8_t raw[RNC_MAX_MTU];
+        size_t wire = 0;
+        if (rnc_packet_encode(&e.packet, raw, sizeof(raw), &wire) == RNC_OK &&
+            wire > max_wire)
+          max_wire = wire;
         CHECK(rnc_node_input(n->server, 1, &e.packet, UNIX, n->now) == RNC_OK);
+      }
       else if (e.type == RNC_NODE_LOCAL) {
         rnc_result r = rnc_requester_input(n->requester, &e, UNIX, n->now);
         CHECK(r == RNC_OK);
       }
     }
     while (rnc_node_poll(n->server, &e) == RNC_OK) {
-      if (e.type == RNC_NODE_SEND)
+      if (e.type == RNC_NODE_SEND) {
+        uint8_t raw[RNC_MAX_MTU];
+        size_t wire = 0;
+        if (rnc_packet_encode(&e.packet, raw, sizeof(raw), &wire) == RNC_OK &&
+            wire > max_wire)
+          max_wire = wire;
         CHECK(rnc_node_input(n->client, 1, &e.packet, UNIX, n->now) == RNC_OK);
+      }
       else if (e.type == RNC_NODE_LOCAL) {
         rnc_result r = rnc_responder_input(n->responder, &e, UNIX, n->now);
         CHECK(r == RNC_OK || r == RNC_AGAIN);
@@ -85,6 +101,10 @@ static void setup(net *n, int with_route) {
   CHECK(n->client && n->server);
   CHECK(rnc_node_add_interface(n->client, 1, 1000000) == RNC_OK);
   CHECK(rnc_node_add_interface(n->server, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_interface_mtu(n->client, 1, client_mtu) == RNC_OK);
+  CHECK(rnc_node_interface_mtu(n->server, 1, server_mtu) == RNC_OK);
+  CHECK(rnc_node_set_link_mtu_discovery(n->client, discovery) == RNC_OK);
+  CHECK(rnc_node_set_link_mtu_discovery(n->server, discovery) == RNC_OK);
   CHECK(rnc_node_add_destination(n->server, &n->server_id, "test.requester",
                                  NULL, 0, n->destination) == RNC_OK);
   n->responder = rnc_responder_new(n->server, 4096, rng, NULL);
@@ -326,6 +346,72 @@ static void progress_failed(void) {
   CHECK(failed && i < 600);
   teardown(&n);
 }
+/* A request and response too big for 500 byte packets: run an echo and return
+ * the largest packet that crossed the wire. */
+static size_t big_echo_wire(void) {
+  net n;
+  uint8_t value[3008], out[4096];
+  rnc_requester_result r;
+  size_t i;
+  value[0] = 0xc5;
+  value[1] = 0x0b;
+  value[2] = 0xb8;
+  for (i = 0; i < 3000; i++)
+    value[3 + i] = (uint8_t)(i * 5u + 2u);
+  max_wire = 0;
+  setup(&n, 1);
+  CHECK(rnc_requester_start(n.requester, n.destination, NULL, "/echo", value,
+                            3003, 3, 60000, UNIX, n.now) == RNC_OK);
+  r = finish(&n, out, sizeof(out), 6000);
+  CHECK(r.status == RNC_REQUESTER_DONE && r.size == 3003 &&
+        !memcmp(out, value, 3003));
+  teardown(&n);
+  return max_wire;
+}
+/* Both interfaces take 4096 byte packets: the link negotiates that, and the
+ * Resource carrying the echo uses large packets. */
+static void mtu_discovery(void) {
+  client_mtu = server_mtu = RNC_MAX_MTU;
+  discovery = 1;
+  CHECK(big_echo_wire() > 2000);
+}
+/* Switched off, links stay at 500 bytes whatever the interfaces allow. */
+static void mtu_discovery_off(void) {
+  client_mtu = server_mtu = RNC_MAX_MTU;
+  discovery = 0;
+  CHECK(big_echo_wire() <= 500);
+}
+/* A path whose far side only takes 500 byte packets: the link is clamped to
+ * what both ends accept (a larger one would be dropped by the server). */
+static void mtu_mixed(void) {
+  client_mtu = RNC_MAX_MTU;
+  server_mtu = 500;
+  discovery = 1;
+  CHECK(big_echo_wire() <= 500);
+  /* and between two intermediate sizes */
+  client_mtu = 2048;
+  server_mtu = 1196;
+  CHECK(big_echo_wire() > 500 && max_wire <= 1196);
+}
+/* The default is on, with the reference's 500 byte interfaces: no change. */
+static void mtu_default(void) {
+  rnc_identity id;
+  rnc_node *node;
+  uint8_t dest[16] = {1};
+  CHECK(rnc_identity_generate(&id, rng, NULL) == RNC_OK);
+  node = rnc_node_new(&id, 0, rng, NULL);
+  CHECK(node && rnc_node_link_mtu_discovery(node) == 1);
+  CHECK(rnc_node_add_interface(node, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_link_mtu_on(node, 1) == 500);
+  CHECK(rnc_node_link_mtu_on(node, 9) == 500); /* unknown interface */
+  CHECK(rnc_node_link_mtu_to(node, dest, 100) == 500); /* no route */
+  CHECK(rnc_node_interface_mtu(node, 1, 1196) == RNC_OK &&
+        rnc_node_link_mtu_on(node, 1) == 1196);
+  CHECK(rnc_node_set_link_mtu_discovery(node, 0) == RNC_OK &&
+        rnc_node_link_mtu_on(node, 1) == 500);
+  CHECK(rnc_node_set_link_mtu_discovery(node, 2) == RNC_INVALID);
+  rnc_node_free(node);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "echo"))
@@ -340,6 +426,14 @@ int main(int argc, char **argv) {
     busy();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
+  else if (!strcmp(argv[1], "mtu_discovery"))
+    mtu_discovery();
+  else if (!strcmp(argv[1], "mtu_discovery_off"))
+    mtu_discovery_off();
+  else if (!strcmp(argv[1], "mtu_mixed"))
+    mtu_mixed();
+  else if (!strcmp(argv[1], "mtu_default"))
+    mtu_default();
   else if (!strcmp(argv[1], "progress_inline"))
     progress_inline();
   else if (!strcmp(argv[1], "progress_resource"))
