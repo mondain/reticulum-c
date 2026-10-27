@@ -136,6 +136,11 @@ typedef struct rnc_host_status {
   size_t ifac_size;
   uint8_t ifac_signature[64];
   rnc_interface_mode mode;
+  /* RNode only: signal figures of the last received frame, as the reference's
+   * r_stat_rssi / r_stat_snr / r_stat_q (RSSI in dBm, SNR in dB, link quality in
+   * percent from the SNR and spreading factor). */
+  int has_signal, rssi;
+  float snr, quality;
   uint32_t announce_cap_permille;
   size_t blocked_ips; /* TCP_LISTEN: IPs currently refused for flapping */
   char i2p_b32[56];   /* I2P: this node's b32 address, without ".b32.i2p" */
@@ -150,6 +155,10 @@ typedef struct rnc_host_event {
   rnc_host_event_type type;
   uint32_t interface_id;
   int error_number;
+  /* RNC_HOST_NODE from an RNode with signal figures: those of the frame (the
+   * reference's packet.rssi, packet.snr and packet.q) */
+  int has_signal, rssi;
+  float snr, quality;
   rnc_node_event node;
 } rnc_host_event;
 /* Node is borrowed. Configured IDs must be1..0x7fffffff; dynamic TCP/Auto peers

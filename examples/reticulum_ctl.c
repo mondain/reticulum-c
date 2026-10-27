@@ -523,6 +523,12 @@ static int cmd_status(int argc, char **argv) {
       pretty_rate((double)as_uint(v), a, sizeof(a));
       printf("    Rate      : %s\n", a);
     }
+    v = map_get(f, "rssi");
+    if (v && (v->type == V_INT || v->type == V_UINT)) {
+      printf("    Signal    : RSSI %lld dBm, SNR %.2f dB, quality %.1f%%\n",
+             v->type == V_INT ? (long long)v->i : (long long)v->u,
+             as_double(map_get(f, "snr")), as_double(map_get(f, "q")));
+    }
     v = map_get(f, "clients");
     if (v && v->type == V_UINT)
       printf("    Clients   : %llu\n", (unsigned long long)v->u);

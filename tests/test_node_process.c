@@ -283,7 +283,9 @@ static void rpc_client_test(unsigned port, const uint8_t key[32],
               contains(event.data, event.size, "interfaces") &&
               contains(event.data, event.size,
                        "LocalInterface[Shared Instance]") &&
-              contains(event.data, event.size, "rxb"));
+              contains(event.data, event.size, "rxb") &&
+              contains(event.data, event.size, "rssi") &&
+              contains(event.data, event.size, "snr"));
         message = 1;
       } else if (event.type == RNC_RPC_CLOSED)
         closed = 1;
