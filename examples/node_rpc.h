@@ -240,7 +240,11 @@ static void all_stats(rnc_rpc_writer *w, rnc_host *h, const config *c,
   if (c->transport) {
     (void)rnc_rpc_write_string(w, "transport_id");
     (void)rnc_rpc_write_bin(w, id->hash, 16);
-    key_nil(w, "network_id");
+    if (network_identity_hash()) {
+      (void)rnc_rpc_write_string(w, "network_id");
+      (void)rnc_rpc_write_bin(w, network_identity_hash(), 16);
+    } else
+      key_nil(w, "network_id");
     key_real(w, "transport_uptime", (double)uptime / 1000.0);
     if (probe_responder_hash()) {
       (void)rnc_rpc_write_string(w, "probe_responder");

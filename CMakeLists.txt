@@ -227,13 +227,13 @@ if(UNIX AND RNC_BUILD_HOST)
         if(RNC_BUILD_EXAMPLES)
             add_executable(test_node_process tests/test_node_process.c)
             target_link_libraries(test_node_process PRIVATE reticulum_c_host OpenSSL::Crypto)
-            foreach(case cli network shared blackhole management sources probe)
+            foreach(case cli network shared blackhole management sources probe netid)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
             set_tests_properties(reticulum_node_process_cli PROPERTIES TIMEOUT 20)
             set_tests_properties(reticulum_node_process_network reticulum_node_process_shared reticulum_node_process_management
-                reticulum_node_process_sources reticulum_node_process_probe
+                reticulum_node_process_sources reticulum_node_process_probe reticulum_node_process_netid
                 PROPERTIES LABELS network TIMEOUT 60)
             if(RNC_INTEROP_TESTS)
                 add_test(NAME reticulum_node_process_rns COMMAND ${CMAKE_COMMAND} -E env
@@ -262,6 +262,12 @@ if(UNIX AND RNC_BUILD_HOST)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_probe_ref
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_netid_ref COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> netid_ref
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_netid_ref
+                    PROPERTIES LABELS "reticulum_interop" TIMEOUT 60)
                 set_tests_properties(reticulum_node_process_remote
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 set_tests_properties(reticulum_node_process_backbone

@@ -199,6 +199,25 @@ Local Linux evidence: 155/155 with the pinned RNS oracle, 125/125 without it,
 unmodified reference `rnprobe` (two probes) receives valid replies. Native: a C
 client's tracked packet is proved when enabled and gets no proof when disabled.
 
+## Network identity (`feature/network-identity`)
+
+`network_identity = <path>` loads, or creates with mode 0600, a 64-byte identity
+file in the reference's format. The daemon registers `rnstransport.network` and
+`rnstransport.network.instance.<identity hash>` on it, as Transport does, reports
+the hash as `network_id` in RPC interface stats and via the admin `NETWORK`
+command.
+
+Local Linux evidence: 157/157 with the pinned RNS oracle, 126/126 without,
+123/123 under sanitizers (differential cases excluded). Differential: a file
+written by the reference (`rnid -g`) loads in the daemon with the same hash, and
+a file created by the daemon loads in the reference (`rnid -i -p`) with the same
+hash. The daemon, like for its own key file, refuses an identity file readable
+by group or others; the reference writes them with the default umask, so such a
+file needs `chmod 600` first.
+
+The network identity's use for interface discovery (encrypted discovery
+announces) is not implemented; only the identity and its destinations are.
+
 ## Resource window growth (`feature/resource-window`)
 
 The receiving side now follows the reference's window model (Resource.py):
