@@ -296,6 +296,9 @@ if(UNIX AND RNC_BUILD_HOST)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
+            add_test(NAME reticulum_node_process_i2p COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> i2p $<TARGET_FILE:fake_sam>)
+            set_tests_properties(reticulum_node_process_i2p PROPERTIES LABELS network TIMEOUT 60)
             add_test(NAME reticulum_node_process_sh_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> sh_tools $<TARGET_FILE:reticulum-c-sh>)
             set_tests_properties(reticulum_node_process_sh_tools PROPERTIES LABELS network TIMEOUT 120)
@@ -398,6 +401,12 @@ if(UNIX AND RNC_BUILD_HOST)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_tunnel_ref
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_i2p_ref COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> i2p_ref
+                    $<TARGET_FILE:fake_sam> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_i2p_ref
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 400)
                 set_tests_properties(reticulum_node_process_remote
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 set_tests_properties(reticulum_node_process_backbone

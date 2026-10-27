@@ -65,6 +65,9 @@ typedef struct interface_config {
       passphrase[128], callsign[RNC_HOST_CALLSIGN_MAX + 2u], ax_call[8];
   size_t ifac_size;
   uint32_t interface_id;
+  /* I2PInterface peers and the key file the host is pointed at */
+  char peer_text[8][712], i2p_key[600];
+  const char *peer_ptrs[8];
   int enabled, has_type, backbone;
   rnc_ifac ifac;
   /* interface discovery (announcing); see node_discovery.h */
@@ -178,6 +181,7 @@ static int set_type(interface_config *f, const char *value) {
                {"RNodeInterface", RNC_HOST_RNODE},
                {"PipeInterface", RNC_HOST_PIPE},
                {"AX25KISSInterface", RNC_HOST_AX25},
+               {"I2PInterface", RNC_HOST_I2P},
                {"BackboneInterface", RNC_HOST_TCP_LISTEN},
                {"BackboneClientInterface", RNC_HOST_TCP_CONNECT}};
   size_t i;
@@ -372,6 +376,32 @@ static int interface_key(interface_config *f, const char *key,
       f->host.kiss_framing = b;
     else
       f->host.prefer_ipv6 = b;
+    return 1;
+  }
+  if (!strcmp(key, "connectable")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->host.i2p_connectable = b;
+    return 1;
+  }
+  if (!strcmp(key, "peers")) {
+    /* comma separated, as the reference's list values are */
+    char *copy = strdup(value), *at, *save = NULL;
+    size_t count = 0;
+    if (!copy)
+      return 0;
+    for (at = strtok_r(copy, ",", &save); at; at = strtok_r(NULL, ",", &save)) {
+      char *item = trim(at);
+      if (!*item)
+        continue;
+      if (count == 8 || strlen(item) >= sizeof(f->peer_text[0])) {
+        free(copy);
+        return 0;
+      }
+      memcpy(f->peer_text[count++], item, strlen(item) + 1u);
+    }
+    free(copy);
+    f->host.i2p_peer_count = count;
     return 1;
   }
   if (!strcmp(key, "outgoing")) {
@@ -674,6 +704,13 @@ static void interface_bind(interface_config *f) {
   f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
   if (f->host.ifac)
     f->host.ifac = &f->ifac;
+  if (f->host.kind == RNC_HOST_I2P) {
+    size_t k;
+    for (k = 0; k < f->host.i2p_peer_count; ++k)
+      f->peer_ptrs[k] = f->peer_text[k];
+    f->host.i2p_peers = f->peer_ptrs;
+    f->host.i2p_key_path = f->i2p_key[0] ? f->i2p_key : NULL;
+  }
 }
 static int finish_config(config *c) {
   size_t i, enabled = 0;
@@ -689,7 +726,8 @@ static int finish_config(config *c) {
     ++enabled;
     if ((f->host.kind == RNC_HOST_TCP_CONNECT &&
          (!f->host.address || !f->host.port)) ||
-        (f->host.kind >= RNC_HOST_SERIAL && !f->host.address))
+        (f->host.kind >= RNC_HOST_SERIAL && f->host.kind <= RNC_HOST_AX25 &&
+         !f->host.address))
       return 0;
     /* The reference sizes TCP interfaces from their bitrate, far above 500, so
      * links across them can negotiate large packets. */
@@ -698,7 +736,8 @@ static int finish_config(config *c) {
       f->host.mtu = RNC_MAX_MTU;
     if (f->host.mtu &&
         (f->host.mtu < RNC_MTU || f->host.mtu > RNC_MAX_MTU ||
-         (f->host.kind >= RNC_HOST_SERIAL && f->host.mtu > RNC_MTU) ||
+         (f->host.kind >= RNC_HOST_SERIAL && f->host.kind <= RNC_HOST_AX25 &&
+          f->host.mtu > RNC_MTU) ||
          (f->host.kind == RNC_HOST_AUTO && f->host.mtu > 1196)))
       return 0;
     if (f->host.kind == RNC_HOST_RNODE &&
@@ -1305,6 +1344,39 @@ static void mgmt_stop(void);
 static void mgmt_local_event(const rnc_node_event *event, uint64_t unix_seconds,
                              uint64_t now);
 static void mgmt_step(uint64_t unix_seconds, uint64_t now);
+/* Directory for I2P destination keys: beside the state file, else beside the
+ * identity file. */
+static char i2p_dir[512];
+static void hex_name(const uint8_t *d, size_t n, char *out) {
+  size_t i;
+  for (i = 0; i < n; ++i)
+    (void)snprintf(out + 2 * i, 3, "%02x", d[i]);
+}
+/* The reference names the key file after SHA256(SHA256(name)) and, since it
+ * began tying keys to the transport identity, after SHA256(SHA256(name) +
+ * SHA256(identity hash)). A key already stored under the old name is kept. */
+static int i2p_key_file(const interface_config *f, const rnc_identity *id,
+                        char *out, size_t cap) {
+  uint8_t name_hash[32], once[32], tail[32], both[64], digest[32];
+  char old_name[65], new_name[65], old_path[600];
+  if (!i2p_dir[0] ||
+      rnc_hash(f->name, strlen(f->name), name_hash) != RNC_OK ||
+      rnc_hash(name_hash, 32, once) != RNC_OK ||
+      rnc_hash(id->hash, 16, tail) != RNC_OK)
+    return 0;
+  memcpy(both, name_hash, 32);
+  memcpy(both + 32, tail, 32);
+  if (rnc_hash(both, 64, digest) != RNC_OK)
+    return 0;
+  hex_name(once, 32, old_name);
+  hex_name(digest, 32, new_name);
+  if (snprintf(old_path, sizeof(old_path), "%s/%s.i2p", i2p_dir, old_name) >=
+      (int)sizeof(old_path))
+    return 0;
+  if (access(old_path, F_OK) == 0)
+    return snprintf(out, cap, "%s", old_path) < (int)cap;
+  return snprintf(out, cap, "%s/%s.i2p", i2p_dir, new_name) < (int)cap;
+}
 static int start_node(config *c, const rnc_identity *id, const char *state,
                       rnc_node **node, rnc_host **host) {
   size_t i;
@@ -1320,6 +1392,19 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
   for (i = 0; i < c->count; ++i)
     if (c->interfaces[i].enabled) {
       rnc_host_status status;
+      if (c->interfaces[i].host.kind == RNC_HOST_I2P) {
+        interface_config *f = &c->interfaces[i];
+        if (i2p_dir[0])
+          (void)mkdir(i2p_dir, 0700);
+        if (!i2p_key_file(f, id, f->i2p_key, sizeof(f->i2p_key))) {
+          fprintf(stderr, "Cannot place the key file of interface %s\n",
+                  f->name);
+          if (c->panic_on_interface_error)
+            goto fail;
+          continue;
+        }
+        f->host.i2p_key_path = f->i2p_key;
+      }
       if (rnc_host_add(*host, c->interfaces[i].interface_id,
                        &c->interfaces[i].host) != RNC_OK) {
         fprintf(stderr, "Cannot open interface %s: %s\n", c->interfaces[i].name,
@@ -1448,13 +1533,13 @@ static void admin_reply(admin_client *c, rnc_host *host, rnc_node *node,
       if (rnc_host_status_at(host, i, &status) == RNC_OK)
         append(c,
                "interface id=%u parent=%u kind=%u online=%d port=%u mtu=%u "
-               "rx=%llu tx=%llu dropped=%llu queued=%zu\n",
+               "rx=%llu tx=%llu dropped=%llu queued=%zu%s%s\n",
                status.interface_id, status.parent_id, (unsigned)status.kind,
                status.online, status.bound_port, (unsigned)status.mtu,
                (unsigned long long)status.rx_packets,
                (unsigned long long)status.tx_packets,
-               (unsigned long long)status.dropped_packets,
-               status.queued_frames);
+               (unsigned long long)status.dropped_packets, status.queued_frames,
+               status.i2p_b32[0] ? " i2p=" : "", status.i2p_b32);
   } else if (!strcmp(request, "ROUTES")) {
     for (i = 0; rnc_node_route_at(node, i, now, &route) == RNC_OK; ++i)
       route_reply(c, &route);
@@ -1738,6 +1823,9 @@ int main(int argc, char **argv) {
       admin_path = argv[++i];
     else if (!strcmp(argv[i], "--state") && i + 1 < (size_t)argc) {
       state_path = argv[++i];
+      if (snprintf(i2p_dir, sizeof(i2p_dir), "%s.i2p", state_path) >=
+          (int)sizeof(i2p_dir))
+        i2p_dir[0] = 0;
       if (snprintf(blackhole_path, sizeof(blackhole_path), "%s.blackhole",
                    state_path) >= (int)sizeof(blackhole_path))
         blackhole_path[0] = 0;
@@ -1761,6 +1849,10 @@ int main(int argc, char **argv) {
     result = 2;
     goto done;
   }
+  if (!i2p_dir[0] && key_path &&
+      snprintf(i2p_dir, sizeof(i2p_dir), "%s.i2p", key_path) >=
+          (int)sizeof(i2p_dir))
+    i2p_dir[0] = 0;
   if (check) {
     puts("Configuration valid; optional shared-instance mode uses TCP and "
          "authenticated MessagePack RPC.");

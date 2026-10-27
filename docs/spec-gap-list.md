@@ -17,7 +17,7 @@ Largest gaps, in priority order:
 1. Endpoint packet delivery proofs and `PacketReceipt` (PROVE_NONE/APP/ALL, implicit/explicit proofs, timeouts). Blocks the Echo and rnprobe patterns.
 2. Interface policy: interface modes, configurable `announce_cap`, per-destination announce rate limiting, new-destination rate limiting, path request burst control, ingress control.
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
-4. Missing interface types: I2P, RNode Multi, Weave. Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
+4. Missing interface types: RNode Multi, Weave (I2P is done). Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits, callsign beacon, detection and the firmware check are done).
 6. Management plane: blackhole management, remote management destination, probe responder, network identities and interface discovery are done (see sections 3 and 4).
 7. Persistent known-destination store (`Identity.recall`) and tunnels are done. The transport packet cache is deliberately not built: see section 3.
@@ -155,7 +155,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | TCP client | MISS | `i2p_tunneled` |
 | UDP | PART | Single unicast target; receive-only mode |
 | UDP | MISS | Broadcast, multiple targets |
-| I2P | MISS | Entire type |
+| I2P | IMPL | `I2PInterface` through a router's SAM v3 bridge: session and key file (named as the reference names them), `peers` (b32 names, bare b32, full destinations), `connectable`, 15 s reconnect, keepalive and read watchdog, 1064 byte MTU. Verified against the unmodified reference in both directions through a fake SAM router; not tested against a real I2P router |
+| I2P | MISS | SAM address from the environment (`target_host`/`target_port` set it instead), `i2p_tunneled` on TCP interfaces, stale-tunnel state, I2P interface discovery announcements |
 | RNode LoRa | IMPL | Radio setup over KISS, `radio_ready` ack, flow control, serial reopen |
 | RNode LoRa | IMPL | Detection (DETECT, firmware version, platform and MCU asked first; the radio is configured when the device answers, and the interface drops after 5 s of silence) and the firmware check (at least 1.52, otherwise the interface is refused and not retried) |
 | RNode LoRa | IMPL | WiFi RNode over TCP: `port = tcp://host` (port 7633, or `rnc_host_config.port`); the same KISS protocol, detection and radio setup once the socket opens, a detection ping after 3.5 s of silence, reconnect after a drop |
@@ -245,7 +246,7 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 
 1. RNode detection and firmware check: done (with bitrate, airtime limits, beacon).
 2. Backbone, TCP hardening, KISS TNC parameters, serial parameters, UDP broadcast.
-3. Pipe, AX.25 KISS, RNode Multi, I2P; Auto allow/ignore lists.
+3. Pipe, AX.25 KISS, I2P (done), RNode Multi; Auto allow/ignore lists.
 
 **Phase C: management plane**
 

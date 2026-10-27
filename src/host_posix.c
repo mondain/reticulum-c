@@ -318,6 +318,8 @@ typedef struct host_interface {
   uint64_t sam_deadline, accept_after, last_read_ms;
   unsigned peer_index;
   char sam_peer[I2P_PEER_MAX]; /* connect: name or destination being dialled */
+  char sam_dest[I2P_PEER_MAX]; /* connect: the name, once looked up */
+  int sam_resolved;
   char i2p_key_path[256], i2p_session[24];
   char i2p_private[1024];
   char *i2p_peers; /* connectable peers, NUL separated */
@@ -525,6 +527,7 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
   f->status.online = 0;
   f->sam_step = 0;
   f->sam_len = 0;
+  f->sam_resolved = 0;
   if (f->status.kind == RNC_HOST_I2P)
     i2p_session_lost(h, f);
   if (f->status.kind == RNC_HOST_RNODE) {
@@ -1750,10 +1753,14 @@ static int sam_stream_connect(host_interface *f, const char *destination) {
   f->sam_step = SS_CONNECT;
   return sam_send(f, cmd);
 }
-/* A peer written as a b32 name, as 52 bare characters or as a destination. */
+/* A peer written as a b32 name, as 52 bare characters or as a destination.
+ * Like the reference, a name is looked up on a socket of its own; the stream
+ * is then made on a fresh one. */
 static int sam_dial(host_interface *f) {
   size_t n = strlen(f->sam_peer);
   char cmd[I2P_PEER_MAX + 64u];
+  if (f->sam_resolved)
+    return sam_stream_connect(f, f->sam_dest);
   if (n >= 400u)
     return sam_stream_connect(f, f->sam_peer);
   if (n == 52u && !strchr(f->sam_peer, '.'))
@@ -1886,13 +1893,23 @@ static void sam_line_in(rnc_host *h, host_interface *f) {
   }
   case SS_LOOKUP:
     if (strcmp(r.topic, "NAMING") ||
-        rnc_i2p_reply_value(&r, "VALUE", f->sam_peer, sizeof(f->sam_peer)) !=
+        rnc_i2p_reply_value(&r, "VALUE", f->sam_dest, sizeof(f->sam_dest)) !=
             RNC_OK) {
       sam_fail(h, f, "unexpected reply to NAMING LOOKUP");
       return;
     }
-    if (sam_stream_connect(f, f->sam_peer))
-      disconnect_interface(h, f, EPIPE);
+    /* done with this socket; the stream gets its own */
+    close(f->fd);
+    f->fd = -1;
+    f->sam_step = 0;
+    f->sam_len = 0;
+    f->input_offset = f->input_size = 0;
+    f->sam_resolved = 1;
+    if (connect_interface(h, f) < 0) {
+      f->status.last_errno = errno;
+      f->sam_resolved = 0;
+      note_connect_failure(h, f);
+    }
     break;
   case SS_CONNECT:
     if (strcmp(r.topic, "STREAM")) {
