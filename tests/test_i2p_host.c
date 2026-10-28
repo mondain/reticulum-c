@@ -3,6 +3,9 @@
  * packets between two nodes, and retry timing. Nothing here touches a real I2P
  * router. */
 #define _XOPEN_SOURCE 700
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <errno.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_i2p.h>

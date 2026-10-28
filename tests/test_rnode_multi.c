@@ -1,6 +1,9 @@
 /* RNode Multi: one serial device carrying several radios, each addressed by a
  * "select interface" frame. A pty stands in for the device. */
 #define _XOPEN_SOURCE 700
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>

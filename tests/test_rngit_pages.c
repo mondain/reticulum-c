@@ -769,7 +769,9 @@ static void commits_and_commit(void) {
   HAS(t, buf);
   HAS(t, "Author     : Ann <ann@x>\n");
   LACKS(t, "Signature");
-  HAS(t, "Date       : 2020-01-03T03:04:05+00:00\n");
+  /* git 2.56 and later spell a UTC offset "Z", older ones "+00:00" */
+  if (!strstr(t, "Date       : 2020-01-03T03:04:05+00:00\n") && !strstr(t, "Date       : 2020-01-03T03:04:05Z\n"))
+    HAS(t, "Date       : 2020-01-03T03:04:05+00:00\n");
   LACKS(t, "Committer");
   HAS(t, "\nsecond\n\n");
   HAS(t, ">>Changes\n\n  1 files changed, 1 insertions(+), 0 deletions(-)\n\n");
