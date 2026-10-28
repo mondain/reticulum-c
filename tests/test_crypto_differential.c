@@ -29,7 +29,7 @@ typedef struct {
     int P##_ed25519_verify(const uint8_t *, const void *, size_t, const uint8_t *);       \
     int P##_hmac_digest(int, const uint8_t *, size_t, const void *, size_t, uint8_t *, size_t, size_t *); \
     int P##_ct_memcmp(const void *, const void *, size_t);
-DECLARE(ossl)
+DECLARE(rncossl)
 DECLARE(port)
 
 static uint64_t rng_state = 0x9e3779b97f4a7c15ull;
@@ -66,7 +66,7 @@ int main(void) {
         fill(data, sizeof(data));
         fill(key, sizeof(key));
 
-        SAME(ossl_sha256(data, n, d1) && port_sha256(data, n, d2) && !memcmp(d1, d2, 32), "sha256");
+        SAME(rncossl_sha256(data, n, d1) && port_sha256(data, n, d2) && !memcmp(d1, d2, 32), "sha256");
         {
             sha_ctx c;
             size_t cut = n ? (size_t)(rnd() % (n + 1)) : 0;
@@ -76,7 +76,7 @@ int main(void) {
             port_sha256_final(&c, d2);
             SAME(!memcmp(d1, d2, 32), "sha256 incremental");
         }
-        SAME(ossl_hmac_sha256(key, kn, data, n, d1) && port_hmac_sha256(key, kn, data, n, d2) &&
+        SAME(rncossl_hmac_sha256(key, kn, data, n, d1) && port_hmac_sha256(key, kn, data, n, d2) &&
                  !memcmp(d1, d2, 32),
              "hmac");
         {
@@ -86,17 +86,17 @@ int main(void) {
                 sn = 0;
             if (rnd() % 4 == 0)
                 fn = 0;
-            SAME(ossl_hkdf_sha256(key, sn, data, in, a, fn, b, ol) &&
+            SAME(rncossl_hkdf_sha256(key, sn, data, in, a, fn, b, ol) &&
                      port_hkdf_sha256(key, sn, data, in, a, fn, a + 300, ol) &&
                      !memcmp(b, a + 300, ol),
                  "hkdf");
         }
         fill(k32, 32);
         fill(iv, 16);
-        SAME(ossl_aes256_cbc_encrypt(k32, iv, data, a, blocks) &&
+        SAME(rncossl_aes256_cbc_encrypt(k32, iv, data, a, blocks) &&
                  port_aes256_cbc_encrypt(k32, iv, data, b, blocks) && !memcmp(a, b, blocks),
              "aes encrypt");
-        SAME(ossl_aes256_cbc_decrypt(k32, iv, data, a, blocks) &&
+        SAME(rncossl_aes256_cbc_decrypt(k32, iv, data, a, blocks) &&
                  port_aes256_cbc_decrypt(k32, iv, data, b, blocks) && !memcmp(a, b, blocks),
              "aes decrypt");
 
@@ -107,21 +107,21 @@ int main(void) {
         if (rnd() % 8 == 0)
             memset(p1, 0, 32);
         {
-            int r1 = ossl_x25519_derive(k32, p1, s1), r2 = port_x25519_derive(k32, p1, s2);
+            int r1 = rncossl_x25519_derive(k32, p1, s1), r2 = port_x25519_derive(k32, p1, s2);
             SAME(r1 == r2 && (!r1 || !memcmp(s1, s2, 32)), "x25519 derive");
-            SAME(ossl_x25519_public(k32, p1) && port_x25519_public(k32, p2) && !memcmp(p1, p2, 32),
+            SAME(rncossl_x25519_public(k32, p1) && port_x25519_public(k32, p2) && !memcmp(p1, p2, 32),
                  "x25519 public");
         }
 
         {
             uint8_t pub1[32], pub2[32], sg1[64], sg2[64];
-            SAME(ossl_ed25519_public(k32, pub1) && port_ed25519_public(k32, pub2) &&
+            SAME(rncossl_ed25519_public(k32, pub1) && port_ed25519_public(k32, pub2) &&
                      !memcmp(pub1, pub2, 32),
                  "ed25519 public");
-            SAME(ossl_ed25519_sign(k32, data, on, sg1) && port_ed25519_sign(k32, data, on, sg2) &&
+            SAME(rncossl_ed25519_sign(k32, data, on, sg1) && port_ed25519_sign(k32, data, on, sg2) &&
                      !memcmp(sg1, sg2, 64),
                  "ed25519 sign");
-            SAME(ossl_ed25519_verify(pub1, data, on, sg1) && port_ed25519_verify(pub1, data, on, sg1),
+            SAME(rncossl_ed25519_verify(pub1, data, on, sg1) && port_ed25519_verify(pub1, data, on, sg1),
                  "ed25519 verify valid");
             {
                 /* corrupt a random signature, message or key bit: decisions must agree */
@@ -138,7 +138,7 @@ int main(void) {
                     pk[rnd() % 32] ^= (uint8_t)(1u << (rnd() % 8));
                 if (which == 3)
                     fill(sg, 64);
-                r1 = ossl_ed25519_verify(pk, msg, on, sg);
+                r1 = rncossl_ed25519_verify(pk, msg, on, sg);
                 r2 = port_ed25519_verify(pk, msg, on, sg);
                 SAME(r1 == r2, "ed25519 verify decision");
             }
@@ -156,7 +156,7 @@ int main(void) {
                     sg[32 + i] = (uint8_t)v;
                     carry = v >> 8;
                 }
-                SAME(ossl_ed25519_verify(pub1, data, on, sg) == port_ed25519_verify(pub1, data, on, sg),
+                SAME(rncossl_ed25519_verify(pub1, data, on, sg) == port_ed25519_verify(pub1, data, on, sg),
                      "ed25519 non-canonical S");
             }
         }
@@ -166,13 +166,13 @@ int main(void) {
             for (id = 1; id <= 5; id++) {
                 uint8_t o1[64], o2[64];
                 size_t w1 = 0, w2 = 0;
-                SAME(ossl_hmac_digest(id, key, kn, data, n, o1, sizeof(o1), &w1) &&
+                SAME(rncossl_hmac_digest(id, key, kn, data, n, o1, sizeof(o1), &w1) &&
                          port_hmac_digest(id, key, kn, data, n, o2, sizeof(o2), &w2) && w1 == w2 &&
                          !memcmp(o1, o2, w1),
                      "hmac digest");
             }
         }
-        SAME((ossl_ct_memcmp(a, b, n % 40 + 1) == 0) == (port_ct_memcmp(a, b, n % 40 + 1) == 0),
+        SAME((rncossl_ct_memcmp(a, b, n % 40 + 1) == 0) == (port_ct_memcmp(a, b, n % 40 + 1) == 0),
              "ct_memcmp");
     }
     if (failures) {
