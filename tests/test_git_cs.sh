@@ -89,13 +89,17 @@ grep -q "Principal mismatch" err.txt || fail "principal mismatch message"
 # modified signature bytes (inside the 64 byte Ed25519 signature at offset 90)
 sigbin() { sed -e '/BEGIN SSH/d' -e '/END SSH/d' "$1" | base64 -d > "$2"; }
 rearmor() { { echo "-----BEGIN SSH SIGNATURE-----"; base64 < "$1" | tr -d '\n' | fold -w 70; echo; echo "-----END SSH SIGNATURE-----"; } > "$2"; }
-poke() { printf "$3" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
+# change one byte (xor, so the result always differs from what was there)
+poke() {
+  old=$(dd if="$1" bs=1 skip="$2" count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
+  printf "$(printf '\\x%02x' $(( old ^ 0x55 )))" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null
+}
 sigbin pa.sig pa.bin
-cp pa.bin bad1.bin; poke bad1.bin 100 '\x55'; rearmor bad1.bin bad1.sig
+cp pa.bin bad1.bin; poke bad1.bin 100; rearmor bad1.bin bad1.sig
 IN=pa expect 1 "flipped signature byte" "$TOOL" -Y verify -n git -f /dev/null -s bad1.sig
 expect 0 "flipped signature byte still parses" "$TOOL" -Y check-novalidate -n git -s bad1.sig
 # modified envelope (inside the signed hash)
-cp pa.bin bad2.bin; poke bad2.bin 190 '\x55'; rearmor bad2.bin bad2.sig
+cp pa.bin bad2.bin; poke bad2.bin 190; rearmor bad2.bin bad2.sig
 IN=pa expect 1 "flipped envelope byte" "$TOOL" -Y verify -n git -f /dev/null -s bad2.sig
 # wrong namespace: the namespace string "git" starts at byte 69
 cp pa.bin bad3.bin; poke bad3.bin 69 'x'; rearmor bad3.bin bad3.sig
