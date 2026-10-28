@@ -5,14 +5,18 @@
 //   - nRF52840 (Adafruit nRF52 core):   RNG peripheral, InternalFileSystem for state
 // and runs rnc_mcu_app_step from its own FreeRTOS task with a 16 KB stack.
 //
-// The serial port ("Serial": a UART behind the board's USB bridge, or the native USB
-// CDC port) carries ONLY the HDLC byte stream of the Reticulum SerialInterface: the
-// application's log hook is not wired, and framework logging is switched off, so no
-// log text is ever mixed into the stream. See README.txt in this directory.
+// In serial mode (the default; the only mode of the nRF52 boards) the serial port
+// ("Serial": a UART behind the board's USB bridge, or the native USB CDC port) carries
+// ONLY the HDLC byte stream of the Reticulum SerialInterface: the application's log hook
+// is not wired, and framework logging is switched off, so no log text is ever mixed
+// into the stream. On ESP32 / ESP32-S3 the board can instead be provisioned (at runtime,
+// no credentials in the firmware) to run the HDLC stream over Wi-Fi and a TCP connection
+// to a Reticulum node: see wifi_mode.h and README.txt in this directory.
 #include <Arduino.h>
 #include <string.h>
 
 #include "rnc_mcu_app.h"
+#include "wifi_mode.h"
 
 #ifndef RNC_MCU_FIRMWARE_BOARD
 #define RNC_MCU_FIRMWARE_BOARD "arduino"
@@ -58,11 +62,14 @@ static int platform_load(void *, const char *key, void *buffer, size_t capacity)
   return result;
 }
 static size_t platform_free_heap(void *) { return ESP.getFreeHeap(); }
+static bool g_wifi_mode = false; // the transport is the Wi-Fi TCP connection
 static void hardware_init(void) {
-  esp_log_level_set("*", ESP_LOG_NONE); // nothing but HDLC on the serial port
-  // esp_fill_random is a true random source only while the RF subsystem or the SAR
-  // ADC entropy source runs; this firmware uses no Wi-Fi or Bluetooth.
-  bootloader_random_enable();
+  esp_log_level_set("*", ESP_LOG_NONE); // nothing but HDLC (or the console) on the serial port
+}
+// Wi-Fi mode logs status text to Serial (it is free for people there); serial mode wires
+// no log hook at all
+static void platform_log(void *, const char *line) {
+  Serial.println(line);
 }
 #define STACK_DEPTH(bytes) (bytes) // FreeRTOS in ESP-IDF counts bytes
 
@@ -210,6 +217,15 @@ static void reticulum_task(void *) {
 #else
   config.bitrate = RNC_MCU_BAUD;
 #endif
+#if defined(ARDUINO_ARCH_ESP32)
+  if (g_wifi_mode) {
+    platform.write = rnc_wifi_write;
+    platform.read = rnc_wifi_read;
+    platform.link_up = rnc_wifi_link_up;
+    platform.log = platform_log;
+    config.bitrate = 10000000u; // a TCP interface, like Reticulum's TCPClientInterface
+  }
+#endif
   rnc_mcu_app *app = rnc_mcu_app_new(&platform, &config);
   if (!app) { // out of memory or no usable random source: nothing to run
     for (;;)
@@ -228,6 +244,30 @@ void setup() {
   Serial.setRxBufferSize(2048);
 #endif
   Serial.begin(RNC_MCU_BAUD);
+#if defined(ARDUINO_ARCH_ESP32)
+  // Runtime provisioning (wifi_mode.h): the console runs when Wi-Fi mode has no usable
+  // settings, or on request in a short window after boot.
+  rnc_mcu_cfg cfg;
+  bool compiled_in = rnc_settings_load(&cfg);
+  if (rnc_mcu_cfg_wifi_mode(&cfg) && !rnc_mcu_cfg_wifi_ready(&cfg))
+    rnc_provision_console(&cfg, "Wi-Fi mode is selected but ssid, password or host are missing or invalid.");
+  if (rnc_provision_requested(RNC_MCU_PROVISION_WINDOW_MS))
+    rnc_provision_console(&cfg, "Requested at boot.");
+  if (rnc_mcu_cfg_wifi_mode(&cfg)) {
+    g_wifi_mode = true;
+    if (compiled_in)
+      Serial.println("WARNING: developer build, Wi-Fi credentials are compiled into this image");
+    Serial.printf("Wi-Fi mode: joining \"%s\", then connecting to %s:%u\r\n", cfg.ssid, cfg.host,
+                  (unsigned)cfg.port);
+    rnc_wifi_start(&cfg);
+    memset(cfg.password, 0, sizeof(cfg.password)); // the driver has its own copy
+    // the radio is the entropy source for esp_fill_random now
+  } else {
+    // esp_fill_random is a true random source only while the RF subsystem or the SAR
+    // ADC entropy source runs; serial mode uses no Wi-Fi or Bluetooth.
+    bootloader_random_enable();
+  }
+#endif
   xTaskCreate(reticulum_task, "reticulum", STACK_DEPTH(RNC_MCU_STACK_BYTES), NULL, 2, NULL);
 }
 

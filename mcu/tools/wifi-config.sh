@@ -7,7 +7,7 @@
 #   wifi-config.sh --chip esp32|esp32s3 --device /dev/ttyUSB0 --ssid NAME --host HOST
 #                  [--password-stdin | --password SECRET] [--port 4242]
 #                  [--mode wifi|serial] [--partitions partitions.csv]
-#                  [--offset 0x190000 --size 0x4000] [--image-only FILE.bin]
+#                  [--offset 0x190000 --size 0x4000] [--image-only FILE.bin] [--arduino]
 #                  [--docker] [--baud 460800]
 #
 #   --password-stdin   read the password from the first line of standard input (keeps it
@@ -23,6 +23,12 @@
 #   --image-only FILE  write the NVS image there and do not flash (flash it yourself at
 #                      the offset printed, with any tool, for example
 #                      esptool.py write_flash 0x190000 FILE.bin).
+#   --arduino          for the Arduino/PlatformIO firmware (mcu/platformio), which keeps
+#                      the settings in the standard NVS partition (0x9000, 0x5000 bytes)
+#                      together with its identity: writing it REPLACES the whole NVS
+#                      partition, so the node gets a new identity at its next start
+#                      (and any other NVS data of the sketch is lost). The ESP-IDF
+#                      firmware has a separate settings partition and keeps its identity.
 #   --docker           run the image generator (and esptool, if the host has none) in
 #                      the pinned espressif/idf image instead of needing ESP-IDF tools.
 #
@@ -41,7 +47,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 CHIP="" DEVICE="" SSID="" HOST="" PASSWORD="" SERVER_PORT=4242 MODE=wifi BAUD=460800
 PART_FILE="" OFFSET="" SIZE="" IMAGE_ONLY="" USE_DOCKER=0 PW_STDIN=0 PW_GIVEN=0
-usage() { sed -n '2,32p' "$0" >&2; exit 2; }
+ARDUINO=0
+usage() { sed -n '2,40p' "$0" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
     --chip) CHIP=${2:?}; shift 2 ;;
@@ -58,6 +65,7 @@ while [ $# -gt 0 ]; do
     --image-only) IMAGE_ONLY=${2:?}; shift 2 ;;
     --baud) BAUD=${2:?}; shift 2 ;;
     --docker) USE_DOCKER=1; shift ;;
+    --arduino) ARDUINO=1; shift ;;
     -h|--help) usage ;;
     *) echo "unknown argument: $1" >&2; usage ;;
   esac
@@ -95,6 +103,11 @@ for v in "$SSID" "$PASSWORD"; do
 done
 
 # the partition's offset and size
+if [ $ARDUINO = 1 ]; then
+  OFFSET=${OFFSET:-0x9000}
+  SIZE=${SIZE:-0x5000}
+  echo "wifi-config: --arduino writes the whole NVS partition at $OFFSET: the node's identity is replaced" >&2
+fi
 if [ -z "$OFFSET" ] || [ -z "$SIZE" ]; then
   if [ -z "$PART_FILE" ]; then
     for c in "$HERE/partitions.csv" "$HERE/../esp-idf/example/partitions.csv"; do
@@ -158,7 +171,11 @@ if [ -n "$IMAGE_ONLY" ]; then
   exit 0
 fi
 
-echo "flashing the settings partition rnccfg at $OFFSET on $DEVICE ($CHIP); the identity is kept"
+if [ $ARDUINO = 1 ]; then
+  echo "flashing the NVS partition at $OFFSET on $DEVICE ($CHIP)"
+else
+  echo "flashing the settings partition rnccfg at $OFFSET on $DEVICE ($CHIP); the identity is kept"
+fi
 if command -v esptool.py >/dev/null 2>&1; then
   esptool.py --chip "$CHIP" -p "$DEVICE" -b "$BAUD" write_flash "$OFFSET" "$TMP/rnccfg.bin"
 elif command -v esptool >/dev/null 2>&1; then

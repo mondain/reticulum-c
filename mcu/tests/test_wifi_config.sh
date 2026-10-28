@@ -53,4 +53,8 @@ grep -a -q -F password "$D/open.bin" && fail "an open network image holds a pass
 "$TOOL" $mode --partitions "$PART" --image-only "$D/serial.bin" --mode serial > "$D/o" 2>&1 \
   || { cat "$D/o" >&2; fail "serial mode image failed"; }
 grep -a -q -F serial "$D/serial.bin" || fail "the serial image lacks the mode"
+"$TOOL" $mode --arduino --image-only "$D/arduino.bin" --ssid net --host h > "$D/o" 2>&1 \
+  || { cat "$D/o" >&2; fail "arduino image failed"; }
+grep -q "flash it at 0x9000 (partition rnccfg, 0x5000" "$D/o" || fail "wrong arduino offset: $(cat "$D/o")"
+[ "$(stat -c %s "$D/arduino.bin")" = 20480 ] || fail "the arduino image is not the size of the NVS partition"
 echo "wifi-config tests passed"
