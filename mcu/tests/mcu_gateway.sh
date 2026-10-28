@@ -101,7 +101,8 @@ run_through_gateway() { # $1 = label, rest = extra harness arguments
 }
 
 run_through_gateway clean
-kill "${MCU_PIDS[-1]}" 2>/dev/null
-wait "${MCU_PIDS[-1]}" 2>/dev/null
+LAST_PID=${MCU_PIDS[${#MCU_PIDS[@]}-1]}
+kill "$LAST_PID" 2>/dev/null
+wait "$LAST_PID" 2>/dev/null
 run_through_gateway lossy --lora-loss 100
 echo "mcu gateway test passed"

@@ -32,7 +32,7 @@ run_tests() {
     (cd "$dir" && $CC $CFLAGS $srcs -o "t_$t" -lm) > "$dir/build_$t.log" 2>&1 || return 2
   done
   for t in core drivers sim; do
-    (cd "$dir" && timeout 600 "./t_$t") > "$dir/run_$t.log" 2>&1 || return 1
+    (cd "$dir" && "./t_$t") > "$dir/run_$t.log" 2>&1 || return 1
   done
   return 0
 }

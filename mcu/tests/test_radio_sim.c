@@ -193,7 +193,7 @@ static void test_loss(void) {
     if (r) {
       delivered++;
       if (r != 400 || memcmp(got, pkt, 400))
-      { wrong++; if (wrong < 4) { size_t q; for (q = 0; q < 400 && got[q] == pkt[q]; q++) ; fprintf(stderr, "wrong: i=%u r=%zu first diff at %zu\n", i, r, q); } }
+      { wrong++; if (wrong < 4) { size_t q; for (q = 0; q < 400 && got[q] == pkt[q]; q++) { } fprintf(stderr, "wrong: i=%u r=%zu first diff at %zu\n", i, r, q); } }
     }
   }
   /* each 400 byte packet needs both frames: 0.75^2 = 56 % */
