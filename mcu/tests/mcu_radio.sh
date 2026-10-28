@@ -13,17 +13,22 @@ D=$(mktemp -d /tmp/rnc-mcu-radio-XXXXXX)
 trap 'rm -rf "$D"' EXIT
 fail() { echo "FAIL: $*" >&2; tail -30 "$D"/*.log >&2 2>/dev/null; exit 1; }
 
-# REGULATORY: release images carry no default transmit settings. No Kconfig symbol, build
-# flag, Arduino define or source file may supply a default frequency, power, bandwidth,
-# spreading factor or coding rate for the radio; they come from NVS / Preferences only.
-if grep -rniE '(default|config|define)[^#]*lora[_.]?(freq|txp|tx_power|bw|sf|cr)([^a-z]|$).*[0-9]{3,}' \
-    "$SRC/mcu/esp-idf" "$SRC/mcu/platformio/src" "$SRC/mcu/platformio/platformio.ini" \
-    --include='*.c' --include='*.cpp' --include='*.h' --include='*.ini' --include='Kconfig*' \
-    --include='*.defaults*' 2>/dev/null | grep -v '^\s*#' | grep -q .; then
-  grep -rniE '(default|config|define)[^#]*lora[_.]?(freq|txp|tx_power|bw|sf|cr)([^a-z]|$).*[0-9]{3,}' \
-    "$SRC/mcu/esp-idf" "$SRC/mcu/platformio/src" "$SRC/mcu/platformio/platformio.ini" 2>/dev/null | head
-  fail "a default LoRa transmit setting is compiled into the firmware"
-fi
+# REGULATORY: release images carry no default transmit settings. No Kconfig symbol, sdkconfig
+# default, PlatformIO build flag or firmware source may supply a frequency, power, bandwidth,
+# spreading factor or coding rate for the radio; they come from NVS / Preferences / the
+# file system only, set by the operator.
+check_no_defaults() {
+  local hits
+  hits=$(grep -rniE 'LORA_?(FREQ|BW|BANDWIDTH|SF|SPREADING|CR|CODING|TXP|TX_POWER|POWER)' \
+      "$SRC/mcu/esp-idf/example/main/Kconfig.projbuild" "$SRC"/mcu/esp-idf/example/sdkconfig.defaults* \
+      "$SRC/mcu/platformio/platformio.ini" 2>/dev/null | grep -viE '^[^:]*:[0-9]+:[[:space:]]*(#|;)' || true)
+  [ -z "$hits" ] || { echo "$hits" >&2; fail "a LoRa transmit setting appears in a build configuration"; }
+  hits=$(grep -rnE 'rnc_lora_cfg_set\([^,]*,[[:space:]]*"(freq|bw|sf|cr|txp)",[[:space:]]*"' \
+      "$SRC/mcu/esp-idf" "$SRC/mcu/platformio/src" "$SRC/mcu/app" "$SRC/mcu/radio" 2>/dev/null || true)
+  [ -z "$hits" ] || { echo "$hits" >&2; fail "a firmware source sets a LoRa transmit setting from a literal"; }
+}
+check_no_defaults
+echo "no LoRa transmit setting is compiled into the firmware configuration or sources"
 
 cmake -S "$SRC" -B "$D/build" -DRNC_PROFILE=mcu -DRNC_CRYPTO=portable -DBUILD_TESTING=OFF \
   -DRNC_MCU_UNIT_TESTS=ON > "$D/cmake.log" 2>&1 || fail "configure"

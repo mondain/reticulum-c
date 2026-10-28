@@ -138,6 +138,37 @@ int main(void) {
   }
   type(&con, &cfg, "clear", reply, sizeof(reply));
   CHECK(!strcmp(cfg.mode, "serial") && cfg.ssid[0] == 0 && cfg.host[0] == 0);
+
+  /* ---- the radio settings: nothing is set after a clear, and the radio stays off until
+   * every transmit setting is given */
+  CHECK(cfg.lora.mode == RNC_LORA_MODE_OFF && cfg.lora.set == 0 && !rnc_lora_cfg_ready(&cfg.lora));
+  type(&con, &cfg, "get", reply, sizeof(reply));
+  CHECK(strstr(reply, "lora.mode=off") && strstr(reply, "lora.freq=(not set)") &&
+        strstr(reply, "lora.txp=(not set)") && strstr(reply, "lora.airtime=1.00"));
+  type(&con, &cfg, "set lora.mode leaf", reply, sizeof(reply));
+  type(&con, &cfg, "set lora.freq 868.1", reply, sizeof(reply));
+  type(&con, &cfg, "set lora.bw 125", reply, sizeof(reply));
+  type(&con, &cfg, "set lora.sf 8", reply, sizeof(reply));
+  type(&con, &cfg, "set lora.cr 5", reply, sizeof(reply));
+  CHECK(cfg.lora.mode == RNC_LORA_MODE_LEAF && !rnc_lora_cfg_ready(&cfg.lora)); /* no power yet */
+  type(&con, &cfg, "set lora.txp 14", reply, sizeof(reply));
+  CHECK(rnc_lora_cfg_ready(&cfg.lora) && cfg.lora.freq_hz == 868100000u && cfg.lora.bw_hz == 125000u);
+  type(&con, &cfg, "get lora.freq", reply, sizeof(reply));
+  CHECK(!strcmp(reply, "lora.freq=868100000"));
+  type(&con, &cfg, "get", reply, sizeof(reply));
+  CHECK(strstr(reply, "lora.mode=leaf") && strstr(reply, "lora.sf=8") && strstr(reply, "lora.txp=14"));
+  type(&con, &cfg, "set lora.freq 99", reply, sizeof(reply)); /* refused: unchanged */
+  CHECK(strstr(reply, "error") && cfg.lora.freq_hz == 868100000u);
+  type(&con, &cfg, "set lora.txp 99", reply, sizeof(reply));
+  CHECK(strstr(reply, "error") && cfg.lora.txp_dbm == 14);
+  type(&con, &cfg, "set lora.nope 1", reply, sizeof(reply));
+  CHECK(strstr(reply, "error"));
+  type(&con, &cfg, "set lora.mode gateway", reply, sizeof(reply));
+  CHECK(cfg.lora.mode == RNC_LORA_MODE_GATEWAY && rnc_lora_cfg_ready(&cfg.lora));
+  type(&con, &cfg, "help", reply, sizeof(reply));
+  CHECK(strstr(reply, "lora.freq") && strstr(reply, "stays off"));
+  type(&con, &cfg, "clear", reply, sizeof(reply)); /* back to a radio that is off and unset */
+  CHECK(cfg.lora.mode == RNC_LORA_MODE_OFF && cfg.lora.set == 0 && !rnc_lora_cfg_ready(&cfg.lora));
   puts("mcu net tests passed");
   return 0;
 }

@@ -13,19 +13,26 @@
  * number): the first carries exactly 254 packet bytes, the second the rest.
  *
  * Reception follows the stock receiver: a frame without the split flag is a whole
- * packet (and drops a pending first half); a split frame is the first half when
- * nothing is pending or its sequence number differs from the pending one (the pending
- * half is dropped), and the second half when the sequence number matches. This
- * implementation adds, for robustness (none of it changes what is sent):
+ * packet (and drops a pending first half); a split frame is the first half when nothing is
+ * pending or its sequence number differs from the pending one (the pending half is
+ * dropped), and the second half when the sequence number matches. This implementation
+ * adds, for robustness (none of it changes what is sent):
  *   - a first half is only kept if it carries exactly 254 bytes (no sender splits
- *     otherwise), which also makes the trailing empty frame some firmware sends after
- *     a 508 byte packet harmless;
+ *     otherwise); any other split frame that is not the second half of the pending packet
+ *     is dropped, together with a pending half of another packet, and is not kept (so it
+ *     cannot be glued to a later frame). This also makes the trailing empty frame some
+ *     firmware sends after a 508 byte packet harmless;
  *   - a pending first half expires after `timeout_us` (orphan fragments);
- *   - a frame identical to the pending first half is a duplicate and is ignored, so
- *     it cannot be taken for the second half;
- *   - a completed packet is only delivered once per sequence number and content
- *     within the duplicate window (the last completed packet is remembered), so a
- *     second copy of the same two frames is not delivered twice.
+ *   - a frame identical to the pending first half is a duplicate and is ignored, so it
+ *     cannot be taken for the second half;
+ *   - a completed packet is only delivered once per sequence number and content within
+ *     the duplicate window (the last completed packet is remembered);
+ *   - rnc_air_rx_set_max limits the packet size: with Reticulum's MTU of 500 a full size
+ *     (254 byte) split frame cannot be a second half, so it starts a new packet instead of
+ *     being glued to the pending half.
+ * The format has no checksum: a stray second half that happens to carry the pending
+ * sequence number is still glued to the pending first half, exactly as in the stock
+ * receiver; Reticulum's own authentication rejects such a packet.
  */
 #include <stddef.h>
 #include <stdint.h>

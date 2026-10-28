@@ -151,13 +151,11 @@ typedef struct client {
   rnc_identity id;
   rnc_node *node;
   rnc_requester *req;
-  rnc_hdlc hdlc;
   uint8_t known[4][16];
   unsigned known_hops[4];
   unsigned nknown, announce_events;
   unsigned path_responses;
   uint8_t wire[RNC_MAX_FRAME + 8], pk[RNC_MAX_FRAME];
-  int has_lora, serial_side;
   rnc_requester_result last;
   uint8_t response[1200];
   int have_result;
@@ -169,22 +167,17 @@ static rnc_result c_random(void *ctx, uint8_t *out, size_t n) {
 }
 static uint64_t unix_of(sim_medium *med) { return (uint64_t)RNC_MCU_BUILD_EPOCH + 2000u + med->now_us / 1000000u; }
 
-static int client_make(client *c, sim_medium *med, int chip, uint32_t seed, const rnc_lora_params *params,
-                       int serial_side) {
+static int client_make(client *c, sim_medium *med, int chip, uint32_t seed, const rnc_lora_params *params) {
   memset(c, 0, sizeof(*c));
   c->pl.med = med;
   c->pl.seed = seed * 104729u + 7u;
-  c->serial_side = serial_side;
-  if (!serial_side) {
-    sim_board_init(&c->sb, med, chip, seed, 10000);
-    if (sim_board_start(&c->sb, params) != 0)
-      return -1;
-    c->has_lora = 1;
-  }
+  sim_board_init(&c->sb, med, chip, seed, 10000);
+  if (sim_board_start(&c->sb, params) != 0)
+    return -1;
   if (rnc_identity_generate(&c->id, c_random, &c->pl) != RNC_OK)
     return -2;
   c->node = rnc_node_new(&c->id, 0, c_random, &c->pl);
-  if (!c->node || rnc_node_add_interface(c->node, 1, serial_side ? 115200u : rnc_lora_if_bitrate(&c->sb.li)) != RNC_OK)
+  if (!c->node || rnc_node_add_interface(c->node, 1, rnc_lora_if_bitrate(&c->sb.li)) != RNC_OK)
     return -3;
   c->req = rnc_requester_new(c->node, 1200, c_random, &c->pl);
   return c->req ? 0 : -4;
@@ -223,21 +216,13 @@ static void client_input(client *c, const uint8_t *data, size_t n, uint64_t unix
 static void client_drain(client *c, uint64_t unix_now, uint64_t now_ms) {
   rnc_node_event ev;
   while (rnc_node_poll(c->node, &ev) == RNC_OK) {
-    size_t wn = 0, fn = 0;
+    size_t wn = 0;
     if (ev.type == RNC_NODE_ANNOUNCE) {
       client_note_announce(c, &ev);
     } else if (ev.type == RNC_NODE_LOCAL) {
       (void)rnc_requester_input(c->req, &ev, unix_now, now_ms);
     } else if (ev.type == RNC_NODE_SEND && rnc_packet_encode(&ev.packet, c->wire, sizeof(c->wire), &wn) == RNC_OK) {
-      if (c->has_lora) {
-        (void)rnc_lora_if_send(&c->sb.li, c->wire, wn, now_ms * 1000u);
-      } else {
-        uint8_t framed[RNC_HDLC_MAX];
-        if (rnc_hdlc_encode(c->wire, wn, framed, sizeof(framed), &fn) == RNC_OK) {
-          /* to the board's serial input */
-          (void)framed;
-        }
-      }
+      (void)rnc_lora_if_send(&c->sb.li, c->wire, wn, now_ms * 1000u);
     }
   }
 }
@@ -245,11 +230,9 @@ static void client_drain(client *c, uint64_t unix_now, uint64_t now_ms) {
 static void client_step(client *c, uint64_t now_ms) {
   uint64_t unix_now = unix_of(c->pl.med);
   size_t n;
-  if (c->has_lora) {
-    rnc_lora_if_step(&c->sb.li, now_ms * 1000u);
-    while ((n = rnc_lora_if_recv(&c->sb.li, c->pk, sizeof(c->pk))) > 0)
-      client_input(c, c->pk, n, unix_now, now_ms);
-  }
+  rnc_lora_if_step(&c->sb.li, now_ms * 1000u);
+  while ((n = rnc_lora_if_recv(&c->sb.li, c->pk, sizeof(c->pk))) > 0)
+    client_input(c, c->pk, n, unix_now, now_ms);
   (void)rnc_node_tick(c->node, unix_now, now_ms);
   (void)rnc_requester_tick(c->req, unix_now, now_ms);
   client_drain(c, unix_now, now_ms);
@@ -341,7 +324,7 @@ static void test_leaf_network(void) {
   sim_medium_init(&med, 5);
   CHECK_EQ(board_make(&a, &med, 1262, 1, RNC_LORA_MODE_LEAF, &p, "sim-a"), 0);
   CHECK_EQ(board_make(&b, &med, 1276, 2, RNC_LORA_MODE_LEAF, &p, "sim-b"), 0);
-  CHECK_EQ(client_make(&c, &med, 1262, 3, &p, 0), 0);
+  CHECK_EQ(client_make(&c, &med, 1262, 3, &p), 0);
   sim_link_all(&med, 100);
   memset(&w, 0, sizeof(w));
   w.med = &med;
@@ -442,7 +425,7 @@ static void test_lossy_channel(void) {
   int n;
   sim_medium_init(&med, 9);
   CHECK_EQ(board_make(&a, &med, 1276, 1, RNC_LORA_MODE_LEAF, &p, "lossy"), 0);
-  CHECK_EQ(client_make(&c, &med, 1262, 3, &p, 0), 0);
+  CHECK_EQ(client_make(&c, &med, 1262, 3, &p), 0);
   sim_link_all(&med, 100);
   sim_link_drop(&med, a.sb.radio_id, c.sb.radio_id, 150); /* 15 % of the frames vanish */
   memset(&w, 0, sizeof(w));
@@ -484,7 +467,7 @@ static void test_gateway_vs_leaf(void) {
     sim_medium_init(&med, 15 + pass);
     CHECK_EQ(board_make(&a, &med, 1262, 1, pass ? RNC_LORA_MODE_GATEWAY : RNC_LORA_MODE_LEAF, &p, "relay"), 0);
     CHECK_EQ(board_make(&b, &med, 1276, 2, RNC_LORA_MODE_LEAF, &p, "far"), 0);
-    CHECK_EQ(client_make(&c, &med, 1262, 3, &p, 0), 0);
+    CHECK_EQ(client_make(&c, &med, 1262, 3, &p), 0);
     /* C - A - B in a line: C and B cannot hear each other */
     sim_link(&med, c.sb.radio_id, a.sb.radio_id, 100);
     sim_link(&med, a.sb.radio_id, b.sb.radio_id, 100);
@@ -559,7 +542,7 @@ static void test_radio_comes_up_later(void) {
   a.app = rnc_mcu_app_new(&plat_table, &cfg);
   CHECK(a.app != NULL);
   rnc_mcu_app_destination(a.app, a.dest);
-  CHECK_EQ(client_make(&c, &med, 1262, 3, &p, 0), 0);
+  CHECK_EQ(client_make(&c, &med, 1262, 3, &p), 0);
   sim_link_all(&med, 100);
   memset(&w, 0, sizeof(w));
   w.med = &med;

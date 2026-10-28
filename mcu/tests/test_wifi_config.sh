@@ -23,6 +23,15 @@ PART="$SRC/mcu/esp-idf/example/partitions.csv"
 "$TOOL" --image-only "$D/x.bin" --ssid net --host 'bad host' > "$D/o" 2>&1 && fail "host with a space accepted"
 "$TOOL" --image-only "$D/x.bin" --ssid 012345678901234567890123456789012 --host h > "$D/o" 2>&1 && fail "33 byte ssid accepted"
 "$TOOL" --chip esp32 --ssid net --host h > "$D/o" 2>&1 && fail "missing device accepted"
+# the radio: incomplete or out of range settings are refused (there are no defaults)
+"$TOOL" --image-only "$D/x.bin" --mode serial --lora-mode leaf > "$D/o" 2>&1 && fail "lora leaf without settings accepted"
+"$TOOL" --image-only "$D/x.bin" --mode serial --lora-mode leaf --lora-freq 868.1 --lora-bw 125 --lora-sf 8 --lora-cr 5 > "$D/o" 2>&1 && fail "lora leaf without txp accepted"
+"$TOOL" --image-only "$D/x.bin" --mode serial --lora-mode gateway --lora-freq 868.1 --lora-bw 125 --lora-sf 8 --lora-txp 14 > "$D/o" 2>&1 && fail "lora gateway without cr accepted"
+"$TOOL" --image-only "$D/x.bin" --mode serial --lora-mode wide > "$D/o" 2>&1 && fail "lora mode 'wide' accepted"
+for bad in "--lora-freq 12" "--lora-freq 2400" "--lora-freq abc" "--lora-bw 100" "--lora-bw 125001" "--lora-sf 4" "--lora-sf 13" \
+           "--lora-cr 9" "--lora-cr 4" "--lora-txp 23" "--lora-txp -10" "--lora-txp x" "--lora-airtime 0" "--lora-airtime 101"; do
+  "$TOOL" --image-only "$D/x.bin" --mode serial $bad > "$D/o" 2>&1 && fail "accepted: $bad"
+done
 [ ! -e "$D/x.bin" ] || fail "an image was written for refused input"
 echo "input validation ok"
 
@@ -53,6 +62,20 @@ grep -a -q -F password "$D/open.bin" && fail "an open network image holds a pass
 "$TOOL" $mode --partitions "$PART" --image-only "$D/serial.bin" --mode serial > "$D/o" 2>&1 \
   || { cat "$D/o" >&2; fail "serial mode image failed"; }
 grep -a -q -F serial "$D/serial.bin" || fail "the serial image lacks the mode"
+# LoRa settings: the keys the firmware reads (lora_mode, lora_set, lora_freq, lora_bw, lora_sf,
+# lora_cr, lora_txp, lora_air); and an image without any radio setting keeps the radio off
+"$TOOL" $mode --partitions "$PART" --image-only "$D/lora.bin" --mode serial --lora-mode gateway \
+  --lora-freq 868.1 --lora-bw 125 --lora-sf 8 --lora-cr 4/5 --lora-txp 14 --lora-airtime 0.5 > "$D/o" 2>&1 \
+  || { cat "$D/o" >&2; fail "lora image failed"; }
+grep -q "responsible for the legality" "$D/o" || fail "no regulatory reminder"
+for text in lora_mode gateway lora_set lora_freq lora_bw lora_sf lora_cr lora_txp lora_air; do
+  grep -a -q -F -- "$text" "$D/lora.bin" || fail "the lora image lacks: $text"
+done
+for text in lora_freq lora_bw lora_sf lora_cr lora_txp; do
+  grep -a -q -F -- "$text" "$D/serial.bin" && fail "the plain image holds a radio setting: $text"
+done
+grep -a -q -F lora_mode "$D/serial.bin" || fail "the plain image does not say lora_mode off"
+echo "lora image ok"
 "$TOOL" $mode --arduino --image-only "$D/arduino.bin" --ssid net --host h > "$D/o" 2>&1 \
   || { cat "$D/o" >&2; fail "arduino image failed"; }
 grep -q "flash it at 0x9000 (partition rnccfg, 0x5000" "$D/o" || fail "wrong arduino offset: $(cat "$D/o")"
