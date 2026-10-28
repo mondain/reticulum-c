@@ -3,8 +3,11 @@
 /* The provisioning settings (mode, Wi-Fi credentials, server) in the dedicated
  * NVS partition "rnccfg", separate from the identity in the default NVS partition,
  * so that provisioning never touches the node's identity. Namespace "rnc_net";
- * keys: mode, ssid, password, host (strings) and port (u16). The same layout is
- * produced by mcu/tools/wifi-config.sh. */
+ * keys: mode, ssid, password, host (strings) and port (u16); the radio:
+ * lora_mode (string off|leaf|gateway), lora_set (u8, which of the transmit settings were
+ * set explicitly), lora_freq and lora_bw (u32, Hz), lora_sf and lora_cr (u8), lora_txp
+ * (i8, dBm), lora_air (u16, hundredths of a percent). The same layout is produced by
+ * mcu/tools/wifi-config.sh. */
 #include "esp_err.h"
 #include "rnc_mcu_net.h"
 

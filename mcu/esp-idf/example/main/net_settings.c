@@ -2,6 +2,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include <stdio.h>
 #include <string.h>
 
 static void get_str(nvs_handle_t h, const char *key, char *out, size_t size) {
@@ -34,6 +35,42 @@ int net_settings_load(rnc_mcu_cfg *cfg) {
     get_str(h, "host", cfg->host, sizeof(cfg->host));
     if (nvs_get_u16(h, "port", &port) == ESP_OK && port != 0)
       cfg->port = port;
+    {
+      /* the radio: nothing is assumed. Every transmit setting counts as set only if it was
+       * stored together with its "set" bit, and passes the same checks as at the console. */
+      char text[16];
+      uint32_t u32;
+      uint8_t u8, set = 0;
+      int8_t i8;
+      uint16_t u16;
+      size_t n = sizeof(text);
+      if (nvs_get_str(h, "lora_mode", text, &n) == ESP_OK)
+        (void)rnc_lora_cfg_set(&cfg->lora, "mode", text);
+      if (nvs_get_u8(h, "lora_set", &set) != ESP_OK)
+        set = 0;
+      if ((set & RNC_LORA_SET_FREQ) && nvs_get_u32(h, "lora_freq", &u32) == ESP_OK) {
+        snprintf(text, sizeof(text), "%lu", (unsigned long)u32);
+        (void)rnc_lora_cfg_set(&cfg->lora, "freq", text);
+      }
+      if ((set & RNC_LORA_SET_BW) && nvs_get_u32(h, "lora_bw", &u32) == ESP_OK) {
+        snprintf(text, sizeof(text), "%lu", (unsigned long)u32);
+        (void)rnc_lora_cfg_set(&cfg->lora, "bw", text);
+      }
+      if ((set & RNC_LORA_SET_SF) && nvs_get_u8(h, "lora_sf", &u8) == ESP_OK) {
+        snprintf(text, sizeof(text), "%u", (unsigned)u8);
+        (void)rnc_lora_cfg_set(&cfg->lora, "sf", text);
+      }
+      if ((set & RNC_LORA_SET_CR) && nvs_get_u8(h, "lora_cr", &u8) == ESP_OK) {
+        snprintf(text, sizeof(text), "%u", (unsigned)u8);
+        (void)rnc_lora_cfg_set(&cfg->lora, "cr", text);
+      }
+      if ((set & RNC_LORA_SET_TXP) && nvs_get_i8(h, "lora_txp", &i8) == ESP_OK) {
+        snprintf(text, sizeof(text), "%d", (int)i8);
+        (void)rnc_lora_cfg_set(&cfg->lora, "txp", text);
+      }
+      if (nvs_get_u16(h, "lora_air", &u16) == ESP_OK && u16 >= 1 && u16 <= 10000)
+        cfg->lora.airtime = u16;
+    }
     nvs_close(h);
   }
 #if defined(CONFIG_RETICULUM_MCU_DEV_WIFI_DEFAULTS)
@@ -69,6 +106,26 @@ esp_err_t net_settings_save(const rnc_mcu_cfg *cfg) {
     err = nvs_set_str(h, "host", cfg->host);
   if (err == ESP_OK)
     err = nvs_set_u16(h, "port", cfg->port);
+  /* the radio settings; a value that was never set is not stored (it stays "not set") */
+  if (err == ESP_OK)
+    err = nvs_set_str(h, "lora_mode",
+                      cfg->lora.mode == RNC_LORA_MODE_LEAF      ? "leaf"
+                      : cfg->lora.mode == RNC_LORA_MODE_GATEWAY ? "gateway"
+                                                                 : "off");
+  if (err == ESP_OK)
+    err = nvs_set_u8(h, "lora_set", cfg->lora.set);
+  if (err == ESP_OK && (cfg->lora.set & RNC_LORA_SET_FREQ))
+    err = nvs_set_u32(h, "lora_freq", cfg->lora.freq_hz);
+  if (err == ESP_OK && (cfg->lora.set & RNC_LORA_SET_BW))
+    err = nvs_set_u32(h, "lora_bw", cfg->lora.bw_hz);
+  if (err == ESP_OK && (cfg->lora.set & RNC_LORA_SET_SF))
+    err = nvs_set_u8(h, "lora_sf", cfg->lora.sf);
+  if (err == ESP_OK && (cfg->lora.set & RNC_LORA_SET_CR))
+    err = nvs_set_u8(h, "lora_cr", cfg->lora.cr);
+  if (err == ESP_OK && (cfg->lora.set & RNC_LORA_SET_TXP))
+    err = nvs_set_i8(h, "lora_txp", cfg->lora.txp_dbm);
+  if (err == ESP_OK)
+    err = nvs_set_u16(h, "lora_air", cfg->lora.airtime);
   if (err == ESP_OK)
     err = nvs_commit(h);
   nvs_close(h);

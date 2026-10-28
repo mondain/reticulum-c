@@ -79,6 +79,46 @@ menu "Reticulum MCU example"
             after the chip started: holding it while resetting selects the ROM
             download mode instead.
 
+    choice RETICULUM_MCU_LORA_BOARD
+        prompt "LoRa board (the radio's pin map and chip)"
+        default RETICULUM_MCU_LORA_BOARD_NONE
+        help
+            Selects the pin map and the radio chip of the board for the optional LoRa
+            interface (mcu/radio/README.txt). This is hardware, not a radio setting: the
+            frequency, bandwidth, spreading factor, coding rate and power are NEVER set
+            here. They are provisioned at runtime (lora.* keys of the console and of
+            mcu/tools/wifi-config.sh) and the radio stays off until all of them are
+            given. The operator is responsible for a legal frequency, power and duty
+            cycle where the board is used.
+
+        config RETICULUM_MCU_LORA_BOARD_NONE
+            bool "No LoRa radio in this image"
+
+        config RETICULUM_MCU_LORA_BOARD_HELTEC_V3
+            bool "Heltec WiFi LoRa 32 V3 (ESP32-S3, SX1262)"
+            depends on IDF_TARGET_ESP32S3
+
+        config RETICULUM_MCU_LORA_BOARD_HELTEC_V2
+            bool "Heltec WiFi LoRa 32 V2 (ESP32, SX1276)"
+            depends on IDF_TARGET_ESP32
+
+        config RETICULUM_MCU_LORA_BOARD_TBEAM
+            bool "LilyGo T-Beam v1.0/v1.1 (ESP32, SX1276, AXP192)"
+            depends on IDF_TARGET_ESP32
+
+        config RETICULUM_MCU_LORA_BOARD_T3S3
+            bool "LilyGo T3-S3 (ESP32-S3, SX1262)"
+            depends on IDF_TARGET_ESP32S3
+    endchoice
+
+    config RETICULUM_MCU_LORA_BOARD_ID
+        string
+        default "heltec_wifi_lora_32_V3" if RETICULUM_MCU_LORA_BOARD_HELTEC_V3
+        default "heltec_wifi_lora_32_V2" if RETICULUM_MCU_LORA_BOARD_HELTEC_V2
+        default "ttgo_t_beam" if RETICULUM_MCU_LORA_BOARD_TBEAM
+        default "lilygo_t3_s3" if RETICULUM_MCU_LORA_BOARD_T3S3
+        default ""
+
     menu "Developer defaults for Wi-Fi (NOT FOR RELEASE)"
 
         config RETICULUM_MCU_DEV_WIFI_DEFAULTS

@@ -54,7 +54,7 @@ static int hides_input(const rnc_mcu_console *con) {
 
 void provision_console(rnc_mcu_cfg *cfg, const char *reason) {
   rnc_mcu_console con;
-  char reply[256];
+  char reply[512];
   uint8_t byte;
   rnc_mcu_console_init(&con);
   serial_port_print("\n\nreticulum-c provisioning console\n");

@@ -148,6 +148,7 @@ EOF
   echo "image:     ${RNC_IDF_IMAGE:-$IDF_IMAGE}"
   echo "compiler:  $("xtensa-$CHIP-elf-gcc" --version 2>/dev/null | head -1)"
   echo "dev-wifi-defaults: $DEV_WIFI"
+  echo "lora-board: $(sed -n 's/^CONFIG_RETICULUM_MCU_LORA_BOARD_ID="\(.*\)"/\1/p' "$BUILD/sdkconfig" 2>/dev/null | head -1)"
   echo "built:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$OUT/build-info.txt"
 echo "built $CHIP (reticulum-c $VERSION): $OUT"
