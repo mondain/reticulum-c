@@ -641,7 +641,23 @@ if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE
         add_test(NAME reticulum_mcu_host COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_host.sh
             ${CMAKE_SOURCE_DIR} $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>)
         set_tests_properties(reticulum_mcu_host PROPERTIES LABELS "mcu;network;pty" TIMEOUT 600)
+        # the application's unit tests (clock, link handling, network helpers), built
+        # in their own mcu-profile build; no sockets, no node
+        add_test(NAME reticulum_mcu_unit COMMAND ${RNC_BASH_MCU}
+            ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_unit.sh ${CMAKE_SOURCE_DIR})
+        set_tests_properties(reticulum_mcu_unit PROPERTIES LABELS mcu TIMEOUT 600)
+        # the firmware logic over its Wi-Fi transport (TCP client, reconnect)
+        add_test(NAME reticulum_mcu_tcp COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_tcp.sh
+            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>)
+        set_tests_properties(reticulum_mcu_tcp PROPERTIES LABELS "mcu;network" TIMEOUT 600)
         if(RNC_INTEROP_TESTS)
+            add_test(NAME reticulum_mcu_tcp_reference COMMAND ${RNC_BASH_MCU}
+                ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_tcp.sh ${CMAKE_SOURCE_DIR}
+                $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>
+                ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
+            set_tests_properties(reticulum_mcu_tcp_reference PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                LABELS "mcu;reticulum_interop;network" TIMEOUT 600)
             add_test(NAME reticulum_mcu_host_reference COMMAND ${RNC_BASH_MCU}
                 ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_host.sh ${CMAKE_SOURCE_DIR}
                 $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>
