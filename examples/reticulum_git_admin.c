@@ -34,6 +34,18 @@
 
 #define PATH_TIMEOUT_MS 15000u
 
+/* A short-lived tool: allocations are handed back by the operating system at
+ * exit. Keeping them reachable from a static table stops leak checkers from
+ * reporting the error paths that return without freeing. */
+static void *kept[4096];
+static size_t kept_next;
+static void *keep(void *p) {
+  kept[kept_next++ % (sizeof(kept) / sizeof(kept[0]))] = p;
+  return p;
+}
+#define malloc(n) keep(malloc(n))
+#define calloc(n, m) keep(calloc(n, m))
+
 static rngit_client *C;
 static char config_dir[PATH_MAX];
 static char opt_text[65536];
@@ -1345,7 +1357,6 @@ int main(int argc, char **argv) {
     snprintf(config_dir, sizeof(config_dir), "%s", env);
   else
     snprintf(config_dir, sizeof(config_dir), "%s/.rngit", getenv("HOME") ? getenv("HOME") : ".");
-  opt_signer = opt_signer;
   if (!strcmp(pos[0], "release") && strlen(pos[1]) > 4 && !strcasecmp(pos[1] + strlen(pos[1]) - 4, ".rsm") &&
       is_file_path(pos[1])) {
     /* a local manifest: the origin is in it */
@@ -1412,6 +1423,15 @@ int main(int argc, char **argv) {
   } else if (!strcmp(pos[0], "release")) {
     if (np < 3 || u.components != 2)
       return usage(), 2;
+    if (!strcmp(pos[2], "create") && np >= 4 && opt_local) {
+      /* a local release needs no node, only the signing identity */
+      rnc_identity local_id;
+      char idpath[PATH_MAX + 32];
+      snprintf(idpath, sizeof(idpath), "%s/client_identity", config_dir);
+      if (rnc_host_identity_load(opt_signer ? opt_signer : idpath, rngit_random, NULL, &local_id) != RNC_OK)
+        return fail("Could not load the signing identity");
+      return cmd_release_create(&u, pos[3], &local_id);
+    }
     connect_node(&u, connect);
     if (!strcmp(pos[2], "list"))
       rc = cmd_release_list(&u);

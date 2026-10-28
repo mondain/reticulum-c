@@ -40,6 +40,7 @@ typedef struct client {
 } client;
 static client *C;
 
+static void abort_with(const char *reason) __attribute__((noreturn));
 static void abort_with(const char *reason) {
   fprintf(stderr, "git-remote-rns failed: %s\n", reason);
   exit(255);
@@ -335,7 +336,7 @@ static void process_fetch(pair *queue, size_t count) {
       FILE *f;
       char *verify[] = {"git", "bundle", "verify", "-q", path, NULL};
       char *unbundle[] = {"git", "bundle", "unbundle", path, NULL};
-      const val *code;
+      const val *code = NULL;
       if (!parse(&rd, &meta, 0) || !(code = map_get_int(&meta, GIT_IDX_RESULT_CODE)))
         abort_with("No result metadata on bundle response");
       if (code->type != V_UINT || code->u != 0)
