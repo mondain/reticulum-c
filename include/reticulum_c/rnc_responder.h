@@ -68,6 +68,16 @@ rnc_result rnc_responder_register_file(
     rnc_responder *responder, const uint8_t destination[16], const char *path,
     rnc_service_policy policy, const uint8_t (*allowed)[16],
     size_t allowed_count, rnc_responder_file_handler handler, void *context);
+/* The identity (public key only) the caller identified itself with, for the
+ * request a handler is running for; RNC_STATE outside a handler or when the
+ * caller did not identify. */
+rnc_result rnc_responder_request_identity(const rnc_responder *responder,
+                                          rnc_identity *identity);
+/* A handler may keep the node serviced while it works (a long subprocess, say)
+ * by feeding events to rnc_responder_input and calling rnc_responder_tick from
+ * inside the handler: link keepalives and other links' packets keep being
+ * processed, but no second handler starts and a link that closes meanwhile is
+ * released only after the handler returns. */
 /* Destination.set_max_request_size for every link to the destination, present
  * and future (RNC_SERVICE_NO_LIMIT removes the limit). */
 rnc_result rnc_responder_set_max_request_size(rnc_responder *responder,

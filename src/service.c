@@ -394,8 +394,10 @@ static rnc_result accept_request(rnc_service *s, const uint8_t id[16], const uin
     if (!h)
         return RNC_OK;
     e.identified = rnc_link_remote_identity(s->link, &remote) == RNC_OK;
-    if (e.identified)
+    if (e.identified) {
         memcpy(e.identity_hash, remote.hash, 16);
+        memcpy(e.identity_public_key, remote.public_key, 64);
+    }
     if (h->policy == RNC_SERVICE_ALLOW_ALL)
         allowed = 1;
     else if (h->policy == RNC_SERVICE_ALLOW_IDENTIFIED)

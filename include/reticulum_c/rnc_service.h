@@ -25,7 +25,7 @@ typedef enum rnc_service_event_type {
 typedef struct rnc_service_event {
     rnc_service_event_type type;
     rnc_result reason;
-    uint8_t request_id[16], path_hash[16], identity_hash[16];
+    uint8_t request_id[16], path_hash[16], identity_hash[16], identity_public_key[64];
     int identified;
     double requested_at;
     size_t data_size;
