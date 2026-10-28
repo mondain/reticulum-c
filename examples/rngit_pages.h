@@ -1089,9 +1089,10 @@ static void pg_path_crumbs(sbuf *nav, const char *g, const char *r, const char *
       slash = strchr(start, '/');
       if (slash)
         *slash = 0;
-      if (cur[0])
-        strncat(cur, "/", sizeof(cur) - strlen(cur) - 1);
-      strncat(cur, start, sizeof(cur) - strlen(cur) - 1);
+      {
+        size_t used = strlen(cur);
+        (void)snprintf(cur + used, sizeof(cur) - used, "%s%s", used ? "/" : "", start);
+      }
       sb_adds(nav, " / ");
       if (i == total - 1)
         sb_adds(nav, start);

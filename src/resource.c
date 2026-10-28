@@ -316,6 +316,8 @@ static size_t pack_adv(const resource_adv *a, uint8_t out[RNC_LINK_MDU]) {
   else
     b[n++] = 0xc0;
   U('f', a->flags);
+  if (a->map_size > sizeof(b) - n - 8u) /* the hashmap must fit the advertisement */
+    return 0;
   B('m', a->map, a->map_size);
 #undef K
 #undef U
