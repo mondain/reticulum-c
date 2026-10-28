@@ -31,6 +31,10 @@ tests; `-DRNC_BUILD_EXAMPLES=OFF` disables the POSIX examples.
 `-DRNC_BUILD_HOST=OFF` disables the POSIX host and daemon.
 `-DRNC_COMPRESSION=OFF` removes BZip2 and rejects compressed transfers/streams.
 
+Some tests drive real tools and need `bash` and `git`; they are skipped when
+either is missing. The git tests use temporary directories under `$TMPDIR`
+(`/tmp`) and loopback ports.
+
 ## Install and consume
 
 ```sh
@@ -84,6 +88,36 @@ and authenticated shared-instance RPC. RNS 1.5.5 RPC uses MessagePack.
 SIGHUP reloads configuration; SIGINT/SIGTERM
 stop the daemon. Keep identity, checkpoint and admin paths in a private directory.
 Actual radio and multicast deployment require separate hardware/network checks.
+
+## Tools
+
+Built with the examples (`-DRNC_BUILD_EXAMPLES=ON`, the default). Each attaches
+to a running node daemon over TCP (`--connect HOST:PORT`) and speaks the
+reference's wire protocol; the reference tool they correspond to is in brackets.
+
+| Tool | Reference | Purpose |
+| --- | --- | --- |
+| `reticulum-c-node` | rnsd | Node daemon: interfaces, transport, shared-instance RPC |
+| `reticulum-c-ctl` | rnstatus, rnpath, rnid | Status, paths, blackholes, identities |
+| `reticulum-c-cp` | rncp | File transfer |
+| `reticulum-c-x` | rnx | Remote command execution |
+| `reticulum-c-sh` | rnsh | Remote shell |
+| `reticulum-c-rnodeconf` | rnodeconf | RNode information and configuration |
+| `reticulum-c-git` | rngit node | Git repository node: serves repositories, forks, mirrors, releases, work documents, statistics and nomadnet pages |
+| `reticulum-c-git-remote` | git-remote-rns | `git clone rns://DESTINATION/GROUP/REPO` (install under that name) |
+| `reticulum-c-git-admin` | rngit create, fork, mirror, sync, perms, release, work | Management of repositories on a node |
+| `reticulum-c-git-cs` | rngcs | Sign and verify git commits with a Reticulum identity |
+
+Usage, options, differences and test evidence for each are in
+[COMPATIBILITY.md](COMPATIBILITY.md); the source of each is one file in
+`examples/`. A quick git example, with a node daemon listening on 7778:
+
+```sh
+reticulum-c-git --connect 127.0.0.1:7778 --config ~/.rngit     # prints the destination
+export RNGIT_CONNECT=127.0.0.1:7778
+git clone rns://DESTINATION/GROUP/REPO                          # needs git-remote-rns on PATH
+reticulum-c-git-admin create rns://DESTINATION/GROUP/NEW
+```
 
 ## Generic C text example
 
@@ -161,7 +195,14 @@ links with initiator identity proofs, keepalives/close/timeouts, typed reliable
 Channels with bounded queues, ordering, duplicates and fresh-IV retries; IFAC,
 ratchet lifecycle/encryption, GROUP/PLAIN primitives, path discovery/forwarding,
 Buffer streams, segmented Resources, request/response services, configurable
-MTUs up to 4096, optional POSIX interfaces and persistent node state.
+MTUs up to 4096, optional POSIX interfaces and persistent node state;
+request/response responders and requesters (including file responses with
+metadata and deferred replies); interfaces for TCP, UDP, Auto, serial, KISS,
+AX.25, Pipe, RNode (single, multi and WiFi), I2P (SAM) and Weave; the management
+plane (blackholes, discovery, remote management); and the tools above, among
+them a port of `rngit`. Interface and tool coverage and every known difference
+are in [COMPATIBILITY.md](COMPATIBILITY.md) and
+[docs/spec-gap-list.md](docs/spec-gap-list.md).
 
 Defaults remain MTU 500 and a two-message Channel TX window. The implementation
 does not claim complete RNS API/configuration compatibility. Radio hardware,

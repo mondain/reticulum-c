@@ -812,7 +812,16 @@ from an endpoint and sends its own announce to it. The tests fail when the
 duplicate window, the signature check, the peer timeout or the endpoint in the
 command is removed. Not tested on real hardware.
 
-## rngit: git over Reticulum (`feature/rngit`)
+## rngit: git over Reticulum
+
+Four executables port the reference's `rngit` (the single `rngit` and
+`git-remote-rns` commands of RNS e40191b3): `reticulum-c-git` (the repository
+node), `reticulum-c-git-remote` (install as `git-remote-rns`),
+`reticulum-c-git-admin` (create, fork, mirror, sync, permissions, releases, work
+documents) and `reticulum-c-git-cs` (the `rngcs` commit signing tool). All attach
+to a node over TCP like the other tools. The subsections below record what each
+step added, its differences from the reference and its evidence; the order is
+transport, creation and permissions, then the rest.
 
 `reticulum-c-git` is a repository node for the reference `rngit` protocol and
 `reticulum-c-git-remote` is a remote helper for `rns://DESTINATION/GROUP/REPO`
@@ -846,10 +855,10 @@ the reference has no limit); a request is answered synchronously, so a git
 operation that outlives the 30 second request window is lost; the helper opens a
 link per request where the reference keeps one; a SHA with whitespace in it is
 refused (the reference accepts it); a missing field in a request is answered
-with an invalid-request status rather than a remote error. Not implemented:
-creating repositories, forks, mirrors and sync, permission and release
-management, work documents, statistics, the CLI subcommands of `rngit`, the
-nomadnet page server and commit signatures.
+with an invalid-request status rather than a remote error. Everything the
+reference's `rngit` does beyond this transport (creation, permissions, forks,
+mirrors, releases, work documents, signing, statistics, pages) is covered by
+the sections that follow.
 
 Evidence: a real `git clone`, `push`, `pull`, branch push and delete, push of
 history the node already has, and permission checks (read, write, none, unknown

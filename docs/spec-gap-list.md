@@ -1,6 +1,6 @@
 # Reticulum manual vs reticulum-c: spec gap list
 
-- **Date:** 2026-10-26
+- **Date:** 2026-10-26, rows updated as items were completed (last on 2026-10-28)
 - **Baseline:** Reticulum Manual (`Downloads/Reticulum.Manual.pdf`, text extracted with `pdftotext`). It is newer than the RNS 1.5.5 baseline used by the SDK, so some items (rngit, interface discovery, blackhole management) postdate it.
 - **Method:** three read-only audits by manual section, based on headers and source rather than README claims. No builds or tests were run. Items marked *(unverified)* rest on header/grep evidence only. The audit did not read all of `host_posix.c`, `ipc.c`, `service.c`, `channel.c`, `ratchet.c` or `ifac.c` in full.
 
@@ -234,7 +234,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | IMPL | Echo | Encrypt/decrypt, proofs and receipts with RTT, `rnc_node_hops_to` |
 | PART | Callback-style APIs | Provided as events instead (service, resource, link) |
 
-The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`. No example exists for announce, broadcast, echo, link, identification, request, channel, buffer or filetransfer (tests cover them).
+The repository's executables are `examples/text_peer.c`, the node daemon (`node_daemon.c`) and the tools of section 5 (`reticulum-c-ctl`, `-cp`, `-x`, `-sh`, `-rnodeconf`, `-git`, `-git-remote`, `-git-admin`, `-git-cs`). There is still no stand-alone example for announce, broadcast, echo, link, identification, request, channel, buffer or filetransfer: the tests cover them.
 
 ## 7. Suggested ordering
 
@@ -258,4 +258,4 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 2. Remote management destination and ACL; mutating admin calls.
 3. (done)
 
-**Phase D:** examples, CLI tools.
+**Phase D:** CLI tools (done: ctl, cp, x, sh, rnodeconf and the rngit tools); stand-alone protocol examples remain.
