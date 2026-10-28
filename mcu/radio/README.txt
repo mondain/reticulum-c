@@ -150,9 +150,10 @@ blocks: the owner calls rnc_lora_if_step every few milliseconds.
 
 SX126x: reset; wait for BUSY; presence check by the sync word registers; SetStandby;
 regulator mode (DC-DC when the board has the inductor); TCXO on DIO3 with a start time;
-Calibrate; ClearDeviceErrors; SetPacketType LoRa; STDBY_XOSC and a check that the
-oscillator started; DIO2 as RF switch; CalibrateImage for the band (only the datasheet's
-bands: 430-440, 470-510, 779-787, 863-870, 902-928 MHz); SetRfFrequency (freq * 2^25 /
+Calibrate; ClearDeviceErrors; CalibrateImage for the band (only the datasheet's bands:
+430-440, 470-510, 779-787, 863-870, 902-928 MHz; the calibration commands need STDBY_RC);
+SetPacketType LoRa; STDBY_XOSC and a check that the oscillator started; DIO2 as RF switch;
+SetRfFrequency (freq * 2^25 /
 32 MHz); SetPaConfig and SetTxParams (SX1262 -9..+22 dBm in four power classes, SX1261
 -17..+15 dBm), the over-current register, the TX clamp register of the antenna mismatch
 erratum; buffer bases; modulation parameters with the low data rate flag and the 500 kHz

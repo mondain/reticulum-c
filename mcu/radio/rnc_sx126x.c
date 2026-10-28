@@ -290,6 +290,10 @@ static int sx_init(rnc_modem *m, const rnc_lora_params *p) {
   b[0] = b[1] = 0; /* the TCXO start may have flagged an oscillator error */
   if (cmd(d, OP_CLEAR_DEVICE_ERRORS, b, 2) != 0)
     return -4;
+  /* image rejection calibration for the band, still in STDBY_RC (the calibration commands
+   * need it) */
+  if (cmd(d, OP_CALIBRATE_IMAGE, img, 2) != 0)
+    return -4;
 
   b[0] = 1; /* LoRa */
   if (cmd(d, OP_SET_PACKET_TYPE, b, 1) != 0 || standby(d, 1) != 0)
@@ -308,8 +312,6 @@ static int sx_init(rnc_modem *m, const rnc_lora_params *p) {
     if (cmd(d, OP_SET_DIO2_RF_SWITCH, b, 1) != 0)
       return -4;
   }
-  if (cmd(d, OP_CALIBRATE_IMAGE, img, 2) != 0)
-    return -4;
   frf = rnc_sx126x_frf(p->freq_hz);
   b[0] = (uint8_t)(frf >> 24);
   b[1] = (uint8_t)(frf >> 16);

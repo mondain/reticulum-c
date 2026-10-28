@@ -496,8 +496,8 @@ static void execute(sx126x_model *m, const uint8_t *tx, uint8_t *rx, size_t n) {
     break;
   case 0x98: /* CalibrateImage */
     need_len(m, "CalibrateImage", na, 2);
-    if (m->mode != M_RC && m->mode != M_XOSC)
-      violate(m, "CalibrateImage outside standby");
+    if (m->mode != M_RC)
+      violate(m, "CalibrateImage outside STDBY_RC");
     if (na == 2) {
       m->image_cal[0] = a[0];
       m->image_cal[1] = a[1];
