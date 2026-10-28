@@ -780,6 +780,9 @@ static speed_t baud_value(unsigned value) {
 #ifdef B3000000
   case 3000000:
     return B3000000;
+#elif defined(__APPLE__)
+  case 3000000: /* the speed constants are the rates themselves */
+    return (speed_t)3000000;
 #endif
   default:
     return (speed_t)0;
