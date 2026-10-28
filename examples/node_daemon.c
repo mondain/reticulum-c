@@ -66,6 +66,15 @@ typedef struct interface_config {
   size_t ifac_size;
   uint32_t interface_id;
   /* I2PInterface peers and the key file the host is pointed at */
+  /* RNodeMultiInterface: the [[[radio]]] sections, and those in use */
+  struct sub_config {
+    char name[48];
+    rnc_host_subradio radio;
+    int has_vport, enabled;
+  } subs[RNC_HOST_SUBRADIOS];
+  rnc_host_subradio active[RNC_HOST_SUBRADIOS];
+  size_t sub_count;
+  int enabled_set;
   char peer_text[8][712], i2p_key[600];
   const char *peer_ptrs[8];
   int enabled, has_type, backbone;
@@ -182,6 +191,7 @@ static int set_type(interface_config *f, const char *value) {
                {"PipeInterface", RNC_HOST_PIPE},
                {"AX25KISSInterface", RNC_HOST_AX25},
                {"I2PInterface", RNC_HOST_I2P},
+               {"RNodeMultiInterface", RNC_HOST_RNODE_MULTI},
                {"BackboneInterface", RNC_HOST_TCP_LISTEN},
                {"BackboneClientInterface", RNC_HOST_TCP_CONNECT}};
   size_t i;
@@ -281,6 +291,65 @@ static int discovery_key(interface_config *f, const char *key,
   }
   return -1;
 }
+/* Keys of a [[[radio]]] section of an RNodeMultiInterface. */
+static int sub_key(struct sub_config *sub, const char *key, const char *value) {
+  char *end;
+  long long n;
+  int b;
+  if (!strcmp(key, "interface_enabled") || !strcmp(key, "outgoing") ||
+      !strcmp(key, "flow_control")) {
+    if (!boolean(value, &b))
+      return 0;
+    if (key[0] == 'i')
+      sub->enabled = b;
+    else if (key[0] == 'o')
+      sub->radio.no_output = !b;
+    else
+      sub->radio.flow_control = b;
+    return 1;
+  }
+  if (!strcmp(key, "airtime_limit_short") || !strcmp(key, "airtime_limit_long")) {
+    double percent = strtod(value, &end);
+    if (end == value || *end || !(percent >= 0.0) || percent > 100.0)
+      return 0;
+    if (key[16] == 's')
+      sub->radio.airtime_limit_short = percent;
+    else
+      sub->radio.airtime_limit_long = percent;
+    return 1;
+  }
+  n = strtoll(value, &end, 10);
+  if (end == value || *end)
+    return 0;
+  if (!strcmp(key, "vport")) {
+    if (n < 0 || n >= (long long)RNC_HOST_SUBRADIOS)
+      return 0;
+    sub->radio.vport = (unsigned)n;
+    sub->has_vport = 1;
+  } else if (!strcmp(key, "frequency")) {
+    if (n <= 0 || n > 4294967295ll)
+      return 0;
+    sub->radio.frequency = (uint32_t)n;
+  } else if (!strcmp(key, "bandwidth")) {
+    if (n < 7800 || n > 1625000)
+      return 0;
+    sub->radio.bandwidth = (uint32_t)n;
+  } else if (!strcmp(key, "txpower")) {
+    if (n < -9 || n > 37)
+      return 0;
+    sub->radio.tx_power = (int)n;
+  } else if (!strcmp(key, "spreadingfactor")) {
+    if (n < 5 || n > 12)
+      return 0;
+    sub->radio.spreading_factor = (unsigned)n;
+  } else if (!strcmp(key, "codingrate")) {
+    if (n < 5 || n > 8)
+      return 0;
+    sub->radio.coding_rate = (unsigned)n;
+  } else
+    return 0;
+  return 1;
+}
 static int interface_key(interface_config *f, const char *key,
                          const char *value) {
   unsigned long n;
@@ -296,6 +365,7 @@ static int interface_key(interface_config *f, const char *key,
     if (!boolean(value, &b))
       return 0;
     f->enabled = b;
+    f->enabled_set = 1;
     return 1;
   }
   if (!strcmp(key, "listen_ip") || !strcmp(key, "listen_address") ||
@@ -704,6 +774,18 @@ static void interface_bind(interface_config *f) {
   f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
   if (f->host.ifac)
     f->host.ifac = &f->ifac;
+  if (f->host.kind == RNC_HOST_RNODE_MULTI) {
+    /* a radio is in use when it says so itself or the whole interface was
+     * enabled in so many words, as the reference decides it */
+    size_t k, used = 0;
+    for (k = 0; k < f->sub_count; ++k)
+      if (f->subs[k].enabled || (f->enabled_set && f->enabled)) {
+        f->active[used] = f->subs[k].radio;
+        f->active[used++].name = f->subs[k].name;
+      }
+    f->host.subradios = f->active;
+    f->host.subradio_count = used;
+  }
   if (f->host.kind == RNC_HOST_I2P) {
     size_t k;
     for (k = 0; k < f->host.i2p_peer_count; ++k)
@@ -726,9 +808,20 @@ static int finish_config(config *c) {
     ++enabled;
     if ((f->host.kind == RNC_HOST_TCP_CONNECT &&
          (!f->host.address || !f->host.port)) ||
-        (f->host.kind >= RNC_HOST_SERIAL && f->host.kind <= RNC_HOST_AX25 &&
+        (((f->host.kind >= RNC_HOST_SERIAL && f->host.kind <= RNC_HOST_AX25) ||
+          f->host.kind == RNC_HOST_RNODE_MULTI) &&
          !f->host.address))
       return 0;
+    if (f->host.kind == RNC_HOST_RNODE_MULTI) {
+      size_t k;
+      if (!f->host.subradio_count)
+        return 0;
+      for (k = 0; k < f->sub_count; ++k)
+        if (!f->subs[k].has_vport || !f->subs[k].radio.frequency ||
+            !f->subs[k].radio.bandwidth || !f->subs[k].radio.spreading_factor ||
+            !f->subs[k].radio.coding_rate)
+          return 0;
+    }
     /* The reference sizes TCP interfaces from their bitrate, far above 500, so
      * links across them can negotiate large packets. */
     if (!f->host.mtu && (f->host.kind == RNC_HOST_TCP_LISTEN ||
@@ -800,6 +893,26 @@ static int read_config(const char *path, config *c) {
       }
     }
     s = trim(s);
+    if (!strncmp(s, "[[[", 3)) {
+      size_t n = strlen(s);
+      struct sub_config *sub;
+      if (section < 3 || !current || current->host.kind != RNC_HOST_RNODE_MULTI ||
+          n < 7 || strcmp(s + n - 3, "]]]") ||
+          current->sub_count == RNC_HOST_SUBRADIOS) {
+        valid = 0;
+        break;
+      }
+      sub = &current->subs[current->sub_count++];
+      memset(sub, 0, sizeof(*sub));
+      s[n - 3] = 0;
+      if (!text_copy(sub->name, sizeof(sub->name), s + 3)) {
+        valid = 0;
+        break;
+      }
+      sub->radio.name = sub->name;
+      section = 5;
+      continue;
+    }
     if (!strncmp(s, "[[", 2)) {
       size_t n = strlen(s);
       if (section < 2 || n < 5 || strcmp(s + n - 2, "]]") ||
@@ -1049,6 +1162,11 @@ static int read_config(const char *path, config *c) {
           break;
         }
       } else {
+        valid = 0;
+        break;
+      }
+    } else if (section == 5 && current && current->sub_count) {
+      if (!sub_key(&current->subs[current->sub_count - 1u], s, value)) {
         valid = 0;
         break;
       }

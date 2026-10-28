@@ -268,7 +268,8 @@ typedef struct host_frame {
 /* KISS TNCs share one setup sequence, ready-flow control and station ID. */
 #define TNC_KIND(k) ((k) == RNC_HOST_KISS || (k) == RNC_HOST_AX25)
 /* Kinds backed by a device node, as opposed to sockets. */
-#define DEVICE_KIND(k) ((k) >= RNC_HOST_SERIAL && (k) <= RNC_HOST_AX25)
+#define DEVICE_KIND(k)                                                       \
+  (((k) >= RNC_HOST_SERIAL && (k) <= RNC_HOST_AX25) || (k) == RNC_HOST_RNODE_MULTI)
 /* I2P: the SAM conversation a socket is in. Zero once the socket carries the
  * stream (or, for the controller, never: it keeps answering PING). */
 enum { SAM_NONE = 0, SAM_SESSION, SAM_CONNECT, SAM_ACCEPT };
@@ -325,6 +326,16 @@ typedef struct host_interface {
   char *i2p_peers; /* connectable peers, NUL separated */
   size_t i2p_peers_size;
   unsigned i2p_peer_count;
+  /* RNODE_MULTI: the device owns the fd; each radio is a child (multi_sub)
+   * addressed by sub_vport. types[] holds what the device reported per vport:
+   * 0 SX127X, 1 SX126X, 2 SX128X. */
+  int multi_sub, subs_spawned;
+  unsigned sub_vport, type_count, sub_count;
+  uint8_t selected, types[RNC_HOST_SUBRADIOS];
+  uint64_t detect_at;
+  uint32_t tx_owner;
+  rnc_host_subradio subs[RNC_HOST_SUBRADIOS];
+  char sub_names[RNC_HOST_SUBRADIOS][64];
   unsigned tries;
   uint64_t connect_deadline;
   char ax_call[7];
@@ -533,6 +544,17 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
     else
       rnc_logf(RNC_LOG_INFO, "host", "interface %s is down", f->status.name);
   }
+  if (f->status.kind == RNC_HOST_RNODE_MULTI) {
+    size_t i;
+    for (i = 0; i < RNC_HOST_SLOTS; ++i)
+      if (h->interfaces[i].used && h->interfaces[i].multi_sub &&
+          h->interfaces[i].status.parent_id == f->status.interface_id)
+        (void)rnc_host_remove(h, h->interfaces[i].status.interface_id);
+    f->rnode_detected = f->subs_spawned = 0;
+    f->type_count = 0;
+    f->tx_owner = 0;
+    f->radio_deadline = 0;
+  }
   f->status.online = 0;
   f->sam_step = 0;
   f->sam_len = 0;
@@ -559,6 +581,8 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
                                 ? f->radio.reconnect_wait_ms
                                 : 5000u);
   }
+  else if (f->status.kind == RNC_HOST_RNODE_MULTI)
+    f->retry_at = h->now + 5000u; /* the reference's RNode Multi reconnect wait */
   else if (f->status.kind == RNC_HOST_PIPE)
     f->retry_at = h->now + (f->radio.respawn_delay_ms
                                 ? f->radio.respawn_delay_ms
@@ -890,6 +914,21 @@ static int serial_open(const host_interface *f) {
   }
   return fd;
 }
+/* Every frame for one radio of a multi device is preceded by the frame that
+ * selects it. */
+static rnc_result select_prefix(const host_interface *f, host_frame *q) {
+  if (!f->multi_sub)
+    return RNC_OK;
+  if (q->size + 4u > sizeof(q->data))
+    return RNC_NO_SPACE;
+  memmove(q->data + 4, q->data, q->size);
+  q->data[0] = 0xc0;
+  q->data[1] = 0x1f;
+  q->data[2] = (uint8_t)f->sub_vport;
+  q->data[3] = 0xc0;
+  q->size += 4u;
+  return RNC_OK;
+}
 static rnc_result queue_command(host_interface *f, uint8_t command,
                                 const uint8_t *data, size_t size) {
   host_frame *q;
@@ -901,6 +940,8 @@ static rnc_result queue_command(host_interface *f, uint8_t command,
   q->control = 1;
   r = rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, command, data, size, q->data,
                             sizeof(q->data), &q->size);
+  if (r == RNC_OK)
+    r = select_prefix(f, q);
   if (r == RNC_OK)
     ++f->queue_count;
   return r;
@@ -936,6 +977,19 @@ static rnc_result begin_rnode(host_interface *f) {
   f->ready = 0;
   f->rnode_detected = 0;
   return queue_detect(f);
+}
+/* A multi device is asked what it is and which radios it has in one go. */
+static rnc_result begin_multi(host_interface *f) {
+  static const uint8_t zero = 0;
+  rnc_result r;
+  f->rnode_detected = 0;
+  f->subs_spawned = 0;
+  f->type_count = 0;
+  f->radio_deadline = 0;
+  r = queue_detect(f);
+  if (r == RNC_OK)
+    r = queue_command(f, 0x71, &zero, 1);
+  return r;
 }
 static rnc_result configure_ax25(host_interface *f, const rnc_host_config *c) {
   uint8_t b[1];
@@ -1137,14 +1191,37 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   socklen_t bind_size;
   rnc_result r = RNC_STATE;
   if (!h || !c || !id || id >= 0x80000000u || c->kind < RNC_HOST_TCP_LISTEN ||
-      c->kind > RNC_HOST_I2P || c->kiss_port > 15 || find_interface(h, id))
+      c->kind > RNC_HOST_RNODE_MULTI || c->kiss_port > 15 || find_interface(h, id))
     return RNC_INVALID;
   if (c->kind == RNC_HOST_RNODE &&
       (!c->frequency || !c->bandwidth || c->spreading_factor < 5 ||
        c->spreading_factor > 12 || c->coding_rate < 5 || c->coding_rate > 8 ||
        c->tx_power < 0 || c->tx_power > 27))
     return RNC_INVALID;
-  if ((c->kind == RNC_HOST_RNODE || c->kind == RNC_HOST_KISS) &&
+  if (c->kind == RNC_HOST_RNODE_MULTI) {
+    size_t k, j;
+    if (!c->address || !*c->address || !strncasecmp(c->address, "tcp://", 6) ||
+        !c->subradios || !c->subradio_count ||
+        c->subradio_count > RNC_HOST_SUBRADIOS || c->ifac)
+      return RNC_INVALID;
+    for (k = 0; k < c->subradio_count; ++k) {
+      const rnc_host_subradio *s = &c->subradios[k];
+      if (!s->name || !*s->name || strlen(s->name) >= 48u ||
+          s->vport >= RNC_HOST_SUBRADIOS || !s->frequency ||
+          s->bandwidth < 7800u || s->bandwidth > 1625000u ||
+          s->spreading_factor < 5 || s->spreading_factor > 12 ||
+          s->coding_rate < 5 || s->coding_rate > 8 || s->tx_power < -9 ||
+          s->tx_power > 37 ||
+          !(s->airtime_limit_short >= 0.0 && s->airtime_limit_short <= 100.0) ||
+          !(s->airtime_limit_long >= 0.0 && s->airtime_limit_long <= 100.0))
+        return RNC_INVALID;
+      for (j = 0; j < k; ++j)
+        if (c->subradios[j].vport == s->vport)
+          return RNC_INVALID;
+    }
+  }
+  if ((c->kind == RNC_HOST_RNODE || c->kind == RNC_HOST_KISS ||
+       c->kind == RNC_HOST_RNODE_MULTI) &&
       (!(c->airtime_limit_short >= 0.0 && c->airtime_limit_short <= 100.0) ||
        !(c->airtime_limit_long >= 0.0 && c->airtime_limit_long <= 100.0) ||
        !c->id_callsign != !c->id_interval ||
@@ -1301,7 +1378,19 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       f->ax_call[k] = (char)(c->callsign[k] >= 'a' ? c->callsign[k] - 32
                                                     : c->callsign[k]);
   }
-  if ((c->kind == RNC_HOST_RNODE || c->kind == RNC_HOST_KISS) &&
+  if (c->kind == RNC_HOST_RNODE_MULTI) {
+    size_t k;
+    f->sub_count = (unsigned)c->subradio_count;
+    for (k = 0; k < c->subradio_count; ++k) {
+      f->subs[k] = c->subradios[k];
+      (void)copy_text(f->sub_names[k], sizeof(f->sub_names[k]),
+                      c->subradios[k].name);
+      f->subs[k].name = f->sub_names[k];
+    }
+    f->radio.subradios = NULL;
+  }
+  if ((c->kind == RNC_HOST_RNODE || c->kind == RNC_HOST_KISS ||
+       c->kind == RNC_HOST_RNODE_MULTI) &&
       c->id_callsign) {
     f->callsign_size = strlen(c->id_callsign);
     memcpy(f->callsign, c->id_callsign, f->callsign_size);
@@ -1393,6 +1482,14 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       f->fd = device_open(f);
       if (f->fd < 0)
         goto fail;
+      if (c->kind == RNC_HOST_RNODE_MULTI) {
+        /* the device is not itself a node interface; its radios are */
+        f->status.online = 1;
+        r = begin_multi(f);
+        if (r != RNC_OK)
+          goto fail;
+        return RNC_OK;
+      }
       r = activate(h, f);
       if (r != RNC_OK)
         goto fail;
@@ -1520,6 +1617,9 @@ static rnc_result queue_packet(host_interface *f, const rnc_packet *p) {
     if (r != RNC_OK)
       return r;
   }
+  r = select_prefix(f, q);
+  if (r != RNC_OK)
+    return r;
   ++f->queue_count;
   return RNC_OK;
 }
@@ -2174,6 +2274,226 @@ static rnc_result receive_datagram(rnc_host *h, host_interface *f,
              ? RNC_OK
              : pump_node(h);
 }
+static int rnode_report(host_interface *f, uint8_t command, const uint8_t *raw,
+                        size_t n) {
+  if (command == 0x23 && n >= 1) { /* RSSI of the next frame */
+    f->status.rssi = (int)raw[0] - 157;
+    f->status.has_signal = 1;
+  } else if (command == 0x24 && n >= 1) { /* SNR in quarter dB */
+    int sfs = (int)f->radio.spreading_factor - 7;
+    double snr = (int8_t)raw[0] * 0.25;
+    double min = -9.0 - sfs * 2.0, q = (snr - min) / (6.0 - min) * 100.0;
+    q = (double)((long)(q * 10.0 + (q < 0 ? -0.5 : 0.5))) / 10.0;
+    f->status.snr = (float)snr;
+    f->status.quality = (float)(q > 100.0 ? 100.0 : q < 0.0 ? 0.0 : q);
+    f->status.has_signal = 1;
+  } else if (command >= 1 && command <= 6) {
+    uint8_t expected[4];
+    size_t expected_size = 1;
+    switch (command) {
+    case 1:
+      put32(expected, f->radio.frequency);
+      expected_size = 4;
+      break;
+    case 2:
+      put32(expected, f->radio.bandwidth);
+      expected_size = 4;
+      break;
+    case 3:
+      expected[0] = (uint8_t)f->radio.tx_power;
+      break;
+    case 4:
+      expected[0] = (uint8_t)f->radio.spreading_factor;
+      break;
+    case 5:
+      expected[0] = (uint8_t)f->radio.coding_rate;
+      break;
+    default:
+      expected[0] = 1;
+      break;
+    }
+    int matches = n == expected_size && !memcmp(raw, expected, n);
+    if (command == 1 && n == 4) {
+      uint32_t observed = ((uint32_t)raw[0] << 24) |
+                          ((uint32_t)raw[1] << 16) |
+                          ((uint32_t)raw[2] << 8) | raw[3];
+      uint32_t delta = observed > f->radio.frequency
+                           ? observed - f->radio.frequency
+                           : f->radio.frequency - observed;
+      matches =
+          delta <= 100u; /* SX127x frequency register granularity. */
+    }
+    if (matches) {
+      f->radio_ack_mask |= 1u << (command - 1);
+      if (f->radio_ack_mask == 0x3f && !f->status.radio_ready) {
+        f->status.radio_ready = 1;
+        f->ready = 1;
+        f->radio_deadline = 0;
+      }
+    }
+  } else if (command == 0x0f && n && f->status.radio_ready) {
+    f->ready = 1;
+  } else
+    return 0;
+  return 1;
+}
+
+static host_interface *find_sub(rnc_host *h, const host_interface *dev,
+                                unsigned vport) {
+  size_t i;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    host_interface *c = &h->interfaces[i];
+    if (c->used && c->multi_sub && c->status.parent_id == dev->status.interface_id &&
+        c->sub_vport == vport)
+      return c;
+  }
+  return NULL;
+}
+static int multi_blocked(rnc_host *h, const host_interface *dev) {
+  size_t i;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i)
+    if (h->interfaces[i].used && h->interfaces[i].multi_sub &&
+        h->interfaces[i].status.parent_id == dev->status.interface_id &&
+        h->interfaces[i].pending)
+      return 1;
+  return 0;
+}
+static rnc_result input_packet(rnc_host *h, host_interface *f,
+                               const uint8_t *data, size_t size,
+                               uint64_t unix_seconds);
+/* One frame from a multi device: a selection changes whose frames follow, and
+ * everything that concerns a radio is applied to the selected one. */
+static rnc_result multi_frame(rnc_host *h, host_interface *dev,
+                              uint8_t command, const uint8_t *raw, size_t n,
+                              uint64_t unix_seconds) {
+  host_interface *radio;
+  switch (command) {
+  case 0x1f:
+    if (n >= 1)
+      dev->selected = raw[0];
+    return RNC_OK;
+  case 0x08:
+    if (n >= 1 && raw[0] == 0x46 && !dev->rnode_detected) {
+      dev->rnode_detected = 1;
+      dev->detect_at = h->now;
+    }
+    return RNC_OK;
+  case 0x50:
+    /* the multi interface needs 1.74 or newer */
+    if (n >= 2 && !(raw[0] > 1 || (raw[0] == 1 && raw[1] >= 74))) {
+      rnc_logf(RNC_LOG_ERROR, "host",
+               "RNode %s reports firmware %u.%u, at least 1.74 is required",
+               dev->status.name, (unsigned)raw[0], (unsigned)raw[1]);
+      dev->gave_up = 1;
+      disconnect_interface(h, dev, EPROTONOSUPPORT);
+    }
+    return RNC_OK;
+  case 0x71:
+    /* radios are numbered in the order they are reported */
+    if (n >= 2 && dev->type_count < RNC_HOST_SUBRADIOS)
+      dev->types[dev->type_count++] = raw[1] == 0x10 || raw[1] == 0x11   ? 1u
+                                      : raw[1] == 0x20 || raw[1] == 0x21 ? 2u
+                                                                         : 0u;
+    return RNC_OK;
+  case 0x90:
+    disconnect_interface(h, dev, EIO);
+    return RNC_OK;
+  case 0x55:
+    if (n && raw[0] == 0xf8)
+      disconnect_interface(h, dev, EIO);
+    return RNC_OK;
+  case 0x00:
+    radio = find_sub(h, dev, dev->selected);
+    if (!radio || !n)
+      return RNC_OK;
+    return input_packet(h, radio, raw, n, unix_seconds);
+  default:
+    radio = find_sub(h, dev, dev->selected);
+    if (radio)
+      (void)rnode_report(radio, command, raw, n);
+    return RNC_OK;
+  }
+}
+/* The device has named its radios: check every configured one against them
+ * and bring them up as interfaces of their own. */
+static void multi_spawn(rnc_host *h, host_interface *dev) {
+  unsigned k;
+  for (k = 0; k < dev->sub_count; ++k) {
+    const rnc_host_subradio *s = &dev->subs[k];
+    uint32_t low = dev->types[s->vport < RNC_HOST_SUBRADIOS ? s->vport : 0] == 2
+                       ? 2200000000u
+                       : 137000000u,
+             high = dev->types[s->vport < RNC_HOST_SUBRADIOS ? s->vport : 0] == 2
+                        ? 2600000000u
+                        : 1000000000u;
+    if (s->vport >= dev->type_count) {
+      rnc_logf(RNC_LOG_ERROR, "host",
+               "virtual port %u for %s does not exist on %s", s->vport, s->name,
+               dev->status.name);
+      disconnect_interface(h, dev, EINVAL);
+      return;
+    }
+    if (s->frequency < low || s->frequency > high) {
+      rnc_logf(RNC_LOG_ERROR, "host", "invalid frequency configured for %s[%s]",
+               dev->status.name, s->name);
+      disconnect_interface(h, dev, EINVAL);
+      return;
+    }
+  }
+  for (k = 0; k < dev->sub_count; ++k) {
+    const rnc_host_subradio *s = &dev->subs[k];
+    host_interface *c = empty_interface(h);
+    uint64_t den;
+    if (!c || h->next_id < 0x80000000u) {
+      disconnect_interface(h, dev, ENOSPC);
+      return;
+    }
+    memset(c, 0, sizeof(*c));
+    c->used = 1;
+    c->fd = c->discovery_fd = c->unicast_fd = -1;
+    c->multi_sub = 1;
+    c->sub_vport = s->vport;
+    c->status.kind = RNC_HOST_RNODE;
+    c->status.interface_id = h->next_id++;
+    c->status.parent_id = dev->status.interface_id;
+    c->status.mtu = dev->status.mtu;
+    c->status.mode = dev->status.mode;
+    c->status.announce_cap_permille = dev->status.announce_cap_permille;
+    c->policy = dev->policy;
+    c->no_output = s->no_output;
+    c->flow_control = s->flow_control;
+    c->ready = !s->flow_control;
+    c->callsign_size = dev->callsign_size;
+    memcpy(c->callsign, dev->callsign, sizeof(c->callsign));
+    c->radio.kind = RNC_HOST_RNODE;
+    c->radio.frequency = s->frequency;
+    c->radio.bandwidth = s->bandwidth;
+    c->radio.tx_power = s->tx_power;
+    c->radio.spreading_factor = s->spreading_factor;
+    c->radio.coding_rate = s->coding_rate;
+    c->radio.airtime_limit_short = s->airtime_limit_short;
+    c->radio.airtime_limit_long = s->airtime_limit_long;
+    c->radio.id_interval = dev->radio.id_interval;
+    den = (uint64_t)s->coding_rate << s->spreading_factor;
+    c->bitrate = (uint32_t)(((uint64_t)s->spreading_factor * 4u * s->bandwidth +
+                             den / 2u) /
+                            den);
+    if (!c->bitrate)
+      c->bitrate = 1u;
+    c->status.bitrate = c->bitrate;
+    (void)snprintf(c->status.name, sizeof(c->status.name), "%.60s[%.60s]",
+                   dev->status.name, s->name);
+    (void)rnc_hash(c->status.name, strlen(c->status.name), c->status.hash);
+    if (activate(h, c) != RNC_OK ||
+        configure_radio(c, &c->radio) != RNC_OK) {
+      OPENSSL_cleanse(c, sizeof(*c));
+      disconnect_interface(h, dev, ENOSPC);
+      return;
+    }
+  }
+  dev->subs_spawned = 1;
+  dev->radio_deadline = 0;
+}
 static rnc_result receive_stream(rnc_host *h, host_interface *f,
                                  uint64_t unix_seconds) {
   uint8_t raw[RNC_MAX_FRAME], command;
@@ -2182,9 +2502,12 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
   ssize_t got;
   rnc_host_framing mode =
       f->status.kind == RNC_HOST_KISS || f->status.kind == RNC_HOST_RNODE ||
+              f->status.kind == RNC_HOST_RNODE_MULTI ||
               f->status.kind == RNC_HOST_AX25 || f->kiss
           ? RNC_HOST_KISS_FRAMING
           : RNC_HOST_HDLC;
+  if (f->status.kind == RNC_HOST_RNODE_MULTI && multi_blocked(h, f))
+    return RNC_OK;
   if (f->pending) {
     r = rnc_node_input(h->node, f->status.interface_id, &f->pending_packet,
                        unix_seconds, h->now);
@@ -2232,19 +2555,18 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
     r = rnc_host_frame_feed(&f->framer, mode, f->input[f->input_offset++],
                             &command, raw, sizeof(raw), &n);
     if (r == RNC_OK) {
+      if (f->status.kind == RNC_HOST_RNODE_MULTI) {
+        r = multi_frame(h, f, command, raw, n, unix_seconds);
+        if (r == RNC_AGAIN)
+          return RNC_OK;
+        if (r != RNC_OK)
+          return r;
+        if (f->fd < 0)
+          return RNC_OK;
+        continue;
+      }
       if (f->status.kind == RNC_HOST_RNODE && command) {
-        if (command == 0x23 && n >= 1) { /* RSSI of the next frame */
-          f->status.rssi = (int)raw[0] - 157;
-          f->status.has_signal = 1;
-        } else if (command == 0x24 && n >= 1) { /* SNR in quarter dB */
-          int sfs = (int)f->radio.spreading_factor - 7;
-          double snr = (int8_t)raw[0] * 0.25;
-          double min = -9.0 - sfs * 2.0, q = (snr - min) / (6.0 - min) * 100.0;
-          q = (double)((long)(q * 10.0 + (q < 0 ? -0.5 : 0.5))) / 10.0;
-          f->status.snr = (float)snr;
-          f->status.quality = (float)(q > 100.0 ? 100.0 : q < 0.0 ? 0.0 : q);
-          f->status.has_signal = 1;
-        } else if (command == 0x08) {
+        if (command == 0x08) {
           if (n >= 1 && raw[0] == 0x46 && !f->rnode_detected) {
             f->rnode_detected = 1;
             (void)configure_radio(f, &f->radio);
@@ -2259,53 +2581,9 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
             disconnect_interface(h, f, EPROTONOSUPPORT);
             return RNC_OK;
           }
-        } else if (command >= 1 && command <= 6) {
-          uint8_t expected[4];
-          size_t expected_size = 1;
-          switch (command) {
-          case 1:
-            put32(expected, f->radio.frequency);
-            expected_size = 4;
-            break;
-          case 2:
-            put32(expected, f->radio.bandwidth);
-            expected_size = 4;
-            break;
-          case 3:
-            expected[0] = (uint8_t)f->radio.tx_power;
-            break;
-          case 4:
-            expected[0] = (uint8_t)f->radio.spreading_factor;
-            break;
-          case 5:
-            expected[0] = (uint8_t)f->radio.coding_rate;
-            break;
-          default:
-            expected[0] = 1;
-            break;
-          }
-          int matches = n == expected_size && !memcmp(raw, expected, n);
-          if (command == 1 && n == 4) {
-            uint32_t observed = ((uint32_t)raw[0] << 24) |
-                                ((uint32_t)raw[1] << 16) |
-                                ((uint32_t)raw[2] << 8) | raw[3];
-            uint32_t delta = observed > f->radio.frequency
-                                 ? observed - f->radio.frequency
-                                 : f->radio.frequency - observed;
-            matches =
-                delta <= 100u; /* SX127x frequency register granularity. */
-          }
-          if (matches) {
-            f->radio_ack_mask |= 1u << (command - 1);
-            if (f->radio_ack_mask == 0x3f && !f->status.radio_ready) {
-              f->status.radio_ready = 1;
-              f->ready = 1;
-              f->radio_deadline = 0;
-            }
-          }
-        } else if (command == 0x0f && n && f->status.radio_ready)
-          f->ready = 1;
-        else if (command == 0x90 || (command == 0x55 && n && raw[0] == 0xf8)) {
+        } else if (rnode_report(f, command, raw, n)) {
+          /* signal statistics, radio parameter acknowledgements, ready */
+        } else if (command == 0x90 || (command == 0x55 && n && raw[0] == 0xf8)) {
           disconnect_interface(h, f, EIO);
           return RNC_OK;
         }
@@ -2352,7 +2630,8 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
     if (rnc_host_frame_encode(RNC_HOST_KISS_FRAMING,
                               (uint8_t)(f->kiss_port << 4),
                               (const uint8_t *)f->callsign, f->callsign_size,
-                              b->data, sizeof(b->data), &b->size) == RNC_OK) {
+                              b->data, sizeof(b->data), &b->size) == RNC_OK &&
+        select_prefix(f, b) == RNC_OK) {
       ++f->queue_count;
       f->first_tx_set = 0; /* restarts with the next ordinary transmission */
     }
@@ -2385,13 +2664,18 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
       return RNC_OK;
     f->ready = 1;
   }
-  if (f->status.kind == RNC_HOST_AUTO && f->status.parent_id) {
+  if ((f->status.kind == RNC_HOST_AUTO || f->multi_sub) && f->status.parent_id) {
     socket_owner = find_interface(h, f->status.parent_id);
     if (!socket_owner)
       return RNC_STATE;
   }
   fd = socket_owner->fd;
   if (fd < 0)
+    return RNC_OK;
+  /* radios of a device share its line: one frame is written out whole before
+   * another radio's begins */
+  if (f->multi_sub && socket_owner->tx_owner &&
+      socket_owner->tx_owner != f->status.interface_id)
     return RNC_OK;
   if (f->status.kind == RNC_HOST_UDP || f->status.kind == RNC_HOST_AUTO) {
     if (!f->peer_size) {
@@ -2419,7 +2703,7 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
       delivered = 0;
       sent = (ssize_t)q->size;
     } else {
-      disconnect_interface(h, f, errno);
+      disconnect_interface(h, f->multi_sub ? socket_owner : f, errno);
       return RNC_OK;
     }
   }
@@ -2431,6 +2715,8 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
     sent = (ssize_t)q->size;
   }
   q->offset += (size_t)sent;
+  if (f->multi_sub)
+    socket_owner->tx_owner = q->offset == q->size ? 0 : f->status.interface_id;
   if (q->offset == q->size) {
     uint64_t duration =
         ((uint64_t)q->size * 8000u + f->bitrate - 1u) / f->bitrate;
@@ -2505,6 +2791,47 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         (void)rnc_host_remove(h, f->status.interface_id);
       continue;
     }
+    if (f->multi_sub) {
+      host_interface *dev = find_interface(h, f->status.parent_id);
+      if (f->pending) {
+        r = rnc_node_input(h->node, f->status.interface_id, &f->pending_packet,
+                           unix_seconds, now);
+        if (r != RNC_AGAIN) {
+          f->pending = 0;
+          if (r == RNC_OK)
+            ++f->status.rx_packets;
+          else
+            ++f->status.dropped_packets;
+        }
+      }
+      /* a radio that never confirms its parameters takes the device down for
+       * another attempt */
+      if (dev && !f->status.radio_ready) {
+        if (!f->radio_deadline)
+          f->radio_deadline = now + 5000u;
+        else if (now >= f->radio_deadline) {
+          rnc_logf(RNC_LOG_ERROR, "host",
+                   "%s: the radio did not confirm its configuration",
+                   f->status.name);
+          disconnect_interface(h, dev, ETIMEDOUT);
+        }
+      }
+      continue;
+    }
+    if (f->status.kind == RNC_HOST_RNODE_MULTI && f->fd >= 0 &&
+        !f->subs_spawned) {
+      if (!f->radio_deadline)
+        f->radio_deadline = now + 5000u;
+      else if (now >= f->radio_deadline) {
+        disconnect_interface(h, f, ETIMEDOUT);
+        continue;
+      }
+      if (f->rnode_detected && now >= f->detect_at + 300u) {
+        multi_spawn(h, f);
+        if (f->fd < 0)
+          continue;
+      }
+    }
     if (f->status.kind == RNC_HOST_I2P)
       i2p_maintain(h, f);
     if (f->fd < 0 && !f->accepted && !f->gave_up && now >= f->retry_at &&
@@ -2528,7 +2855,11 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         }
       } else if (DEVICE_KIND(f->status.kind)) {
         f->fd = device_open(f);
-        if (f->fd >= 0 && activate(h, f) == RNC_OK) {
+        if (f->fd >= 0 && f->status.kind == RNC_HOST_RNODE_MULTI) {
+          ++f->status.reconnects;
+          f->status.online = 1;
+          (void)begin_multi(f);
+        } else if (f->fd >= 0 && activate(h, f) == RNC_OK) {
           ++f->status.reconnects;
           if (f->status.kind == RNC_HOST_RNODE)
             (void)begin_rnode(f);

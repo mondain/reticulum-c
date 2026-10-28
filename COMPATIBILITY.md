@@ -741,3 +741,38 @@ Not tested against a real I2P router (i2pd or Java I2P): the fake implements the
 subset of SAM used here, so behaviours of a real router (tunnel build times,
 `PING`/`PONG` on the session socket, error results) are covered only by what the
 SAM specification and the reference's client imply.
+
+## RNode Multi (`feature/rnode-multi`)
+
+`RNodeMultiInterface` (host kind `RNC_HOST_RNODE_MULTI`) drives one serial device
+that carries several radios. The device is asked what it is and which radios it
+has in one go (DETECT, firmware, platform, MCU and `CMD_INTERFACES`); 0.3 s after
+it answers, each configured `[[[radio]]]` becomes an interface of its own
+(a child of the device, named `<interface>[<radio>]`), after its `vport` has been
+checked against the radios the device reported and its frequency against the
+radio type (SX127X/SX126X 137 MHz to 1 GHz, SX128X 2.2 to 2.6 GHz). Every
+command and frame for one radio is preceded by a `CMD_SEL_INT` frame naming it,
+and what the device sends is applied to the radio it last selected: parameter
+acknowledgements, RSSI and SNR (with that radio's own spreading factor for the
+quality figure), ready, and the received frames. Radios share the line, so one
+radio's frame is written out whole before another's begins. A radio that does
+not confirm its parameters in 5 s, a hardware error, a reset or a vport the
+device does not have takes the device down; it is reopened every 5 s. Firmware
+below 1.74 is refused and not retried (the reference's check also refuses 2.0,
+which is almost certainly a slip; here 2.0 is accepted).
+
+A radio is in use when its section sets `interface_enabled = yes` or when the
+interface itself says `enabled = yes`, as in the reference. `outgoing = no` on a
+radio stops it transmitting; `id_callsign`/`id_interval` apply to every radio but
+each keeps its own timer (the reference shares one).
+
+Evidence: host tests with a pty device emulator (configuration of two radios of
+different types with the select frame before each command, transmit only on
+outgoing radios, receive routed by selection with per radio signal figures, and
+the refusals above, each mutation-checked), daemon tests (the nested sections
+parse, a radio without a vport and a section under another type are refused, a
+disabled radio is not configured) and a differential test in which the
+unmodified reference's `RNodeMultiInterface` and this host drive the same
+emulator and must send every radio the same commands with the same values.
+Not tested on real hardware.
+
