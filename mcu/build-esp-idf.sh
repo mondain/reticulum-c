@@ -128,9 +128,10 @@ Or flash the parts separately (same result):
 The firmware starts in serial mode (HDLC on the serial port). To use it over Wi-Fi
 instead, provision it after flashing, with no credentials in the image:
 
-  mcu/tools/wifi-config.sh --chip $CHIP --port /dev/ttyUSB0 --ssid NAME --host NODE_ADDRESS
-      (writes only the "rnccfg" partition, the identity is kept; needs the repository
-       checkout and esptool + ESP-IDF's nvs_partition_gen or Docker)
+  wifi-config.sh --chip $CHIP --device /dev/ttyUSB0 --ssid NAME --host NODE_ADDRESS
+      (mcu/tools/ in the repository, tools/ in the release zip; writes only the "rnccfg"
+       partition, the identity is kept; needs esptool and esp-idf-nvs-partition-gen from
+       pip, an ESP-IDF environment, or Docker with --docker)
   or, with a serial terminal at 115200 baud: send the line  rnc-config  within 2
   seconds after reset (or press BOOT), then use  set mode wifi, set ssid ..., save,
   reboot  (see MANUAL.txt).

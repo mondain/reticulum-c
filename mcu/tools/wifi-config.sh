@@ -18,8 +18,9 @@
 #                      to the HDLC serial transport.
 #   --partitions FILE  the partitions.csv of the firmware (the release zips contain it);
 #                      the offset and size of "rnccfg" are read from it. Default: the
-#                      file next to this script, or mcu/esp-idf/example/partitions.csv of
-#                      the repository, or 0x190000 / 0x4000.
+#                      file next to this script or one directory up (the release zips),
+#                      or mcu/esp-idf/example/partitions.csv of the repository, or
+#                      0x190000 / 0x4000.
 #   --image-only FILE  write the NVS image there and do not flash (flash it yourself at
 #                      the offset printed, with any tool, for example
 #                      esptool.py write_flash 0x190000 FILE.bin).
@@ -110,7 +111,7 @@ if [ $ARDUINO = 1 ]; then
 fi
 if [ -z "$OFFSET" ] || [ -z "$SIZE" ]; then
   if [ -z "$PART_FILE" ]; then
-    for c in "$HERE/partitions.csv" "$HERE/../esp-idf/example/partitions.csv"; do
+    for c in "$HERE/partitions.csv" "$HERE/../partitions.csv" "$HERE/../esp-idf/example/partitions.csv"; do
       [ -f "$c" ] && { PART_FILE=$c; break; }
     done
   fi

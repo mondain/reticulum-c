@@ -7,11 +7,13 @@ framework so it builds for common LoRa boards with one command:
   - the protocol core and the portable application (mcu/app) are a PlatformIO
     library: library.json at the repository root
   - this directory is a PlatformIO project: platformio.ini (one environment per
-    board), src/main.cpp (the Arduino port), boards/ (board definitions PlatformIO
+    board), src/main.cpp (the Arduino port), src/wifi_mode.cpp (Wi-Fi TCP transport and
+    provisioning, ESP32 only), boards/ (board definitions PlatformIO
     does not ship), scripts/ (collects the flashable files)
 
 STATUS: every environment below builds. The firmware has NOT been run on hardware.
-There is no LoRa radio driver: the board talks to a host over its serial/USB port.
+There is no LoRa radio driver: the board talks to a host over its serial/USB port, or
+(ESP32 and ESP32-S3 environments only) over Wi-Fi and TCP, see "Wi-Fi mode" below.
 
 Environments
 ------------
@@ -105,7 +107,8 @@ first with a debug probe (see the board vendor's instructions); that is not cove
 
 Serial setup
 ------------
-Serial carries only the HDLC byte stream of the Reticulum SerialInterface (flag 0x7E,
+In serial mode (the default, and the only mode of the nRF52 environments) Serial carries
+only the HDLC byte stream of the Reticulum SerialInterface (flag 0x7E,
 escape 0x7D, mask 0x20): the application's log hook is not connected and framework
 logging is off (ESP32: CORE_DEBUG_LEVEL=0 and esp_log_level_set(NONE)). The ESP32 boot ROM
 still prints a few bytes at reset at 115200 baud; the HDLC receiver ignores them. nRF52
@@ -139,9 +142,10 @@ every 10 minutes. It is a leaf node: it does not forward traffic.
 What the port does (src/main.cpp)
 ---------------------------------
   transport   Serial (UART or USB CDC), RX buffer 2 KB on ESP32; non-blocking reads
-  random      ESP32: esp_fill_random with the SAR ADC entropy source on
-              (bootloader_random_enable; this firmware uses no Wi-Fi or Bluetooth, so do not
-              add an ADC user without reading the ESP-IDF notes on random numbers).
+  random      ESP32 serial mode: esp_fill_random with the SAR ADC entropy source on
+              (bootloader_random_enable; do not add an ADC user without reading the
+              ESP-IDF notes on random numbers). ESP32 Wi-Fi mode: the radio is the entropy
+              source and bootloader_random_enable is not called.
               nRF52: the RNG peripheral with bias correction, or the SoftDevice's random
               pool when the SoftDevice is enabled (the SoftDevice owns the peripheral then)
   time        millis(), extended to 64 bits (49-day wrap handled)
@@ -153,6 +157,84 @@ What the port does (src/main.cpp)
   task        the node runs in its own FreeRTOS task with a 16 KB stack
   free heap   reported by /info (ESP.getFreeHeap, dbgHeapFree)
 The identity is stored unencrypted in flash: anyone with physical access can read it.
+
+Wi-Fi mode (ESP32 and ESP32-S3 environments)
+--------------------------------------------
+The ESP32 environments can run the same node over Wi-Fi: HDLC frames (as on the serial
+interface, and as Reticulum's TCPClientInterface/TCPServerInterface use them) on a TCP
+client connection to the TCPServerInterface of a reticulum-c-node, rnsd or any node that
+listens on TCP:
+
+  [[Boards]]
+    type = TCPServerInterface
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+
+A freshly flashed image is in serial mode, exactly as before: nothing changes until you
+provision it. The nRF52 environments have no Wi-Fi and are unchanged.
+
+The mode and the credentials are set at runtime and are NEVER in a release image. They
+are stored with Preferences in the standard NVS partition, namespace "rnc_net", keys
+mode ("serial" or "wifi"), ssid (1 to 32 bytes), password (empty or 8 to 63 characters),
+host, port (default 4242). The identity is in the same partition (namespace "reticulum").
+
+(a) The serial console (115200 baud 8N1 on UART boards, the USB port on native USB
+    boards; the same port that carries HDLC in serial mode). It runs only when
+      - mode is wifi and the stored settings are missing or invalid (it starts at once;
+        the node does not run), or
+      - during a window of 2 seconds after every boot (RNC_MCU_PROVISION_WINDOW_MS; 0
+        removes it), when the line  rnc-config  arrives on Serial, or the BOOT button
+        (GPIO0, RNC_MCU_BOOT_PIN) is pressed and held for 300 ms after the reset.
+    In serial mode the window delays the start of the node by that time. Commands: help,
+    get [key] (the password is shown as (set), never in clear), set KEY VALUE (the rest of
+    the line is the value), clear, save, reboot. Example, right after a reset:
+
+      rnc-config
+      set mode wifi
+      set ssid MyNetwork
+      set password correct horse battery
+      set host 192.168.1.10
+      save
+      reboot
+
+    The password is echoed as * while typing and is stored only by save. To go back:
+    set mode serial, save, reboot.
+
+(b) mcu/tools/wifi-config.sh --arduino, without a console:
+
+      mcu/tools/wifi-config.sh --arduino --chip esp32 --device /dev/ttyUSB0 \
+          --ssid MyNetwork --host 192.168.1.10 --password-stdin < password.txt
+
+    It builds an NVS image with IDF's nvs_partition_gen and flashes it at the NVS
+    partition (0x9000, 0x5000 bytes, the default partition table of these boards). That
+    REPLACES the whole NVS partition, so the node gets a new identity at its next start.
+    (The ESP-IDF firmware, ../README.txt, has a separate settings partition and keeps its
+    identity.) --image-only FILE writes the image without flashing. Needs esptool and the
+    generator (pip install esptool esp-idf-nvs-partition-gen) or Docker.
+
+Behaviour: the Wi-Fi station reconnects by itself (auto reconnect; an attempt that gets
+nowhere for 30 s is restarted with backoff), and the TCP connection is retried with
+backoff 0.5 s doubling to 30 s with jitter. The socket has TCP_NODELAY and keepalive;
+reads and writes are non-blocking on the raw socket; output goes through a 4096 byte
+queue and a frame that does not fit is dropped whole. While the link is down the
+application neither reads nor writes nor announces; when it returns it resets the HDLC
+decoder and announces again after half a second. WiFiClient::connect blocks the Reticulum
+task for up to 3 seconds per attempt (name resolution included): use an IP address for the
+host if that matters. In Wi-Fi mode Serial carries status text, not HDLC.
+
+For developers only: -DRNC_MCU_DEV_WIFI_SSID=\"net\" -DRNC_MCU_DEV_WIFI_PASSWORD=\"secret..\"
+-DRNC_MCU_DEV_WIFI_HOST=\"192.168.1.10\" -DRNC_MCU_DEV_WIFI_PORT=4242 passed through
+PLATFORMIO_BUILD_FLAGS (not in platformio.ini) compile defaults in, used while nothing is
+stored. build-platformio.sh marks such a build (dev-wifi-defaults: yes in build-info.txt),
+refuses it with RNC_RELEASE=1, and the release packaging refuses it. The credentials are
+then readable in the image: never distribute such a build.
+
+SECURITY NOTES. The TCP link is plaintext and unauthenticated at the transport level, like
+any Reticulum TCP interface (Reticulum's own link encryption and signed announces apply
+above it; no IFAC here): anyone on the path can read or alter the bytes, and anyone who can
+reach the server's port can connect. The credentials and the identity sit in NVS
+UNENCRYPTED unless you enable NVS/flash encryption yourself (not done here): anyone who
+holds the board can read them.
 
 nRF52 memory and the profile decision
 -------------------------------------
@@ -210,8 +292,13 @@ Limits
 ------
   - Not run on hardware: the builds are verified, the firmware behaviour is verified only
     through the portable application on the host (mcu/tests).
-  - No LoRa radio driver (SX126x/SX127x), no RNode-style firmware, no Bluetooth or Wi-Fi
-    interface: a host node is needed to route to a network.
+  - No LoRa radio driver (SX126x/SX127x), no RNode-style firmware, no Bluetooth. The only
+    network interface is the serial port, or on ESP32 a Wi-Fi TCP client (no access point
+    mode, no UDP/AutoInterface, no TLS, no IFAC): a host node is needed to route to a
+    network.
+  - Wi-Fi mode (ESP32 environments) is built, not run on hardware; its application logic is
+    tested on the host (mcu/tests). It adds about 420 KB of flash (heltec V3: 339 KB ->
+    759 KB) and 30 KB of static RAM, plus the Wi-Fi driver's heap, and uses more power.
   - Leaf node: no transport/forwarding, at most 2 links, 8 remembered announces, 12 paths,
     packets up to 500 bytes (include/reticulum_c/rnc_profile_mcu.h).
   - AES is table-based software (not constant time against cache timing); X25519/Ed25519

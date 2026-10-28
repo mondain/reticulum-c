@@ -194,9 +194,11 @@ jobs:
 
           Each archive holds `bin/` (the node daemon and tools), `include/` and `lib/` (static libraries, OpenSSL and bzip2 for static linking, a CMake package), `BUILDINFO` and the documentation. To link the SDK from CMake: `-DCMAKE_PREFIX_PATH=<unpacked directory> -DOPENSSL_USE_STATIC_LIBS=ON`. The Linux library needs a POSIX host with OpenSSL; use these builds on the computer a radio is attached to.
 
-          ## Microcontroller firmware (example node, serial interface only)
+          ## Microcontroller firmware (example node, serial interface; Wi-Fi TCP on ESP32 once provisioned)
 
           `reticulum-c-<version>-mcu-<board>.zip` holds the firmware images, `flash.txt` with the exact flashing commands for that board, `BUILDINFO` (version, commit, toolchain versions), the manual and a README. The firmware is a Reticulum leaf node with one HDLC serial interface (the Reticulum SerialInterface framing): a host running reticulum-c-node or rnsd with the board as a SerialInterface routes between the board and the network. It announces `reticulum_c.mcu.example` and answers `/echo` and `/info`. It uses the portable crypto backend and the small mcu capacity profile (no OpenSSL).
+
+          **Wi-Fi (ESP32 and ESP32-S3 archives).** The images start in serial mode and contain no Wi-Fi credentials. To join a network instead, provision the board after flashing: run `tools/wifi-config.sh` from the archive (writes the Wi-Fi settings as an NVS image with esptool, no console needed; `--arduino` for the PlatformIO archives, which replaces their NVS partition and so their identity), or send the line `rnc-config` on the serial port within 2 seconds after reset (or press BOOT) and use the `set`/`save`/`reboot` console. The board then connects as a TCP client to a node's TCPServerInterface (same HDLC framing). The TCP link is plaintext and unauthenticated at the transport level and the credentials are stored unencrypted in flash; `MANUAL.txt` has the details. The nRF52 archives have no Wi-Fi.
 
           | Archive | Board | Build |
           | --- | --- | --- |
@@ -207,7 +209,7 @@ jobs:
 
           `esp-idf-component.tar.gz` is the protocol core and the example application as ESP-IDF components (use it with `EXTRA_COMPONENT_DIRS`). `platformio-library.tar.gz` is the same as a PlatformIO library (`library.json`; `lib_deps = file:///path`). Both are source archives.
 
-          **Limits.** There is no LoRa radio driver yet: the boards talk to a host over serial or USB only, and have no Bluetooth or Wi-Fi interface. The firmware has not been tested on hardware: it builds in CI and the same application logic passes the host tests against reticulum-c-node and the reference Reticulum. The nRF52 board definitions for the RAK4631, T114 and T-Echo are derived from the Adafruit nRF52840 Feather and assume the Adafruit bootloader. It is a leaf node (no forwarding).
+          **Limits.** There is no LoRa radio driver yet: the boards talk to a host over serial or USB (or, on ESP32 once provisioned, over Wi-Fi and TCP), and have no Bluetooth. The firmware has not been tested on hardware: it builds in CI and the same application logic passes the host tests against reticulum-c-node and the reference Reticulum. The nRF52 board definitions for the RAK4631, T114 and T-Echo are derived from the Adafruit nRF52840 Feather and assume the Adafruit bootloader. It is a leaf node (no forwarding).
 
           Check every download with `sha256sum -c SHA256SUMS`.
           NOTES
