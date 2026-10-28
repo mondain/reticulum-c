@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 /* Optional C harness. The unmodified external Leviculum library is the oracle. */
 #include <arpa/inet.h>
 #include <dirent.h>

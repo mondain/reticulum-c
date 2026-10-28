@@ -2,6 +2,9 @@
  * wrote (Destination.enable_ratchets, rotated three times) loads here with the
  * same keys, and a file written here loads in the reference. */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <reticulum_c/rnc_security.h>
 #include <stdio.h>
 #include <stdlib.h>
