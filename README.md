@@ -119,6 +119,30 @@ git clone rns://DESTINATION/GROUP/REPO                          # needs git-remo
 reticulum-c-git-admin create rns://DESTINATION/GROUP/NEW
 ```
 
+## Releases
+
+Pushing a tag `vX.Y.Z` (it must match the project version in `CMakeLists.txt`;
+`-rc1` style suffixes make a pre-release) runs the Release workflow, which
+builds, tests and publishes self-contained Linux archives: musl, fully static,
+with OpenSSL and bzip2 linked in, so nothing needs installing on the device.
+
+| Archive | Runs on |
+| --- | --- |
+| `linux-x86_64-musl` | PCs, servers, virtual machines |
+| `linux-aarch64-musl` | Raspberry Pi 3/4/5 and Zero 2 with a 64-bit OS, Jetson, Orange Pi and similar |
+| `linux-armv7-musl` | Raspberry Pi 2/3/Zero 2 with a 32-bit OS and similar |
+| `linux-armv6-musl` | Raspberry Pi Zero and 1 (also runs on the armv7 boards) |
+
+Each holds `bin/` (the node daemon and the tools above), `include/` and `lib/`
+(static libraries, OpenSSL and bzip2 for static linking, a CMake package),
+`BUILDINFO` and the documentation; `SHA256SUMS` accompanies the release. To link
+the SDK from CMake use `-DCMAKE_PREFIX_PATH=<unpacked directory>
+-DOPENSSL_USE_STATIC_LIBS=ON`. The workflow can also be run by hand for a trial
+build that only keeps the archives as workflow artifacts. The library needs a
+POSIX host with OpenSSL, so microcontroller boards (ESP32 and nRF52 based:
+Heltec, T-Beam, RAK4631, T-Echo) are not covered; run these builds on the
+computer a radio is attached to.
+
 ## Generic C text example
 
 This example is independent of any chat application protocol. It carries text

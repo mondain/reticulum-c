@@ -1,0 +1,93 @@
+name: Release
+# Pushing a tag such as v0.2.1 builds self-contained Linux archives for the CPUs
+# Reticulum nodes commonly run on (PCs and servers, 64-bit and 32-bit Raspberry
+# Pis and similar boards) and publishes them as a GitHub release. Run by hand
+# (workflow_dispatch) it only builds, for a trial, and keeps the archives as
+# workflow artifacts.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version label for a trial build (no release is created)
+        default: v0.0.0-trial
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {target: x86_64, platform: linux/amd64, skip: reticulum_interop}
+          - {target: aarch64, platform: linux/arm64, skip: 'network|pty|reticulum_interop'}
+          - {target: armv7, platform: linux/arm/v7, skip: 'network|pty|reticulum_interop'}
+          - {target: armv6, platform: linux/arm/v6, skip: 'network|pty|reticulum_interop'}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Version
+        shell: bash
+        run: |
+          if [ '${{ github.ref_type }}' = tag ]; then version="$GITHUB_REF_NAME"
+          else version='${{ inputs.version }}'; fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          if [ '${{ github.ref_type }}' = tag ]; then
+            project=$(sed -n 's/^project(reticulum_c VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+            tagged=${version#v}; tagged=${tagged%%-*}
+            [ "$project" = "$tagged" ] || { echo "::error::tag $version does not match the project version $project in CMakeLists.txt"; exit 1; }
+          fi
+      - name: Emulation for the other CPUs
+        if: matrix.target != 'x86_64'
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - name: Build, test and package
+        run: >-
+          docker run --rm --platform ${{ matrix.platform }} -e GITHUB_SHA
+          -v "$PWD":/src:ro -v "$PWD/out":/out alpine:3.20
+          sh /src/.github/scripts/release-build.sh ${{ matrix.target }} "$VERSION" /out '${{ matrix.skip }}'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive-${{ matrix.target }}
+          path: out/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum ./*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md <<'NOTES'
+          Self-contained Linux builds (musl, fully static: OpenSSL and bzip2 are linked in, nothing to install on the device).
+
+          | Archive | Runs on |
+          | --- | --- |
+          | `linux-x86_64-musl` | PCs, servers, virtual machines |
+          | `linux-aarch64-musl` | Raspberry Pi 3/4/5 and Zero 2 with a 64-bit OS, Jetson, Orange Pi and similar |
+          | `linux-armv7-musl` | Raspberry Pi 2/3/Zero 2 with a 32-bit OS and similar |
+          | `linux-armv6-musl` | Raspberry Pi Zero and 1 (also runs on the armv7 boards) |
+
+          Each archive holds `bin/` (the node daemon and tools), `include/` and `lib/` (static libraries, OpenSSL and bzip2 for static linking, a CMake package), `BUILDINFO` and the documentation. Check the download with `sha256sum -c SHA256SUMS`. To link the SDK from CMake: `-DCMAKE_PREFIX_PATH=<unpacked directory> -DOPENSSL_USE_STATIC_LIBS=ON`.
+
+          The library needs a POSIX host with OpenSSL, so microcontroller boards (ESP32, nRF52: Heltec, T-Beam, RAK4631, T-Echo) are not covered; use these builds on the computer a radio is attached to.
+          NOTES
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease);; esac
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md --generate-notes "${flags[@]}"
