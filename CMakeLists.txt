@@ -1,3 +1,10 @@
+# Built by ESP-IDF (this directory used as a component): register the mcu-profile
+# core and stop; the normal project below is for host builds.
+if(ESP_PLATFORM)
+    set(RNC_ROOT "${CMAKE_CURRENT_LIST_DIR}")
+    include("${CMAKE_CURRENT_LIST_DIR}/mcu/esp-idf/reticulum_c.cmake")
+    return()
+endif()
 cmake_minimum_required(VERSION 3.16)
 project(reticulum_c VERSION 0.2.0 LANGUAGES C)
 set(RNC_TOP_LEVEL OFF)

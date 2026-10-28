@@ -1,0 +1,5 @@
+# ESP32-S3 (Heltec WiFi LoRa 32 V3, T-Beam Supreme, T-Deck, ...): UART0 carries the
+# Reticulum stream. The log goes to the built-in USB Serial/JTAG port, which is not
+# the port the board's USB-UART bridge uses.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
