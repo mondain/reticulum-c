@@ -2702,14 +2702,16 @@ rnc_result rnc_node_tunnels_import(rnc_node *n, const rnc_identity *owner,
   if (!loaded)
     return RNC_NO_SPACE;
   for (i = 0; i < count; i++) {
-    node_tunnel t = {0};
+    /* build in the (heap) output slot: a node_tunnel is far too big for the stack */
+    node_tunnel *t = &loaded[used];
     size_t path_count;
     uint64_t expires;
     if (size - 64 - at < 41) {
       r = RNC_PROTOCOL;
       goto done;
     }
-    memcpy(t.id, state + at, 32);
+    memset(t, 0, sizeof(*t));
+    memcpy(t->id, state + at, 32);
     expires = state_read64(state + at + 32);
     path_count = state[at + 40];
     at += 41;
@@ -2718,7 +2720,7 @@ rnc_result rnc_node_tunnels_import(rnc_node *n, const rnc_identity *owner,
       goto done;
     }
     for (k = 0; k < path_count; k++) {
-      node_tunnel_path *p = &t.paths[k];
+      node_tunnel_path *p = &t->paths[k];
       uint64_t route_expires, confirmed, remaining;
       size_t wire;
       if (size - 64 - at < 18) {
@@ -2761,13 +2763,13 @@ rnc_result rnc_node_tunnels_import(rnc_node *n, const rnc_identity *owner,
                       : now;
     }
     if (expires > unix_seconds) {
-      t.used = 1;
-      t.expires = after(now, (expires - unix_seconds) * 1000u);
+      t->used = 1;
+      t->expires = after(now, (expires - unix_seconds) * 1000u);
       /* paths that timed out while we were away are dropped */
       for (k = 0; k < RNC_NODE_TUNNEL_PATHS; k++)
-        if (t.paths[k].used && now - t.paths[k].stored >= RNC_TUNNEL_TIMEOUT_MS)
-          t.paths[k].used = 0;
-      loaded[used++] = t;
+        if (t->paths[k].used && now - t->paths[k].stored >= RNC_TUNNEL_TIMEOUT_MS)
+          t->paths[k].used = 0;
+      used++;
     }
   }
   if (at != size - 64) {

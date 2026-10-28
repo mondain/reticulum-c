@@ -167,6 +167,25 @@ static void pump(unsigned steps) {
     }
 }
 
+/* Stack high-water mark: paint a region below main's frame, run the scenario, then
+ * find how deep the calls reached. Approximate (includes this tool's own pump frame). */
+#define PAINT 49152u
+static unsigned char *paint_lo, *paint_hi;
+static void __attribute__((noinline)) paint(void) {
+    volatile unsigned char buf[PAINT];
+    size_t i;
+    for (i = 0; i < PAINT; i++)
+        buf[i] = 0xA5;
+    paint_lo = (unsigned char *)(uintptr_t)&buf[0];
+    paint_hi = paint_lo + PAINT;
+}
+static size_t stack_used(void) {
+    unsigned char *p = paint_lo;
+    while (p < paint_hi && *p == 0xA5)
+        p++;
+    return (size_t)(paint_hi - p);
+}
+
 static void sizes(void) {
     printf("profile: %s\n",
 #ifdef RNC_PROFILE_MCU
@@ -203,6 +222,7 @@ int main(int argc, char **argv) {
     size_t budget = argc > 1 ? (size_t)strtoul(argv[1], NULL, 10) : 0;
 
     sizes();
+    paint();
     CHECK(rnc_identity_generate(&client_id, rng, NULL) == RNC_OK);
     CHECK(rnc_identity_generate(&server_id, rng, NULL) == RNC_OK);
     CHECK(rnc_identity_generate(&extra, rng, NULL) == RNC_OK);
@@ -264,6 +284,7 @@ int main(int argc, char **argv) {
     printf("  + 2 active links w/ services    : %zu\n", after_links);
     printf("  live after one request          : %zu\n", live);
     printf("  peak                            : %zu  (%zu blocks live)\n", peak, blocks);
+    printf("stack high-water of the whole scenario (both nodes, links, responder): %zu bytes\n", stack_used());
 
     counting = 1;
     rnc_responder_free(responder);

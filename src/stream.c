@@ -5,6 +5,14 @@
 #ifdef RNC_HAVE_BZIP2
 #include <bzlib.h>
 #endif
+/* The decode scratch buffer: a bz2 chunk may expand up to RNC_STREAM_CHUNK_MAX, but
+ * without bz2 a chunk is never larger than one channel message, so the buffer (on the
+ * stack) is that much smaller for firmware builds. */
+#ifdef RNC_HAVE_BZIP2
+#define STREAM_DECODED_MAX RNC_STREAM_CHUNK_MAX
+#else
+#define STREAM_DECODED_MAX RNC_CHANNEL_MAX_MDU
+#endif
 struct rnc_stream {
     uint16_t id;
     int received_eof, sent_eof;
@@ -68,7 +76,7 @@ rnc_result rnc_stream_encode(uint16_t id, const void *data, size_t size, int eof
 }
 rnc_result rnc_stream_decode(const uint8_t *data, size_t size, uint16_t *id, int *eof,
                              uint8_t *output, size_t capacity, size_t *written) {
-    uint8_t decoded[RNC_STREAM_CHUNK_MAX];
+    uint8_t decoded[STREAM_DECODED_MAX];
     size_t length;
     uint16_t header;
     rnc_result result = RNC_OK;
@@ -149,7 +157,7 @@ rnc_result rnc_stream_write(rnc_stream *stream, rnc_link *link, const void *data
     return result;
 }
 rnc_result rnc_stream_input(rnc_stream *stream, const rnc_link_event *event) {
-    uint8_t decoded[RNC_STREAM_CHUNK_MAX];
+    uint8_t decoded[STREAM_DECODED_MAX];
     size_t length, tail, first;
     uint16_t id;
     int eof;

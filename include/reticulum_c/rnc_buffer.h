@@ -5,7 +5,9 @@
 extern "C" {
 #endif
 #define RNC_STREAM_MESSAGE 0xff00u
+#ifndef RNC_STREAM_CHUNK_MAX
 #define RNC_STREAM_CHUNK_MAX 16384u
+#endif
 #define RNC_STREAM_CAPACITY_MAX (1024u * 1024u)
 typedef struct rnc_stream rnc_stream;
 /* Wire codecs for standard RNS Buffer messages. A message has a two-byte

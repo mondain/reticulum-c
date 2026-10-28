@@ -41,7 +41,12 @@ option(RNC_BUILD_EXAMPLES "Build the generic POSIX C text peer" ${RNC_HOST_DEFAU
 option(RNC_INTEROP_TESTS "Run against a pinned external RNS 1.5.5 checkout" OFF)
 set(RNC_REFERENCE_DIR "" CACHE PATH "Pinned RNS 1.5.5 reference checkout")
 set(RNC_INTEROP_PYTHONPATH "" CACHE STRING "Extra Python module paths for the external oracle")
-option(RNC_COMPRESSION "Enable bounded BZip2 Resource/Buffer compression" ON)
+# bz2 is off by default with the mcu profile (no decompression buffers, no libbz2).
+set(RNC_COMPRESSION_DEFAULT ON)
+if(RNC_PROFILE STREQUAL "mcu")
+    set(RNC_COMPRESSION_DEFAULT OFF)
+endif()
+option(RNC_COMPRESSION "Enable bounded BZip2 Resource/Buffer compression" ${RNC_COMPRESSION_DEFAULT})
 if(RNC_COMPRESSION)
     find_package(BZip2 REQUIRED)
 endif()
