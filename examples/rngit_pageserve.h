@@ -6,6 +6,8 @@
 #ifndef RETICULUM_C_RNGIT_PAGESERVE_H
 #define RETICULUM_C_RNGIT_PAGESERVE_H
 
+/* thirteen pages, the media path and three file paths per link */
+_Static_assert(RNC_RESPONDER_HANDLERS >= 17 && RNC_SERVICE_HANDLERS >= 17, "the page server registers 17 request paths");
 typedef void (*pg_fn)(pgreq *, sbuf *);
 static rnc_result pg_serve(pg_fn fn, const uint8_t *data, size_t size, const uint8_t *identity, uint8_t *out, size_t cap,
                            size_t *written) {

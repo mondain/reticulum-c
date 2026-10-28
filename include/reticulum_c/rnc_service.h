@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 #define RNC_SERVICE_PENDING 8u
-#define RNC_SERVICE_HANDLERS 16u
+#define RNC_SERVICE_HANDLERS 24u
 #define RNC_SERVICE_EVENTS 8u
 #define RNC_SERVICE_ALLOWLIST 8u
 typedef struct rnc_service rnc_service;

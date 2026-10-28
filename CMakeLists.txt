@@ -292,6 +292,12 @@ if(UNIX AND RNC_BUILD_HOST)
                             ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
                         set_tests_properties(reticulum_git_manage_${mode} PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 400)
                     endforeach()
+                    add_test(NAME reticulum_git_pages_diff COMMAND ${CMAKE_COMMAND} -E env
+                        "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                        ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_pages.sh
+                        $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git>
+                        ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
+                    set_tests_properties(reticulum_git_pages_diff PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 900)
                 endif()
             endif()
         endif()
