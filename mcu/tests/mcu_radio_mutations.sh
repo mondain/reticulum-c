@@ -87,7 +87,7 @@ mutate "reassembly: sequence number not compared" radio/rnc_lora_air.c \
 mutate "reassembly: orphan halves never expire" radio/rnc_lora_air.c \
   's/rx->pending_seq != RNC_AIR_SEQ_NONE \&\& rx->timeout_us \&\&/0 \&\&/'
 mutate "reassembly: a whole packet does not drop a pending half" radio/rnc_lora_air.c \
-  's/    if (rx->pending_seq != RNC_AIR_SEQ_NONE) {\n      rx->dropped_orphans++;/XX/;0,/rx->dropped_orphans++;/s//rx->dropped_expired += 0;/'
+  '/RNC_AIR_FLAG_SPLIT)) {/,/drop_pending(rx);/s/drop_pending(rx);/;/'
 # 3. sync word
 mutate "sync word: SX126x private word 0x1424 becomes 0x3444" radio/rnc_sx126x.c \
   's/write_reg(d, REG_SYNC_WORD, 0x14) != 0 || write_reg(d, REG_SYNC_WORD + 1u, 0x24)/write_reg(d, REG_SYNC_WORD, 0x34) != 0 || write_reg(d, REG_SYNC_WORD + 1u, 0x44)/'
