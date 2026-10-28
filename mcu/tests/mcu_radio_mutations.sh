@@ -54,7 +54,7 @@ mutate() {
   local name=$1 file=$2 expr=$3 dir="$D/m$n"
   n=$((n + 1))
   cp -r "$D/pristine" "$dir"
-  sed -i "$expr" "$dir/$file"
+  sed "$expr" "$dir/$file" > "$dir/$file.new" && mv "$dir/$file.new" "$dir/$file"
   if cmp -s "$D/pristine/$file" "$dir/$file"; then
     echo "FAIL  $name: the mutation did not change $file (stale pattern)"
     bad=$((bad + 1))

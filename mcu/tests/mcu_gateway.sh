@@ -32,6 +32,9 @@ cleanup() {
 trap cleanup EXIT
 fail() {
   echo "FAIL: $*" >&2
+  # stop the boards first so that they print their counters into the logs
+  for p in ${MCU_PIDS[@]+"${MCU_PIDS[@]}"}; do kill "$p" 2>/dev/null; done
+  sleep 1
   for f in "$D"/*.log; do [ -f "$f" ] && { echo "--- $f" >&2; tail -25 "$f" >&2; }; done
   exit 1
 }
