@@ -88,7 +88,7 @@ IN=pa expect 1 "wrong principal" "$TOOL" -Y verify -n git -f /dev/null -I "$HASH
 grep -q "Principal mismatch" err.txt || fail "principal mismatch message"
 # modified signature bytes (inside the 64 byte Ed25519 signature at offset 90)
 sigbin() { sed -e '/BEGIN SSH/d' -e '/END SSH/d' "$1" | base64 -d > "$2"; }
-rearmor() { { echo "-----BEGIN SSH SIGNATURE-----"; base64 -w 70 "$1"; echo "-----END SSH SIGNATURE-----"; } > "$2"; }
+rearmor() { { echo "-----BEGIN SSH SIGNATURE-----"; base64 < "$1" | tr -d '\n' | fold -w 70; echo; echo "-----END SSH SIGNATURE-----"; } > "$2"; }
 poke() { printf "$3" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
 sigbin pa.sig pa.bin
 cp pa.bin bad1.bin; poke bad1.bin 100 '\x55'; rearmor bad1.bin bad1.sig

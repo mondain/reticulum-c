@@ -160,7 +160,9 @@ SH
 esac
 chmod +x "$D/bin/git-remote-rns"
 export PATH="$D/bin:$PATH"
-sleep 2   # the server announces on start; let the node learn the path
+# the server announces on start; wait until the node has learned the path
+for i in $(seq 1 300); do grep -q "announce destination=$DEST" "$D/node.log" 2>/dev/null && break; sleep 0.1; done
+grep -q "announce destination=$DEST" "$D/node.log" || fail "the node never saw the server's announce"
 
 
 URL="rns://$DEST"

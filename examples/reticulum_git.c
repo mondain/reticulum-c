@@ -1477,6 +1477,12 @@ int main(int argc, char **argv) {
       last_mirror_check = now;
       sync_due_mirrors();
     }
+    /* a second announce soon after the first covers a node that was still
+     * bringing the link up */
+    if (announced == 1 && now - last_announce > 5000u) {
+      (void)rnc_node_announce(G.net.node, destination, (uint64_t)time(NULL), now);
+      announced = 2;
+    }
     if (!announced || (G.announce_minutes && now - last_announce > (uint64_t)G.announce_minutes * 60000u)) {
       rnc_host_status s;
       if (rnc_host_get_status(G.net.host, 1, &s) == RNC_OK && s.online) {
