@@ -52,6 +52,9 @@ extern "C" {
 #ifndef RNC_MCU_TIME_PERSIST_S
 #define RNC_MCU_TIME_PERSIST_S 120u
 #endif
+#ifndef RNC_MCU_LINK_UP_DELAY_MS
+#define RNC_MCU_LINK_UP_DELAY_MS 500u /* announce this long after the transport comes up */
+#endif
 #ifndef RNC_MCU_ANNOUNCE_MS
 #define RNC_MCU_ANNOUNCE_MS 600000u /* 10 minutes */
 #endif
@@ -78,6 +81,17 @@ void rnc_mcu_app_free(rnc_mcu_app *app);
  * `now_ms` is the monotonic time from the platform. Returns the number of
  * milliseconds after which the next call is wanted at the latest. */
 unsigned rnc_mcu_app_step(rnc_mcu_app *app, uint64_t now_ms);
+
+/* Counters since start, for tests and diagnostics. */
+typedef struct rnc_mcu_stats {
+  uint32_t link_ups;     /* transitions of the transport to up (the first one included) */
+  uint32_t link_downs;   /* transitions to down */
+  uint32_t announces;    /* announces handed to the transport */
+  uint32_t rx_packets;   /* frames that decoded as Reticulum packets */
+  uint32_t rx_bad;       /* HDLC frames that did not decode as a packet */
+  uint32_t tx_dropped;   /* outgoing packets discarded because the link was down */
+} rnc_mcu_stats;
+void rnc_mcu_app_get_stats(const rnc_mcu_app *app, rnc_mcu_stats *stats);
 
 /* The 16 byte destination hash; 0 on success. */
 int rnc_mcu_app_destination(const rnc_mcu_app *app, uint8_t hash[16]);

@@ -30,6 +30,9 @@ struct rnc_mcu_app {
   uint64_t base, last_unix, last_persist_unix;
   int persist_time;
   uint64_t last_now_ms;
+  /* transport link (platform link_up): -1 unknown, 0 down, 1 up */
+  int link;
+  rnc_mcu_stats stats;
   /* announce schedule */
   unsigned announces;
   uint64_t next_announce_ms;
@@ -167,6 +170,10 @@ static rnc_result random_adapter(void *context, uint8_t *out, size_t size) {
 static void transmit(rnc_mcu_app *app, const rnc_packet *packet) {
   size_t wire_size = 0, framed = 0, done = 0;
   unsigned stalls = 0;
+  if (app->link == 0) { /* no connection: a late delivery over the next one helps nobody */
+    app->stats.tx_dropped++;
+    return;
+  }
   if (rnc_packet_encode(packet, app->wire, sizeof(app->wire), &wire_size) != RNC_OK ||
       rnc_hdlc_encode(app->wire, wire_size, app->hdlc_out, sizeof(app->hdlc_out),
                       &framed) != RNC_OK)
@@ -196,8 +203,11 @@ static void drain(rnc_mcu_app *app, uint64_t unix_now, uint64_t now_ms) {
 
 static void receive_frame(rnc_mcu_app *app, size_t size, uint64_t unix_now, uint64_t now_ms) {
   rnc_result r;
-  if (rnc_packet_decode(app->frame, size, &app->packet) != RNC_OK)
+  if (rnc_packet_decode(app->frame, size, &app->packet) != RNC_OK) {
+    app->stats.rx_bad++;
     return;
+  }
+  app->stats.rx_packets++;
   r = rnc_node_input(app->node, IFACE_ID, &app->packet, unix_now, now_ms);
   if (r == RNC_AGAIN) { /* the node's queue is full: hand it out, then retry */
     drain(app, unix_now, now_ms);
@@ -210,6 +220,8 @@ static void receive_frame(rnc_mcu_app *app, size_t size, uint64_t unix_now, uint
 
 static void read_serial(rnc_mcu_app *app, uint64_t unix_now, uint64_t now_ms) {
   unsigned rounds;
+  if (app->link == 0)
+    return; /* leave unread bytes where they are; the port drops them when it reconnects */
   for (rounds = 0; rounds < 16u; rounds++) {
     size_t got = app->platform.read(app->platform.context, app->readbuf, sizeof(app->readbuf)), i;
     if (!got)
@@ -279,6 +291,7 @@ rnc_mcu_app *rnc_mcu_app_new(const rnc_mcu_platform *platform, const rnc_mcu_con
     goto fail;
   app->announces = 0;
   app->next_announce_ms = 0;
+  app->link = -1;
   return app;
 fail:
   rnc_mcu_app_free(app);
@@ -301,6 +314,34 @@ int rnc_mcu_app_destination(const rnc_mcu_app *app, uint8_t hash[16]) {
   return 0;
 }
 
+void rnc_mcu_app_get_stats(const rnc_mcu_app *app, rnc_mcu_stats *stats) {
+  if (app && stats)
+    *stats = app->stats;
+}
+
+/* Polls the platform's link_up and applies the transitions (see rnc_mcu_platform.h). */
+static void update_link(rnc_mcu_app *app, uint64_t now_ms) {
+  int up = app->platform.link_up ? app->platform.link_up(app->platform.context) != 0 : 1;
+  if (up == app->link)
+    return;
+  if (up) {
+    app->stats.link_ups++;
+    memset(&app->hdlc, 0, sizeof(app->hdlc));
+    if (app->link == 0) { /* a reconnect: announce again soon, then the early repeat */
+      app->announces = 0;
+      app->next_announce_ms = now_ms + RNC_MCU_LINK_UP_DELAY_MS;
+    } else if (app->platform.link_up) { /* first sight of a link that came up after start */
+      app->next_announce_ms = now_ms + RNC_MCU_LINK_UP_DELAY_MS;
+    }
+    say(app, "transport up");
+  } else {
+    if (app->link == 1)
+      app->stats.link_downs++;
+    say(app, "transport down");
+  }
+  app->link = up;
+}
+
 unsigned rnc_mcu_app_step(rnc_mcu_app *app, uint64_t now_ms) {
   uint64_t unix_now;
   unsigned wait = STEP_MS;
@@ -309,22 +350,24 @@ unsigned rnc_mcu_app_step(rnc_mcu_app *app, uint64_t now_ms) {
   app->last_now_ms = now_ms;
   unix_now = rnc_mcu_app_unix(app, now_ms);
 
+  update_link(app, now_ms);
   read_serial(app, unix_now, now_ms);
   (void)rnc_node_tick(app->node, unix_now, now_ms);
   (void)rnc_responder_tick(app->responder, unix_now, now_ms);
   drain(app, unix_now, now_ms);
 
-  if (now_ms >= app->next_announce_ms) {
+  if (app->link != 0 && now_ms >= app->next_announce_ms) {
     rnc_result r = rnc_node_announce(app->node, app->destination, unix_now, now_ms);
     if (r != RNC_OK)
       say_n(app, "announce failed, result", (long)r);
     app->announces++;
+    app->stats.announces++;
     app->next_announce_ms =
         now_ms + (app->announces == 1u ? FIRST_REPEAT_MS : app->config.announce_interval_ms);
     drain(app, unix_now, now_ms);
   }
   persist_time(app, unix_now);
-  if (app->next_announce_ms > now_ms && app->next_announce_ms - now_ms < wait)
+  if (app->link != 0 && app->next_announce_ms > now_ms && app->next_announce_ms - now_ms < wait)
     wait = (unsigned)(app->next_announce_ms - now_ms);
   return wait;
 }
