@@ -5,9 +5,12 @@ This directory holds everything needed to run the reticulum-c protocol core on a
 microcontroller and an example firmware you can flash today:
 
   mcu/app/          portable example application (no platform headers)
+  mcu/radio/        LoRa radio support: SX126x and SX127x drivers, air framing, CSMA, airtime
+                    budget, board table (portable C; see mcu/radio/README.txt)
   mcu/host/         host build of the same application (pty, stdin/stdout or TCP client)
-  mcu/tests/        tests: clock policy, transport link handling, Wi-Fi helpers, and the
-                    application against reticulum-c-node (serial and TCP)
+  mcu/tests/        tests: clock policy, transport link handling, Wi-Fi helpers, the LoRa
+                    radio against software models of the chips, and the application against
+                    reticulum-c-node (serial, TCP, gateway)
   mcu/tools/        wifi-config.sh: provision the Wi-Fi settings without a console
   mcu/esp-idf/      ESP-IDF components and the example project
   mcu/build-esp-idf.sh   one command that builds a flashable image
@@ -17,7 +20,8 @@ microcontroller and an example firmware you can flash today:
 
 STATUS: the firmware builds for esp32 and esp32s3 and the same application logic
 passes the host tests against reticulum-c-node and the reference Reticulum. It has
-NOT been run on hardware yet.
+NOT been run on hardware yet. The LoRa radio support (below) is new and has only ever
+run against software models of the radio chips: nothing has been sent or received on air.
 
 What the firmware is
 --------------------
@@ -43,9 +47,9 @@ A freshly flashed image is in serial mode, exactly as before. The node
               uptime (seconds) and heap (free bytes)
 
 The firmware is a leaf node: it does not forward other nodes' traffic (no
-transport). A host node (reticulum-c-node or the reference rnsd) that has the
-board as a SerialInterface, or that accepts its TCP connection, routes between the
-board and the rest of the network.
+transport), except in the LoRa gateway mode below. A host node (reticulum-c-node or the
+reference rnsd) that has the board as a SerialInterface, or that accepts its TCP
+connection, routes between the board and the rest of the network.
 
 Prerequisites
 -------------
@@ -164,6 +168,11 @@ partition, namespace rnc_net, see mcu/platformio/README.txt):
   host      string   name or address of the node's TCPServerInterface
   port      u16      default 4242
 
+and the radio keys (LoRa radio section below): lora_mode (string off|leaf|gateway), lora_set
+(u8: which transmit settings were set), lora_freq and lora_bw (u32, Hz), lora_sf and lora_cr
+(u8), lora_txp (i8, dBm), lora_air (u16, hundredths of a percent). In the console and in
+wifi-config.sh they are lora.mode, lora.freq, lora.bw, lora.sf, lora.cr, lora.txp, lora.airtime.
+
 (a) The serial console. It is not always on: it runs only when
       - mode is wifi and the stored ssid, password or host are missing or invalid (it
         starts at once, the Reticulum node does not run), or
@@ -180,7 +189,7 @@ partition, namespace rnc_net, see mcu/platformio/README.txt):
       help                show the commands
       get [key]           show one setting or all; the password is shown as (set) or
                           (empty), never in clear
-      set KEY VALUE       KEY is mode, ssid, password, host or port; VALUE is the rest of
+      set KEY VALUE       KEY is mode, ssid, password, host, port or a lora.* key; VALUE is the rest of
                           the line, so an SSID with spaces needs no quotes; refused values
                           are reported and change nothing
       clear               restore the defaults (serial mode, nothing else)
@@ -235,6 +244,10 @@ and a different provisioning flow) and are not enabled here. The console can edi
 settings of anyone with serial access to the board; the tool and the console need physical
 access. The identity key is stored unencrypted in the same way.
 
+LoRa radio keys: wifi-config.sh also takes --lora-mode off|leaf|gateway, --lora-freq,
+--lora-bw, --lora-sf, --lora-cr, --lora-txp and --lora-airtime (see its header); it refuses
+leaf or gateway unless freq, bw, sf, cr and txp are all given.
+
 Provisioning tests: mcu/tests/test_wifi_config.sh checks the tool's input validation and
 (where an image generator is available) the contents of the NVS image it builds;
 mcu/tests/test_net.c tests the settings validation and the console commands.
@@ -269,6 +282,69 @@ backoff as the firmware does, and logs "tcp: connection failed", "tcp: connectio
                        RNC_INTEROP_TESTS the reference Reticulum does the same
                        (reticulum_mcu_tcp_reference)
   reticulum_mcu_wifi_config   the provisioning tool
+  reticulum_mcu_radio         the LoRa support on the host: radio core, the SX126x and SX127x
+                       drivers against software models of the chips, the LoRa interface on a
+                       simulated shared channel (loss, collisions, hidden node, airtime budget),
+                       two instances of the application talking Reticulum over simulated
+                       LoRa (announce, path request, links, /echo and /info with packets of
+                       up to 483 bytes that cross the air as two frames), the regulatory gate
+  reticulum_mcu_radio_mutations   breaks the header layout, the split reassembly, the sync
+                       word, the airtime limiter and others in a scratch copy: the tests must
+                       fail for every one of the 30 mutations
+  reticulum_mcu_gateway   a reticulum-c-node reaches the /echo and /info of a simulated board
+                       behind the harness in gateway mode (reticulum-c-mcu-host --lora gateway
+                       ..., see its header: the radio settings are required, as on the board)
+  reticulum_mcu_radio_reference   (RNC_INTEROP_TESTS) the LoRa bit rate of 320 settings against
+                       the unmodified reference RNodeInterface
+The radio models are written by the author of the drivers; see mcu/radio/README.txt for what
+this does and does not show.
+
+LoRa radio (optional)
+---------------------
+With a LoRa board selected the firmware can give the node a second interface, a LoRa radio,
+whose over-the-air format is meant to be compatible with stock RNodes on the same frequency
+and modem settings (header byte with a sequence nibble and a split flag, packets above 254
+bytes in two frames, private-network sync word, CRC, explicit header). Everything is
+described in mcu/radio/README.txt; the essentials:
+
+  REGULATORY. The radio is OFF, and the chip is not even spoken to, until the operator has
+  set lora.mode (leaf or gateway) AND lora.freq, lora.bw, lora.sf, lora.cr and lora.txp. No
+  default transmit setting exists anywhere in the sources or in a release image. The
+  operator is responsible for a legal frequency, power and duty cycle (the power is the
+  power at the chip's output, not at the antenna). The airtime budget (lora.airtime)
+  defaults to 1 percent of every hour and is enforced before every transmission.
+
+  Modes. lora.mode off (default): no radio, the serial or Wi-Fi leaf of the earlier
+  versions. leaf: LoRa is the only interface; the node announces on LoRa and answers /echo
+  and /info over LoRa; no forwarding; the serial port is free for status text (the Wi-Fi
+  mode, if configured, is not started). gateway: the serial or Wi-Fi interface plus LoRa
+  with Reticulum transport ON, so that a host node reaches the LoRa network through the
+  board. Transport is OFF in every other mode. The mcu profile's tables are small (see
+  Limits); a gateway is a small bridge, not a repeater for a busy network.
+
+  Build. ESP-IDF: menuconfig -> Reticulum MCU example -> LoRa board (Heltec V3 on esp32s3;
+  Heltec V2 or T-Beam v1.0/1.1 on esp32; LilyGo T3-S3 on esp32s3), or RNC_SDKCONFIG_EXTRA
+  with CONFIG_RETICULUM_MCU_LORA_BOARD_HELTEC_V3=y and so on. The default is no LoRa board.
+  The Arduino/PlatformIO environments (mcu/platformio) select their board by name. The board
+  only chooses the pin map and the chip; the radio settings are provisioned.
+
+  Settings. Console: rnc-config within 2 seconds after reset, then for example
+      set lora.mode leaf / set lora.freq 868.1 / set lora.bw 125 / set lora.sf 8 /
+      set lora.cr 5 / set lora.txp 14 / save / reboot
+  (use values that are legal for you). Or mcu/tools/wifi-config.sh --lora-mode ... .
+
+  Boards (variants, pins and how sure I am: mcu/radio/README.txt): Heltec WiFi LoRa 32 V3
+  (SX1262), V2 (SX1276), LilyGo T-Beam v1.0/1.1 (SX1276, AXP192 radio rail switched over
+  I2C), LilyGo T3-S3 (SX1262 variant), RAK4631 (SX1262), Heltec T114 (SX1262), LilyGo T-Echo
+  (SX1262). The T-Beam Supreme (AXP2101) and the T-Beam v1.2 are not supported.
+
+  Memory (ESP-IDF, measured): the LoRa support adds about 14.7 KB of flash on esp32 (775264
+  -> 789968 bytes) and 14.7 KB on esp32s3 (765040 -> 779728) to an image without a board;
+  selecting a board adds its SPI and I2C drivers (esp32s3 with the Heltec V3: 813088 bytes).
+  Static RAM grows by about 3.5 KB (.bss), the heap use by about 4 KB (the interface
+  object, 3.3 KB, and the application's packet buffer, 0.5 KB, plus a pending 508 byte
+  receive and three 508 byte transmit slots, all inside that object). The node's own
+  86 KB footprint (tests/footprint.c, limit 96 KB) is unchanged.
 
 Using the components in your own ESP-IDF project
 ------------------------------------------------
@@ -331,15 +407,17 @@ The firmware targets chips, not boards, because the serial path is the same:
             boards with a native USB port can use the USB Serial/JTAG transport
             (menuconfig), in which case move the console off it.
 
-Board pin maps differ for the radio, display and power chips; none of those is
-driven yet. Set the board name in menuconfig so /info reports it.
+Board pin maps differ for the radio, display and power chips. Only the LoRa radio is
+driven (see the LoRa radio section; the display, GPS, buttons and the battery are not).
+Set the board name in menuconfig so /info reports it.
 
 Limits
 ------
-  - There is no LoRa radio driver yet: the board talks to a host over serial or over
-    Wi-Fi TCP. The radio (SX126x/SX127x), RNode-style firmware behavior and Bluetooth
-    are not part of this firmware. Wi-Fi is a TCP client only (no access point mode,
-    no Reticulum AutoInterface, no UDP, no TLS, no IFAC).
+  - The LoRa radio (SX126x/SX127x) is new, optional and OFF until configured; it has never
+    run on a real radio. The firmware is not an RNode (it does not speak KISS to a host); it
+    is a Reticulum node with a LoRa interface. Bluetooth is not part of this firmware. Wi-Fi
+    is a TCP client only (no access point mode, no Reticulum AutoInterface, no UDP, no TLS,
+    no IFAC).
   - Wi-Fi mode needs more memory: the firmware image grows from about 251 KB to
     775 KB on ESP32 (765 KB on ESP32-S3), static RAM from 12 KB to 39 KB (ESP32), and the
     Wi-Fi driver takes tens of KB of heap on top of the node's 92 KB. Wi-Fi power save
@@ -355,8 +433,9 @@ Limits
   - AES is table-based software (not constant time with respect to cache timing);
     X25519/Ed25519 come from Monocypher. The ESP32 hardware crypto is not used.
   - Not tested on hardware; only built, and run on the host.
-  - Leaf node only: no transport (forwarding), at most 2 links, 8 remembered
-    announces, 12 paths (see include/reticulum_c/rnc_profile_mcu.h).
+  - Leaf node unless the LoRa gateway mode is configured: at most 2 links, 8 remembered
+    announces, 12 paths, 4 queued announces, 8 link table entries, 2 interfaces (see
+    include/reticulum_c/rnc_profile_mcu.h).
   - Serial mode: the random numbers come from esp_fill_random with the SAR ADC entropy
     source switched on (bootloader_random_enable), because the firmware does not run
     the radio. Do not enable it together with an ADC user without reading the ESP-IDF
