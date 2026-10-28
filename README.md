@@ -31,6 +31,10 @@ tests; `-DRNC_BUILD_EXAMPLES=OFF` disables the POSIX examples.
 `-DRNC_BUILD_HOST=OFF` disables the POSIX host and daemon.
 `-DRNC_COMPRESSION=OFF` removes BZip2 and rejects compressed transfers/streams.
 
+Some tests drive real tools and need `bash` and `git`; they are skipped when
+either is missing. The git tests use temporary directories under `$TMPDIR`
+(`/tmp`) and loopback ports.
+
 ## Install and consume
 
 ```sh
@@ -84,6 +88,87 @@ and authenticated shared-instance RPC. RNS 1.5.5 RPC uses MessagePack.
 SIGHUP reloads configuration; SIGINT/SIGTERM
 stop the daemon. Keep identity, checkpoint and admin paths in a private directory.
 Actual radio and multicast deployment require separate hardware/network checks.
+
+## Tools
+
+Built with the examples (`-DRNC_BUILD_EXAMPLES=ON`, the default). Each attaches
+to a running node daemon over TCP (`--connect HOST:PORT`) and speaks the
+reference's wire protocol; the reference tool they correspond to is in brackets.
+
+| Tool | Reference | Purpose |
+| --- | --- | --- |
+| `reticulum-c-node` | rnsd | Node daemon: interfaces, transport, shared-instance RPC |
+| `reticulum-c-ctl` | rnstatus, rnpath, rnid | Status, paths, blackholes, identities |
+| `reticulum-c-cp` | rncp | File transfer |
+| `reticulum-c-x` | rnx | Remote command execution |
+| `reticulum-c-sh` | rnsh | Remote shell |
+| `reticulum-c-rnodeconf` | rnodeconf | RNode information and configuration |
+| `reticulum-c-git` | rngit node | Git repository node: serves repositories, forks, mirrors, releases, work documents, statistics and nomadnet pages |
+| `reticulum-c-git-remote` | git-remote-rns | `git clone rns://DESTINATION/GROUP/REPO` (install under that name) |
+| `reticulum-c-git-admin` | rngit create, fork, mirror, sync, perms, release, work | Management of repositories on a node |
+| `reticulum-c-git-cs` | rngcs | Sign and verify git commits with a Reticulum identity |
+
+Usage, options, differences and test evidence for each are in
+[COMPATIBILITY.md](COMPATIBILITY.md); the source of each is one file in
+`examples/`. A quick git example, with a node daemon listening on 7778:
+
+```sh
+reticulum-c-git --connect 127.0.0.1:7778 --config ~/.rngit     # prints the destination
+export RNGIT_CONNECT=127.0.0.1:7778
+git clone rns://DESTINATION/GROUP/REPO                          # needs git-remote-rns on PATH
+reticulum-c-git-admin create rns://DESTINATION/GROUP/NEW
+```
+
+## Releases
+
+Pushing a tag `vX.Y.Z` (it must match the project version in `CMakeLists.txt`;
+`-rc1` style suffixes make a pre-release) runs the Release workflow, which
+builds, tests and publishes self-contained Linux archives: musl, fully static,
+with OpenSSL and bzip2 linked in, so nothing needs installing on the device.
+
+| Archive | Runs on |
+| --- | --- |
+| `linux-x86_64-musl` | PCs, servers, virtual machines |
+| `linux-aarch64-musl` | Raspberry Pi 3/4/5 and Zero 2 with a 64-bit OS, Jetson, Orange Pi and similar |
+| `linux-armv7-musl` | Raspberry Pi 2/3/Zero 2 with a 32-bit OS and similar |
+| `linux-armv6-musl` | Raspberry Pi Zero and 1 (also runs on the armv7 boards) |
+
+Each holds `bin/` (the node daemon and the tools above), `include/` and `lib/`
+(static libraries, OpenSSL and bzip2 for static linking, a CMake package),
+`BUILDINFO` and the documentation; `SHA256SUMS` accompanies the release. To link
+the SDK from CMake use `-DCMAKE_PREFIX_PATH=<unpacked directory>
+-DOPENSSL_USE_STATIC_LIBS=ON`. The workflow can also be run by hand for a trial
+build that only keeps the archives as workflow artifacts. Microcontroller boards
+are covered by the firmware archives described below.
+
+## Microcontroller boards (ESP32 and nRF52)
+
+The `mcu/` directory builds the SDK core, with no OpenSSL, for microcontrollers:
+a portable crypto backend (`-DRNC_CRYPTO=portable`, Monocypher plus our own
+SHA-256, HMAC, HKDF and AES-256-CBC) and a small capacity profile
+(`-DRNC_PROFILE=mcu`: MTU 500, small tables; about 87 KB of heap for a node with
+two links and a responder, 12 KB of task stack). A portable example application
+(`mcu/app`) is a Reticulum node that speaks HDLC over a serial port, announces
+itself and answers `/echo` and `/info`; it runs on the board and, unchanged, on
+the host, where a test drives it through a real `reticulum-c-node`.
+
+| Boards | Build | Release archive |
+| --- | --- | --- |
+| Heltec WiFi LoRa 32 V2, other ESP32 | ESP-IDF (`mcu/build-esp-idf.sh`) | `mcu-esp-idf-esp32` |
+| Heltec WiFi LoRa 32 V3, other ESP32-S3 | ESP-IDF | `mcu-esp-idf-esp32s3` |
+| Heltec V3, V2, T-Beam, LilyGo T3-S3 | PlatformIO/Arduino (`mcu/build-platformio.sh`) | `mcu-<board>` |
+| RAK4631, Heltec T114, LilyGo T-Echo (nRF52840) | PlatformIO/Arduino | `mcu-<board>` |
+
+Each firmware archive holds the flashable files and flash instructions; the
+ESP-IDF component and PlatformIO library are also released as source archives
+for use in your own firmware. `mcu/README.txt` and `mcu/platformio/README.txt`
+cover prerequisites, building, flashing and wiring a board to a node daemon.
+Limits: there is no LoRa radio driver yet (the board talks over serial), AES is
+the table-based software version (a timing side channel the hardware AES engines
+would avoid), the T-Deck has no PlatformIO board definition, the nRF52 board
+definitions are derived from the Adafruit Feather nRF52840 (no pin maps), and
+nothing has been run on real hardware: the builds are proven, behaviour on a
+board is not.
 
 ## Generic C text example
 
@@ -161,7 +246,14 @@ links with initiator identity proofs, keepalives/close/timeouts, typed reliable
 Channels with bounded queues, ordering, duplicates and fresh-IV retries; IFAC,
 ratchet lifecycle/encryption, GROUP/PLAIN primitives, path discovery/forwarding,
 Buffer streams, segmented Resources, request/response services, configurable
-MTUs up to 4096, optional POSIX interfaces and persistent node state.
+MTUs up to 4096, optional POSIX interfaces and persistent node state;
+request/response responders and requesters (including file responses with
+metadata and deferred replies); interfaces for TCP, UDP, Auto, serial, KISS,
+AX.25, Pipe, RNode (single, multi and WiFi), I2P (SAM) and Weave; the management
+plane (blackholes, discovery, remote management); and the tools above, among
+them a port of `rngit`. Interface and tool coverage and every known difference
+are in [COMPATIBILITY.md](COMPATIBILITY.md) and
+[docs/spec-gap-list.md](docs/spec-gap-list.md).
 
 Defaults remain MTU 500 and a two-message Channel TX window. The implementation
 does not claim complete RNS API/configuration compatibility. Radio hardware,

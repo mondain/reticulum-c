@@ -7,3 +7,5 @@
 *.dylib
 *.dll
 *.exe
+mcu/out/
+/mcu/platformio/.pio/

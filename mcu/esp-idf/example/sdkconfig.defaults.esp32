@@ -1,0 +1,4 @@
+# ESP32 (Heltec WiFi LoRa 32 V2, T-Beam, ...): no built-in USB. UART0 carries the
+# Reticulum stream; there is no console. Attach a second UART for debugging if needed.
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESP_CONSOLE_NONE=y

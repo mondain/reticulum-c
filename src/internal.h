@@ -49,6 +49,11 @@ rnc_result rnc_token_seal(const uint8_t key[64], const void *data, size_t size,
     rnc_random_fn random, void *context, uint8_t *output, size_t capacity, size_t *written);
 rnc_result rnc_token_open(const uint8_t key[64], const uint8_t *data, size_t size,
     uint8_t *output, size_t capacity, size_t *written);
+/* Token body helpers (crypto.c): IV || AES-256-CBC || HMAC-SHA256, key = HMAC key(32) || AES key(32). */
+rnc_result rnc_token_encrypt(const uint8_t key[64], const void *data, size_t size,
+    rnc_random_fn random, void *context, uint8_t *output, size_t capacity, size_t *written);
+rnc_result rnc_token_decrypt(const uint8_t key[64], const uint8_t *data, size_t size,
+    size_t max_plain, uint8_t *output, size_t capacity, size_t *written);
 /* Caller reserves event space before these internal helpers. */
 rnc_link_event *rnc_emit(rnc_link *link, rnc_link_event_type type);
 void rnc_emit_packet(rnc_link *link, const rnc_packet *packet);

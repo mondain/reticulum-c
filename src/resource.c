@@ -2,8 +2,7 @@
 #ifdef RNC_HAVE_BZIP2
 #include <bzlib.h>
 #endif
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
+#include "crypto_backend.h"
 #include <reticulum_c/rnc_log.h>
 #include <reticulum_c/rnc_resource.h>
 #include <stdlib.h>
@@ -83,17 +82,17 @@ struct rnc_resource {
 };
 static rnc_result digest2(const void *a, size_t an, const void *b, size_t bn,
                           uint8_t out[32]) {
-  EVP_MD_CTX *c = EVP_MD_CTX_new();
-  unsigned n = 0;
-  int ok = c && EVP_DigestInit_ex(c, EVP_sha256(), NULL) == 1 &&
-           EVP_DigestUpdate(c, a, an) == 1 && EVP_DigestUpdate(c, b, bn) == 1 &&
-           EVP_DigestFinal_ex(c, out, &n) == 1 && n == 32;
-  EVP_MD_CTX_free(c);
-  return ok ? RNC_OK : RNC_CRYPTO;
+  rnc_sha256_ctx c;
+  if (!rnc_sha256_init(&c) || !rnc_sha256_update(&c, a, an) ||
+      !rnc_sha256_update(&c, b, bn)) {
+    rnc_sha256_discard(&c);
+    return RNC_CRYPTO;
+  }
+  return rnc_sha256_final(&c, out) ? RNC_OK : RNC_CRYPTO;
 }
 static void clear_segment(rnc_resource *r) {
   if (r->wire) {
-    OPENSSL_cleanse(r->wire, r->wire_capacity);
+    rnc_cleanse(r->wire, r->wire_capacity);
     free(r->wire);
   }
   free(r->map);
@@ -109,7 +108,7 @@ static void clear_segment(rnc_resource *r) {
 static void clear_transfer(rnc_resource *r) {
   clear_segment(r);
   if (r->data) {
-    OPENSSL_cleanse(r->data, r->data_size);
+    rnc_cleanse(r->data, r->data_size);
     free(r->data);
   }
   r->data = NULL;
@@ -275,7 +274,7 @@ static rnc_result parse_adv(const uint8_t *data, size_t size, resource_adv *a) {
   if (q.transfer > maximum_wire ||
       (!(q.flags & 2u) && q.transfer != maximum_wire))
     return RNC_PROTOCOL;
-  if (q.index == 1 && CRYPTO_memcmp(q.hash, q.original, 32))
+  if (q.index == 1 && rnc_ct_memcmp(q.hash, q.original, 32))
     return RNC_PROTOCOL;
   for (i = 0; i < q.map_size / 4; i++)
     for (j = 0; j < i; j++)
@@ -317,6 +316,8 @@ static size_t pack_adv(const resource_adv *a, uint8_t out[RNC_LINK_MDU]) {
   else
     b[n++] = 0xc0;
   U('f', a->flags);
+  if (a->map_size > sizeof(b) - n - 8u) /* the hashmap must fit the advertisement */
+    return 0;
   B('m', a->map, a->map_size);
 #undef K
 #undef U
@@ -432,7 +433,7 @@ static rnc_result prepare_segment(rnc_resource *r) {
   r->retries = 0;
   result = RNC_OK;
 done:
-  OPENSSL_cleanse(packed, len + 4u);
+  rnc_cleanse(packed, len + 4u);
   free(packed);
   free(compressed);
   return result;
@@ -465,7 +466,7 @@ void rnc_resource_free(rnc_resource *r) {
   if (r) {
     clear_transfer(r);
     free(r->proofs);
-    OPENSSL_cleanse(r, sizeof(*r));
+    rnc_cleanse(r, sizeof(*r));
     free(r);
   }
 }
@@ -731,7 +732,7 @@ static rnc_result finish_segment(rnc_resource *r) {
   result = digest2(uncompressed, len, r->adv.random, 4, digest);
   if (result != RNC_OK)
     goto done;
-  if (CRYPTO_memcmp(digest, r->adv.hash, 32)) {
+  if (rnc_ct_memcmp(digest, r->adv.hash, 32)) {
     result = RNC_AUTH;
     goto done;
   }
@@ -780,9 +781,9 @@ static rnc_result finish_segment(rnc_resource *r) {
   }
   result = RNC_OK;
 done:
-  OPENSSL_cleanse(plain, r->adv.transfer);
+  rnc_cleanse(plain, r->adv.transfer);
   free(plain);
-  OPENSSL_cleanse(uncompressed, expected);
+  rnc_cleanse(uncompressed, expected);
   free(uncompressed);
   return result;
 }
@@ -889,7 +890,7 @@ static rnc_result handle_request(rnc_resource *r, const uint8_t *p, size_t n) {
   pad = hmu ? 5 : 1;
   if (n < pad + 32 || (n - pad - 32) % 4)
     return RNC_PROTOCOL;
-  if (CRYPTO_memcmp(p + pad, r->adv.hash, 32))
+  if (rnc_ct_memcmp(p + pad, r->adv.hash, 32))
     return RNC_AGAIN;
   count = (n - pad - 32) / 4;
   if (count > 100)
@@ -945,7 +946,7 @@ static rnc_result handle_hmu(rnc_resource *r, const uint8_t *p, size_t n) {
     return RNC_AGAIN;
   if (n < 36)
     return RNC_PROTOCOL;
-  if (CRYPTO_memcmp(p, r->adv.hash, 32))
+  if (rnc_ct_memcmp(p, r->adv.hash, 32))
     return RNC_AGAIN;
   m.p = p + 32;
   m.n = n - 32;
@@ -960,7 +961,7 @@ static rnc_result handle_hmu(rnc_resource *r, const uint8_t *p, size_t n) {
     return RNC_PROTOCOL;
   if (start < r->known) {
     if (count > r->known - start ||
-        CRYPTO_memcmp(r->map + 4 * start, map, 4 * count))
+        rnc_ct_memcmp(r->map + 4 * start, map, 4 * count))
       return RNC_PROTOCOL;
     r->request_pending = 1;
     return RNC_OK;
@@ -1012,7 +1013,7 @@ rnc_result rnc_resource_input(rnc_resource *r, const rnc_link_event *e,
       return RNC_AGAIN;
     if (n != 64)
       return RNC_PROTOCOL;
-    if (CRYPTO_memcmp(p, r->adv.hash, 32))
+    if (rnc_ct_memcmp(p, r->adv.hash, 32))
       return RNC_AGAIN;
     off = (r->adv.index - 1u) * RNC_RESOURCE_SEGMENT_MAX;
     len = r->data_size - off;
@@ -1021,7 +1022,7 @@ rnc_result rnc_resource_input(rnc_resource *r, const rnc_link_event *e,
     result = digest2(r->data + off, len, r->adv.hash, 32, expected);
     if (result != RNC_OK)
       return result;
-    if (CRYPTO_memcmp(expected, p + 32, 32))
+    if (rnc_ct_memcmp(expected, p + 32, 32))
       return RNC_AUTH;
     r->assembled = off + len;
     if (r->adv.index < r->adv.segments) {
@@ -1040,7 +1041,7 @@ rnc_result rnc_resource_input(rnc_resource *r, const rnc_link_event *e,
     if (n != 32)
       return RNC_PROTOCOL;
     for (i = 0; i < r->proof_count; i++)
-      if (!CRYPTO_memcmp(p, r->proofs[i].packet_hash, 32)) {
+      if (!rnc_ct_memcmp(p, r->proofs[i].packet_hash, 32)) {
         memcpy(r->cached_proof, r->proofs[i].data, 64);
         r->proof_pending = 1;
         result = RNC_OK;
@@ -1050,7 +1051,7 @@ rnc_result rnc_resource_input(rnc_resource *r, const rnc_link_event *e,
     if (n != 32)
       return RNC_PROTOCOL;
     if (!active(r) || r->outgoing != (context == 7) ||
-        CRYPTO_memcmp(p, r->adv.hash, 32))
+        rnc_ct_memcmp(p, r->adv.hash, 32))
       return RNC_AGAIN;
     fail(r, RNC_STATE, 0);
     result = RNC_OK;

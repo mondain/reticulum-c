@@ -1,5 +1,5 @@
 #include <reticulum_c/rnc.h>
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <string.h>
 
 rnc_result rnc_announce_create(const rnc_identity *identity, const char *dotted_name,
@@ -14,7 +14,7 @@ rnc_result rnc_announce_create(const rnc_identity *identity, const char *dotted_
     status = random(context, nonce, sizeof(nonce));
     if (status != RNC_OK) return status;
     status = rnc_hash(nonce, sizeof(nonce), digest);
-    OPENSSL_cleanse(nonce, sizeof(nonce));
+    rnc_cleanse(nonce, sizeof(nonce));
     if (status != RNC_OK) return status;
     result.flags = RNC_ANNOUNCE;
     memcpy(result.data, identity->public_key, 64);
@@ -50,7 +50,7 @@ rnc_result rnc_announce_verify(const rnc_packet *packet, rnc_announce *announce)
     if (result.has_ratchet) memcpy(result.ratchet, packet->data+84, 32);
     memcpy(material, result.name_hash, 10); memcpy(material+10, result.identity.hash, 16);
     if (rnc_hash(material, sizeof(material), digest) != RNC_OK) return RNC_CRYPTO;
-    if (CRYPTO_memcmp(packet->destination, digest, 16)) return RNC_AUTH;
+    if (rnc_ct_memcmp(packet->destination, digest, 16)) return RNC_AUTH;
     memcpy(signed_data, packet->destination, 16);
     memcpy(signed_data+16, packet->data, signature_offset);
     memcpy(signed_data+16+signature_offset, packet->data+prefix, result.app_size);

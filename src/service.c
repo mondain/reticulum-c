@@ -1,7 +1,7 @@
 #include "service_msgpack.h"
 #include <float.h>
 #include <math.h>
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <reticulum_c/rnc_service.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,7 +60,7 @@ static int slot(service_pending *p, const uint8_t *id) {
 }
 static int seen_request(const rnc_service *s, const uint8_t id[16]) {
     for (size_t i = 0; i < s->recent_count; i++)
-        if (!CRYPTO_memcmp(s->recent[i], id, 16))
+        if (!rnc_ct_memcmp(s->recent[i], id, 16))
             return 1;
     return 0;
 }
@@ -187,14 +187,14 @@ void rnc_service_free(rnc_service *s) {
         return;
     for (i = 0; i < RNC_SERVICE_EVENTS; i++) {
         if (s->events[i].data) {
-            OPENSSL_cleanse(s->events[i].data, s->events[i].event.data_size);
+            rnc_cleanse(s->events[i].data, s->events[i].event.data_size);
             free(s->events[i].data);
         }
         free(s->events[i].metadata);
     }
     rnc_resource_free(s->tx);
     rnc_resource_free(s->rx);
-    OPENSSL_cleanse(s, sizeof(*s));
+    rnc_cleanse(s, sizeof(*s));
     free(s);
 }
 rnc_result rnc_service_register(rnc_service *s, const char *path, rnc_service_policy policy,
@@ -239,7 +239,7 @@ rnc_result rnc_service_unregister(rnc_service *s, const char *path) {
         return r;
     for (i = 0; i < RNC_SERVICE_HANDLERS; i++)
         if (s->handlers[i].used && !memcmp(hash, s->handlers[i].hash, 16)) {
-            OPENSSL_cleanse(&s->handlers[i], sizeof(s->handlers[i]));
+            rnc_cleanse(&s->handlers[i], sizeof(s->handlers[i]));
             return RNC_OK;
         }
     return RNC_AGAIN;
@@ -285,7 +285,7 @@ rnc_result rnc_service_request(rnc_service *s, const char *path, const void *val
             }
         }
     }
-    OPENSSL_cleanse(p, n + 28u);
+    rnc_cleanse(p, n + 28u);
     free(p);
     if (result != RNC_OK)
         return result;
@@ -330,11 +330,11 @@ rnc_result rnc_service_respond(rnc_service *s, const uint8_t id[16], const void 
             s->tx_request = 0;
         }
     }
-    OPENSSL_cleanse(p, n + 19u);
+    rnc_cleanse(p, n + 19u);
     free(p);
     if (result == RNC_OK) {
         remember_request(s, id);
-        OPENSSL_cleanse(&s->incoming[index], sizeof(s->incoming[index]));
+        rnc_cleanse(&s->incoming[index], sizeof(s->incoming[index]));
         s->now = now;
     }
     return result;
@@ -372,7 +372,7 @@ rnc_result rnc_service_respond_file(rnc_service *s, const uint8_t id[16], const 
         memcpy(s->tx_id, id, 16);
         s->tx_request = 0;
         remember_request(s, id);
-        OPENSSL_cleanse(&s->incoming[index], sizeof(s->incoming[index]));
+        rnc_cleanse(&s->incoming[index], sizeof(s->incoming[index]));
         s->now = now;
     }
     return result;
@@ -453,7 +453,7 @@ static rnc_result accept_response(rnc_service *s, const uint8_t *binding, const 
     start = m.i;
     if (!rmp_skip_depth(&m, 0) || m.i != m.n || m.i - start > s->max_value)
         return RNC_PROTOCOL;
-    if (binding && CRYPTO_memcmp(id, binding, 16))
+    if (binding && rnc_ct_memcmp(id, binding, 16))
         return RNC_AUTH;
     index = slot(s->pending, id);
     if (index < 0)
@@ -466,7 +466,7 @@ static rnc_result accept_response(rnc_service *s, const uint8_t *binding, const 
     memcpy(e.request_id, id, 16);
     result = queue(s, &e, p + start, n - start);
     if (result == RNC_OK)
-        OPENSSL_cleanse(&s->pending[index], sizeof(s->pending[index]));
+        rnc_cleanse(&s->pending[index], sizeof(s->pending[index]));
     return result;
 }
 static rnc_result accept_file_response(rnc_service *s, const uint8_t *id, const uint8_t *p,
@@ -484,7 +484,7 @@ static rnc_result accept_file_response(rnc_service *s, const uint8_t *id, const 
     memcpy(e.request_id, id, 16);
     result = queue_file(s, &e, p, n, meta, mn);
     if (result == RNC_OK)
-        OPENSSL_cleanse(&s->pending[index], sizeof(s->pending[index]));
+        rnc_cleanse(&s->pending[index], sizeof(s->pending[index]));
     return result;
 }
 rnc_result rnc_service_input(rnc_service *s, const rnc_link_event *e, uint64_t now) {
@@ -521,7 +521,7 @@ rnc_result rnc_service_input(rnc_service *s, const rnc_link_event *e, uint64_t n
         }
         if (s->rx_ready)
             return RNC_AGAIN;
-        if (s->rx_binding && (s->rx_response != response || CRYPTO_memcmp(s->rx_id, id, 16)))
+        if (s->rx_binding && (s->rx_response != response || rnc_ct_memcmp(s->rx_id, id, 16)))
             return RNC_AGAIN;
         result = rnc_resource_accept(s->rx, e->data, e->size, now);
         /* A completed advertisement only replays its cached Resource proof;
@@ -560,7 +560,7 @@ rnc_result rnc_service_request_state(const rnc_service *s, const uint8_t id[16],
     if (!s || !id || !state)
         return RNC_INVALID;
     for (i = 0; i < RNC_SERVICE_PENDING; i++)
-        if (s->pending[i].used && !CRYPTO_memcmp(s->pending[i].id, id, 16)) {
+        if (s->pending[i].used && !rnc_ct_memcmp(s->pending[i].id, id, 16)) {
             *state = s->pending[i].timed_out ? RNC_REQUEST_FAILED : s->pending[i].state;
             if (progress)
                 *progress = s->pending[i].progress;
@@ -635,16 +635,16 @@ rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
                 result = accept_response(s, s->rx_id, p, n, now);
             else {
                 result = rnc_hash(p, n, hash);
-                if (result == RNC_OK && CRYPTO_memcmp(hash, s->rx_id, 16))
+                if (result == RNC_OK && rnc_ct_memcmp(hash, s->rx_id, 16))
                     result = RNC_AUTH;
                 if (result == RNC_OK)
                     result = accept_request(s, s->rx_id, p, n, now);
             }
         }
-        OPENSSL_cleanse(p, s->max_value + 64u);
+        rnc_cleanse(p, s->max_value + 64u);
         free(p);
         if (meta) {
-            OPENSSL_cleanse(meta, s->max_value + 64u);
+            rnc_cleanse(meta, s->max_value + 64u);
             free(meta);
         }
         if (result == RNC_AGAIN)
@@ -667,7 +667,7 @@ rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
                 break;
             if (result != RNC_OK)
                 return result;
-            OPENSSL_cleanse(&s->pending[i], sizeof(s->pending[i]));
+            rnc_cleanse(&s->pending[i], sizeof(s->pending[i]));
         }
     s->now = now;
     return RNC_OK;
@@ -688,7 +688,7 @@ rnc_result rnc_service_tick(rnc_service *s, uint64_t now) {
             s->pending[i].timed_out = 1;
         if (s->incoming[i].used && now >= s->incoming[i].deadline) {
             remember_request(s, s->incoming[i].id);
-            OPENSSL_cleanse(&s->incoming[i], sizeof(s->incoming[i]));
+            rnc_cleanse(&s->incoming[i], sizeof(s->incoming[i]));
         }
     }
     s->now = now;
@@ -721,11 +721,11 @@ rnc_result rnc_service_poll_file(rnc_service *s, rnc_service_event *event, void 
     if (mwritten)
         *mwritten = metadata ? q->event.metadata_size : 0;
     if (q->data) {
-        OPENSSL_cleanse(q->data, q->event.data_size);
+        rnc_cleanse(q->data, q->event.data_size);
         free(q->data);
     }
     if (q->metadata) {
-        OPENSSL_cleanse(q->metadata, q->event.metadata_size);
+        rnc_cleanse(q->metadata, q->event.metadata_size);
         free(q->metadata);
     }
     memset(q, 0, sizeof(*q));

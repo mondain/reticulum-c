@@ -1,5 +1,5 @@
 #include "internal.h"
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <string.h>
 
 static uint16_t read16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] << 8 | p[1]); }
@@ -103,7 +103,7 @@ static rnc_result send_message(rnc_link *link, uint16_t type, const void *data, 
     link->now = now;
     rnc_emit_packet(link, &packet);
 done:
-    OPENSSL_cleanse(&message, sizeof(message));
+    rnc_cleanse(&message, sizeof(message));
     return result;
 }
 
@@ -126,13 +126,13 @@ rnc_result rnc_channel_proof(rnc_link *link, const rnc_packet *packet) {
             continue;
         for (attempt = 0; attempt < message->attempts; ++attempt) {
             rnc_result result;
-            if (CRYPTO_memcmp(message->hashes[attempt], packet->data, 32))
+            if (rnc_ct_memcmp(message->hashes[attempt], packet->data, 32))
                 continue;
             result = rnc_identity_verify(&link->peer_signer, packet->data, 32, packet->data + 32);
             if (result != RNC_OK)
                 return result;
             rnc_emit(link, RNC_LINK_DELIVERED)->sequence = message->sequence;
-            OPENSSL_cleanse(message, sizeof(*message));
+            rnc_cleanse(message, sizeof(*message));
             delivered_window(link);
             return RNC_OK;
         }
@@ -202,7 +202,7 @@ rnc_result rnc_channel_receive(rnc_link *link, const rnc_packet *packet, const u
         event->message_type = existing->type;
         event->size = existing->size;
         memcpy(event->data, existing->data, existing->size);
-        OPENSSL_cleanse(existing, sizeof(*existing));
+        rnc_cleanse(existing, sizeof(*existing));
         link->rx_next = (uint16_t)(link->rx_next + 1u);
     }
     return RNC_OK;

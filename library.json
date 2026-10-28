@@ -1,0 +1,51 @@
+{
+  "name": "reticulum-c",
+  "version": "0.2.0",
+  "description": "Reticulum protocol core (C11, sans-I/O) for ESP32 and nRF52840 with the portable crypto backend and the small mcu capacity profile, plus a portable example application",
+  "keywords": "reticulum, mesh, lora, networking, cryptography, esp32, nrf52",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mondain/reticulum-c.git"
+  },
+  "frameworks": "arduino",
+  "platforms": ["espressif32", "nordicnrf52"],
+  "build": {
+    "srcDir": ".",
+    "includeDir": "include",
+    "srcFilter": [
+      "-<*>",
+      "+<src/crypto.c>",
+      "+<src/crypto_portable.c>",
+      "+<src/packet.c>",
+      "+<src/framing.c>",
+      "+<src/announce.c>",
+      "+<src/link.c>",
+      "+<src/channel.c>",
+      "+<src/node.c>",
+      "+<src/ifac.c>",
+      "+<src/ratchet.c>",
+      "+<src/group.c>",
+      "+<src/stream.c>",
+      "+<src/resource.c>",
+      "+<src/service.c>",
+      "+<src/ipc.c>",
+      "+<src/responder.c>",
+      "+<src/requester.c>",
+      "+<src/transfer.c>",
+      "+<src/stamp.c>",
+      "+<src/discovery.c>",
+      "+<src/log.c>",
+      "+<src/i2p.c>",
+      "+<src/third_party/monocypher/monocypher.c>",
+      "+<src/third_party/monocypher/monocypher-ed25519.c>",
+      "+<mcu/app/rnc_mcu_app.c>"
+    ],
+    "flags": [
+      "-DRNC_PROFILE_MCU=1",
+      "-DRNC_CRYPTO_PORTABLE=1",
+      "-DRNC_PORTABLE_NO_RPC_DIGESTS=1"
+    ],
+    "extraScript": "mcu/platformio/lib_extra.py"
+  }
+}

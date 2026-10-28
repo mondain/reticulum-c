@@ -2193,9 +2193,11 @@ static void i2p_spawn(rnc_host *h, host_interface *c, int role,
     unsigned k;
     for (k = 0; k < index; ++k)
       p += strlen(p) + 1u;
-    (void)snprintf(f->sam_peer, sizeof(f->sam_peer), "%s", p);
+    char peer[sizeof(f->sam_peer)]; /* a copy, so the compiler can see no overlap */
+    (void)snprintf(peer, sizeof(peer), "%s", p);
+    memcpy(f->sam_peer, peer, sizeof(peer));
     (void)snprintf(f->status.name, sizeof(f->status.name),
-                   "I2PInterfacePeer[%.100s]", f->sam_peer);
+                   "I2PInterfacePeer[%.100s]", peer);
   } else
     (void)snprintf(f->status.name, sizeof(f->status.name),
                    "I2PInterfacePeer[Connected peer on %.80s]",

@@ -1,4 +1,4 @@
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <reticulum_c/rnc_link.h>
 #include <reticulum_c/rnc_responder.h>
 #include <stdlib.h>
@@ -72,7 +72,7 @@ static void slot_release(rnc_responder *r, responder_slot *s) {
   (void)rnc_node_unbind_link(r->node, s->id);
   rnc_service_free(s->service);
   rnc_link_free(s->link);
-  OPENSSL_cleanse(s, sizeof(*s));
+  rnc_cleanse(s, sizeof(*s));
 }
 void rnc_responder_free(rnc_responder *r) {
   size_t i;
@@ -80,15 +80,15 @@ void rnc_responder_free(rnc_responder *r) {
     return;
   for (i = 0; i < RNC_RESPONDER_LINKS; i++)
     slot_release(r, &r->slots[i]);
-  OPENSSL_cleanse(r->request, r->max_value);
-  OPENSSL_cleanse(r->response, r->max_value);
+  rnc_cleanse(r->request, r->max_value);
+  rnc_cleanse(r->response, r->max_value);
   if (r->file_data)
-    OPENSSL_cleanse(r->file_data, r->max_value);
+    rnc_cleanse(r->file_data, r->max_value);
   free(r->request);
   free(r->response);
   free(r->file_data);
   free(r->file_meta);
-  OPENSSL_cleanse(r, sizeof(*r));
+  rnc_cleanse(r, sizeof(*r));
   free(r);
 }
 static responder_destination *find_destination(rnc_responder *r,
@@ -266,7 +266,7 @@ static rnc_result accept_link(rnc_responder *r, responder_destination *d,
     rnc_service_free(s->service);
     rnc_link_free(s->link);
     (void)rnc_node_unbind_link(r->node, s->id);
-    OPENSSL_cleanse(s, sizeof(*s));
+    rnc_cleanse(s, sizeof(*s));
     return result;
   }
   (void)rnc_service_set_max_request_size(s->service, d->max_request);

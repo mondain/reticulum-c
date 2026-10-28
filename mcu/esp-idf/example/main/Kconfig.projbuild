@@ -1,0 +1,60 @@
+menu "Reticulum MCU example"
+
+    choice RETICULUM_MCU_TRANSPORT
+        prompt "Serial transport"
+        default RETICULUM_MCU_TRANSPORT_UART
+        help
+            The byte stream the HDLC framing (Reticulum SerialInterface) runs on.
+            With UART0 the console must not use UART0: sdkconfig.defaults moves it
+            elsewhere or disables it, because log text would corrupt the stream.
+
+        config RETICULUM_MCU_TRANSPORT_UART
+            bool "UART (UART0 by default, the port behind the board's USB-UART bridge)"
+
+        config RETICULUM_MCU_TRANSPORT_USB_SERIAL_JTAG
+            bool "Built-in USB Serial/JTAG (chips that have it, such as ESP32-S3)"
+            depends on SOC_USB_SERIAL_JTAG_SUPPORTED
+    endchoice
+
+    config RETICULUM_MCU_UART_NUM
+        int "UART number"
+        depends on RETICULUM_MCU_TRANSPORT_UART
+        range 0 2
+        default 0
+
+    config RETICULUM_MCU_UART_BAUD
+        int "UART baud rate"
+        depends on RETICULUM_MCU_TRANSPORT_UART
+        range 1200 3000000
+        default 115200
+        help
+            Must equal the speed of the SerialInterface on the host side.
+
+    config RETICULUM_MCU_UART_TX_GPIO
+        int "UART TX GPIO (-1 keeps the default pin of the UART)"
+        depends on RETICULUM_MCU_TRANSPORT_UART
+        default -1
+
+    config RETICULUM_MCU_UART_RX_GPIO
+        int "UART RX GPIO (-1 keeps the default pin of the UART)"
+        depends on RETICULUM_MCU_TRANSPORT_UART
+        default -1
+
+    config RETICULUM_MCU_TASK_STACK
+        int "Stack size of the Reticulum task in bytes"
+        range 12288 65536
+        default 16384
+        help
+            The protocol core and the portable crypto need at least 12 KB.
+
+    config RETICULUM_MCU_ANNOUNCE_SECONDS
+        int "Announce interval in seconds"
+        range 5 86400
+        default 600
+
+    config RETICULUM_MCU_BOARD
+        string "Board name reported by /info"
+        default "esp32s3" if IDF_TARGET_ESP32S3
+        default "esp32"
+
+endmenu

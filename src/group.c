@@ -1,6 +1,6 @@
 #include <reticulum_c/rnc_security.h>
 #include "internal.h"
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <string.h>
 
 rnc_result rnc_group_generate(rnc_group_key *key,rnc_random_fn random,void *context) {
@@ -8,14 +8,14 @@ rnc_result rnc_group_generate(rnc_group_key *key,rnc_random_fn random,void *cont
     if(!key||!random)return RNC_INVALID;
     status=random(context,result.bytes,sizeof(result.bytes));
     if(status==RNC_OK){result.valid=1;*key=result;}
-    OPENSSL_cleanse(&result,sizeof(result));return status;
+    rnc_cleanse(&result,sizeof(result));return status;
 }
 rnc_result rnc_group_import(rnc_group_key *key,const uint8_t bytes[64]) {
     rnc_group_key result={0};if(!key||!bytes)return RNC_INVALID;
     memcpy(result.bytes,bytes,64);result.valid=1;*key=result;
-    OPENSSL_cleanse(&result,sizeof(result));return RNC_OK;
+    rnc_cleanse(&result,sizeof(result));return RNC_OK;
 }
-void rnc_group_clear(rnc_group_key *key){if(key)OPENSSL_cleanse(key,sizeof(*key));}
+void rnc_group_clear(rnc_group_key *key){if(key)rnc_cleanse(key,sizeof(*key));}
 rnc_result rnc_group_encrypt(const rnc_group_key *key,const void *data,size_t size,
     rnc_random_fn random,void *context,uint8_t *output,size_t capacity,size_t *written) {
     if(written)*written=0;

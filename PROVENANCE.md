@@ -27,3 +27,13 @@ External oracle checkouts/libraries retain their own licenses and are not
 redistributed by this repository. OpenSSL and BZip2 retain their own licenses. The MIT
 license in this repository covers this project's source; it does not relicense
 any external reference project or dependency.
+
+## Vendored third-party code
+
+`src/third_party/monocypher/` holds Monocypher 4.0.2
+(https://github.com/LoupVaillant/Monocypher, tag 4.0.2), unmodified:
+`monocypher.c/.h` and the optional `monocypher-ed25519.c/.h`. It is dual licensed
+(2-clause BSD or CC-0); the full text is in `src/third_party/monocypher/LICENSE`.
+It is compiled only into the optional `-DRNC_CRYPTO=portable` backend, which uses it
+for X25519 and Ed25519 (including its SHA-512). SHA-256, HMAC, HKDF and AES-256-CBC
+for that backend are original code in `src/crypto_portable.c`.

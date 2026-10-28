@@ -1,5 +1,5 @@
 #include "service_msgpack.h"
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <reticulum_c/rnc_buffer.h>
 #include <reticulum_c/rnc_link.h>
 #include <reticulum_c/rnc_resource.h>
@@ -159,7 +159,7 @@ static void slot_release(rnc_transfer_listener *l, listener_slot *s) {
   if (!s->used)
     return;
   conn_close(&s->c, l->node);
-  OPENSSL_cleanse(s, sizeof(*s));
+  rnc_cleanse(s, sizeof(*s));
 }
 void rnc_transfer_listener_free(rnc_transfer_listener *l) {
   size_t i;
@@ -168,7 +168,7 @@ void rnc_transfer_listener_free(rnc_transfer_listener *l) {
   for (i = 0; i < RNC_TRANSFER_LINKS; i++)
     slot_release(l, &l->slots[i]);
   free(l->scratch);
-  OPENSSL_cleanse(l, sizeof(*l));
+  rnc_cleanse(l, sizeof(*l));
   free(l);
 }
 size_t rnc_transfer_listener_link_count(const rnc_transfer_listener *l) {
@@ -182,7 +182,7 @@ size_t rnc_transfer_listener_link_count(const rnc_transfer_listener *l) {
 static int listed(const rnc_transfer_listener *l, const uint8_t hash[16]) {
   size_t i;
   for (i = 0; i < l->config.allowed_count; i++)
-    if (!CRYPTO_memcmp(l->config.allowed[i], hash, 16))
+    if (!rnc_ct_memcmp(l->config.allowed[i], hash, 16))
       return 1;
   return 0;
 }
@@ -219,7 +219,7 @@ static rnc_result accept_link(rnc_transfer_listener *l,
                                   RNC_SERVICE_ALLOW_ALL, NULL, 0);
   if (result != RNC_OK) {
     conn_close(&s->c, l->node);
-    OPENSSL_cleanse(s, sizeof(*s));
+    rnc_cleanse(s, sizeof(*s));
     return result;
   }
   s->used = 1;
@@ -286,7 +286,7 @@ static void listener_requests(rnc_transfer_listener *l, listener_slot *s,
         answer[0] = 0xc3;
     }
     if (data) {
-      OPENSSL_cleanse(data, size);
+      rnc_cleanse(data, size);
       free(data);
     }
     (void)rnc_service_respond(s->c.service, event.request_id, answer,
@@ -356,7 +356,7 @@ rnc_result rnc_transfer_listener_tick(rnc_transfer_listener *l,
             (void)l->config.received(l->config.context,
                                      s->identified ? s->remote : NULL, name,
                                      name_size, data, size);
-            OPENSSL_cleanse(data, size);
+            rnc_cleanse(data, size);
             free(data);
           }
         }
@@ -426,12 +426,12 @@ static void job_release_link(rnc_transfer_client *c, client_job *j) {
 static void job_clear(rnc_transfer_client *c, client_job *j) {
   job_release_link(c, j);
   if (j->input)
-    OPENSSL_cleanse(j->input, j->input_size);
+    rnc_cleanse(j->input, j->input_size);
   free(j->input);
   if (j->output)
-    OPENSSL_cleanse(j->output, j->output_size);
+    rnc_cleanse(j->output, j->output_size);
   free(j->output);
-  OPENSSL_cleanse(j, sizeof(*j));
+  rnc_cleanse(j, sizeof(*j));
 }
 void rnc_transfer_client_free(rnc_transfer_client *c) {
   size_t i;
@@ -468,7 +468,7 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
     return RNC_STATE;
   memset(j, 0, sizeof(*j));
   if (!conn_open(&j->c, c->node, c->max_size, c->random, c->random_context)) {
-    OPENSSL_cleanse(j, sizeof(*j));
+    rnc_cleanse(j, sizeof(*j));
     return RNC_NO_SPACE;
   }
   j->input = malloc(size ? size : 1);
@@ -504,7 +504,7 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
 fail:
   conn_close(&j->c, c->node);
   free(j->input);
-  OPENSSL_cleanse(j, sizeof(*j));
+  rnc_cleanse(j, sizeof(*j));
   return result;
 }
 rnc_result rnc_transfer_send(rnc_transfer_client *c,

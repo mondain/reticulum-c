@@ -8,8 +8,22 @@
 extern "C" {
 #endif
 
+/* Capacity profile: every sizing constant below and in the other headers is
+ * overridable. -DRNC_PROFILE_MCU (CMake: -DRNC_PROFILE=mcu) selects the small
+ * microcontroller values; -DRNC_PROFILE_HEADER='"file.h"' supplies your own. */
+#if defined(RNC_PROFILE_HEADER)
+#include RNC_PROFILE_HEADER
+#elif defined(RNC_PROFILE_MCU)
+#include <reticulum_c/rnc_profile_mcu.h>
+#endif
+
 #define RNC_MTU 500u
+#ifndef RNC_MAX_MTU
 #define RNC_MAX_MTU 4096u
+#endif
+#if RNC_MAX_MTU < 500u
+#error "RNC_MAX_MTU must be at least the Reticulum default MTU (500)"
+#endif
 #define RNC_MAX_FRAME (RNC_MAX_MTU + 64u)
 #define RNC_ADDRESS_SIZE 16u
 #define RNC_NAME_HASH_SIZE 10u

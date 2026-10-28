@@ -5,7 +5,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+#ifndef RNC_REQUESTER_JOBS
 #define RNC_REQUESTER_JOBS 4u
+#endif
 
 /* One-shot request client: for each job, opens a link to a destination the
  * node has a route to, optionally identifies, sends one request, collects the

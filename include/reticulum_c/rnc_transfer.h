@@ -4,9 +4,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+#ifndef RNC_TRANSFER_LINKS
 #define RNC_TRANSFER_LINKS 4u
+#endif
+#ifndef RNC_TRANSFER_JOBS
 #define RNC_TRANSFER_JOBS 4u
+#endif
+#ifndef RNC_TRANSFER_ALLOWED
 #define RNC_TRANSFER_ALLOWED 64u
+#endif
 #define RNC_TRANSFER_NAME_MAX 255u
 /* Largest file: the Resource limit (16 MiB) less room for the metadata. */
 #define RNC_TRANSFER_MAX_SIZE (16u * 1024u * 1024u - 4096u)

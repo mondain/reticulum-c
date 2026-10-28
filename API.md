@@ -93,6 +93,23 @@ receive slot; event-queue backpressure retains completed input until drained.
 Late responses are discarded; request deadlines and the bounded replay cache
 do not guarantee durable exactly-once application effects.
 
+`rnc_responder.h` and `rnc_requester.h` compose links and services into the
+`Destination.register_request_handler` and `Link.request` patterns. A responder
+accepts links for registered destinations and calls a handler per admitted
+request with the caller's identity hash; `rnc_responder_request_identity()` and
+`rnc_responder_request_link_id()` give the full public key and link inside a
+handler. A handler normally answers by writing a MessagePack value, but it may
+(a) register with `rnc_responder_register_file()` to answer with raw data plus
+one MessagePack metadata value as a single Resource (the reference's file
+response; `rnc_requester_poll_file()` returns both), (b) keep the node serviced
+while it works by feeding `rnc_responder_input()` and ticking the responder from
+inside the handler (no second handler starts; a link that closes meanwhile is
+released afterwards), or (c) call `rnc_responder_defer()`, return RNC_AGAIN and
+answer later with `rnc_responder_reply()` using the ticket, within the lifetime
+it requested (the service otherwise keeps a request for 30 seconds). A requester
+runs one request per link: start, tick, poll. Both borrow the node and are
+thread-confined.
+
 `rnc_security.h` supplies IFAC, GROUP keys, signed ratcheted announces and
 caller-owned ratchet storage. Persist private ratchets securely and clear keys
 when done. IFAC network membership and encryption do not grant app privileges.

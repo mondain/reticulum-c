@@ -2,6 +2,7 @@
  * computed with the reference's own arithmetic (Resource.py update_eifr and
  * the watchdog job) in floating point; integer milliseconds may differ by a
  * rounding step. */
+#include <stdio.h>
 #include "../src/resource.c"
 
 #define CHECK(x)                                                               \

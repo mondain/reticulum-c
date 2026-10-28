@@ -370,7 +370,7 @@ static void process_push(push_item *queue, size_t count) {
     int force = 0, empty = 0;
     response r = {0};
     const char *text;
-    size_t n, k;
+    size_t n = 0, k;
     int status;
     uint8_t *buf;
     size_t cap;

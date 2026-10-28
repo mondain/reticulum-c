@@ -4,11 +4,21 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+#ifndef RNC_NODE_INTERFACES
 #define RNC_NODE_INTERFACES 8u
+#endif
+#ifndef RNC_NODE_ROUTES
 #define RNC_NODE_ROUTES 128u
+#endif
+#ifndef RNC_NODE_DESTINATIONS
 #define RNC_NODE_DESTINATIONS 16u
+#endif
+#ifndef RNC_NODE_LINKS
 #define RNC_NODE_LINKS 64u
+#endif
+#ifndef RNC_NODE_EVENTS
 #define RNC_NODE_EVENTS 64u
+#endif
 /* Interface ID zero is reserved for local delivery. Routing policy is bounded:
  * no automatic allocation/eviction after new; expire entries with tick(). */
 typedef struct rnc_node rnc_node;
@@ -43,8 +53,12 @@ typedef enum rnc_receipt_status {
   RNC_RECEIPT_DELIVERED = 1,
   RNC_RECEIPT_FAILED
 } rnc_receipt_status;
+#ifndef RNC_NODE_RECEIPTS
 #define RNC_NODE_RECEIPTS 32u
+#endif
+#ifndef RNC_NODE_KNOWN
 #define RNC_NODE_KNOWN 256u
+#endif
 typedef struct rnc_node_event {
   rnc_node_event_type type;
   uint32_t interface_id;
@@ -228,8 +242,12 @@ rnc_result rnc_node_lookup(const rnc_node *node, const uint8_t destination[16],
  * that sees the same tunnel again on a new interface restores the paths it had
  * learned through it, without waiting for fresh announces. Entries expire after
  * eight hours without use. */
+#ifndef RNC_NODE_TUNNELS
 #define RNC_NODE_TUNNELS 8u
+#endif
+#ifndef RNC_NODE_TUNNEL_PATHS
 #define RNC_NODE_TUNNEL_PATHS 16u
+#endif
 #define RNC_TUNNEL_TIMEOUT_MS (UINT64_C(8) * 3600u * 1000u)
 typedef struct rnc_tunnel_info {
   uint8_t id[32];
@@ -262,7 +280,9 @@ rnc_result rnc_node_tunnel_at(const rnc_node *node, size_t index,
  * destinations' paths are removed, and path requests for them are not answered.
  * `until` is a unix time (0 = until lifted); entries expire lazily and in
  * rnc_node_tick. The table holds RNC_NODE_BLACKHOLE entries. */
+#ifndef RNC_NODE_BLACKHOLE
 #define RNC_NODE_BLACKHOLE 256
+#endif
 #define RNC_BLACKHOLE_REASON 64
 typedef struct rnc_blackhole_entry {
   uint8_t identity[16], source[16]; /* source: who listed it (local = node id) */

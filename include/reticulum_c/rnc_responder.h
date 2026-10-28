@@ -5,9 +5,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+#ifndef RNC_RESPONDER_LINKS
 #define RNC_RESPONDER_LINKS 8u
+#endif
+#ifndef RNC_RESPONDER_DESTINATIONS
 #define RNC_RESPONDER_DESTINATIONS 4u
+#endif
+#ifndef RNC_RESPONDER_HANDLERS
 #define RNC_RESPONDER_HANDLERS 24u
+#endif
 
 /* Link-terminating destinations for a node: accepts link requests addressed to
  * registered destinations, runs one request/response service per link and calls

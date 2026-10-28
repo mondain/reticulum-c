@@ -1,8 +1,7 @@
 #include "service_msgpack.h"
 #include <float.h>
 #include <math.h>
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
+#include "crypto_backend.h"
 #include <reticulum_c/rnc_ipc.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,48 +70,49 @@ static void send_bytes(rnc_rpc *r, const void *data, size_t size) {
   r->count++;
 }
 static void close_reason(rnc_rpc *r, rnc_result reason, int reject) {
-  OPENSSL_cleanse(r->storage, (RNC_RPC_EVENTS + 1u) * r->stride);
+  rnc_cleanse(r->storage, (RNC_RPC_EVENTS + 1u) * r->stride);
   memset(r->events, 0, sizeof(r->events));
   r->head = r->count = 0;
-  OPENSSL_cleanse(r->key, sizeof(r->key));
-  OPENSSL_cleanse(r->challenge, sizeof(r->challenge));
+  rnc_cleanse(r->key, sizeof(r->key));
+  rnc_cleanse(r->challenge, sizeof(r->challenge));
   r->state = RPC_DEAD;
   if (reject)
     send_bytes(r, "#FAILURE#", 9);
   event(r, RNC_RPC_CLOSED, reason, NULL, 0);
 }
-static const char *digest_name(const uint8_t *p, size_t n, size_t *prefix) {
+static int digest_name(const uint8_t *p, size_t n, size_t *prefix) {
   static const struct {
-    const char *wire, *openssl;
-  } names[] = {{"md5", "MD5"},
-               {"sha256", "SHA256"},
-               {"sha384", "SHA384"},
-               {"sha3_256", "SHA3-256"},
-               {"sha3_384", "SHA3-384"}};
+    const char *wire;
+    int id;
+  } names[] = {{"md5", RNC_DIGEST_MD5},
+               {"sha256", RNC_DIGEST_SHA256},
+               {"sha384", RNC_DIGEST_SHA384},
+               {"sha3_256", RNC_DIGEST_SHA3_256},
+               {"sha3_384", RNC_DIGEST_SHA3_384}};
   size_t i, len;
   *prefix = 0;
   if (n == 16 || n == 20)
-    return "MD5";
+    return RNC_DIGEST_MD5;
   for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
     len = strlen(names[i].wire);
     if (n >= len + 2 && p[0] == '{' && p[len + 1] == '}' &&
         !memcmp(p + 1, names[i].wire, len)) {
       *prefix = len + 2;
-      return names[i].openssl;
+      return names[i].id;
     }
   }
-  return NULL;
+  return 0;
 }
 static rnc_result response(rnc_rpc *r, const uint8_t *message, size_t size,
                            uint8_t output[80], size_t *written) {
   size_t prefix, n = 64;
-  const char *digest = digest_name(message, size, &prefix);
+  int digest = digest_name(message, size, &prefix);
   if (!digest)
     return RNC_AUTH;
   if (prefix)
     memcpy(output, message, prefix);
-  if (!EVP_Q_mac(NULL, "HMAC", NULL, digest, NULL, r->key, r->key_size, message,
-                 size, output + prefix, 80 - prefix, &n))
+  if (!rnc_hmac_digest(digest, r->key, r->key_size, message, size, output + prefix,
+                       80 - prefix, &n))
     return RNC_CRYPTO;
   *written = prefix + n;
   return RNC_OK;
@@ -121,17 +121,16 @@ static rnc_result verify_response(rnc_rpc *r, const uint8_t *value,
                                   size_t size) {
   uint8_t expected[64];
   size_t prefix, n = 64;
-  const char *digest = digest_name(value, size, &prefix);
+  int digest = digest_name(value, size, &prefix);
   rnc_result status = RNC_AUTH;
   if (!digest)
     return RNC_AUTH;
-  if (!EVP_Q_mac(NULL, "HMAC", NULL, digest, NULL, r->key, r->key_size,
-                 r->challenge, sizeof(r->challenge), expected, sizeof(expected),
-                 &n))
+  if (!rnc_hmac_digest(digest, r->key, r->key_size, r->challenge,
+                       sizeof(r->challenge), expected, sizeof(expected), &n))
     return RNC_CRYPTO;
-  if (size - prefix == n && !CRYPTO_memcmp(expected, value + prefix, n))
+  if (size - prefix == n && !rnc_ct_memcmp(expected, value + prefix, n))
     status = RNC_OK;
-  OPENSSL_cleanse(expected, sizeof(expected));
+  rnc_cleanse(expected, sizeof(expected));
   return status;
 }
 static rnc_result challenge(rnc_rpc *r) {
@@ -146,7 +145,7 @@ static rnc_result challenge(rnc_rpc *r) {
     memcpy(r->challenge, fresh, 48);
     r->state = RPC_RESPONSE;
   }
-  OPENSSL_cleanse(fresh, sizeof(fresh));
+  rnc_cleanse(fresh, sizeof(fresh));
   return status;
 }
 static rnc_result process(rnc_rpc *r, const uint8_t *p, size_t n) {
@@ -165,7 +164,7 @@ static rnc_result process(rnc_rpc *r, const uint8_t *p, size_t n) {
       send_bytes(r, answer, written);
       r->state = RPC_WELCOME;
     }
-    OPENSSL_cleanse(answer, sizeof(answer));
+    rnc_cleanse(answer, sizeof(answer));
     return status;
   }
   if (r->state == RPC_RESPONSE) {
@@ -219,7 +218,7 @@ rnc_rpc *rnc_rpc_new(const void *key, size_t key_size, int server,
 void rnc_rpc_free(rnc_rpc *r) {
   if (r) {
     size_t size = sizeof(*r) + (RNC_RPC_EVENTS + 1u) * r->stride;
-    OPENSSL_cleanse(r, size);
+    rnc_cleanse(r, size);
     free(r);
   }
 }
@@ -308,7 +307,7 @@ rnc_result rnc_rpc_input(rnc_rpc *r, const uint8_t *data, size_t size,
     if (r->input_size < r->input_needed)
       break;
     status = process(r, input_buffer(r), r->input_size);
-    OPENSSL_cleanse(input_buffer(r), r->input_size);
+    rnc_cleanse(input_buffer(r), r->input_size);
     r->header_size = r->input_size = r->input_needed = 0;
     r->header_needed = 4;
     if (status != RNC_OK)
@@ -348,7 +347,7 @@ rnc_result rnc_rpc_poll(rnc_rpc *r, rnc_rpc_event *out) {
   out->size = e->size;
   if (e->size)
     memcpy(out->data, r->storage + r->head * r->stride, e->size);
-  OPENSSL_cleanse(r->storage + r->head * r->stride, r->stride);
+  rnc_cleanse(r->storage + r->head * r->stride, r->stride);
   memset(e, 0, sizeof(*e));
   r->head = (r->head + 1u) % RNC_RPC_EVENTS;
   r->count--;
