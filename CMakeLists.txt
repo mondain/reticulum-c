@@ -652,3 +652,14 @@ if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE
         endif()
     endif()
 endif()
+
+# The version is repeated in library.json, idf_component.yml (root and components) and
+# the fallback in mcu/app/rnc_mcu_app.h: a bump that misses one fails this test.
+if(BUILD_TESTING AND RNC_TOP_LEVEL AND RNC_PROFILE STREQUAL "")
+    find_program(RNC_SH_VERSION sh)
+    if(RNC_SH_VERSION)
+        add_test(NAME reticulum_version_consistency
+            COMMAND ${RNC_SH_VERSION} ${CMAKE_SOURCE_DIR}/tests/test_version.sh ${CMAKE_SOURCE_DIR})
+        set_tests_properties(reticulum_version_consistency PROPERTIES LABELS "version")
+    endif()
+endif()
