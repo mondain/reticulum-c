@@ -49,6 +49,7 @@ typedef struct group {
   char name[NAME_MAX_LEN];
   char path[PATH_MAX];
   perm_set perms[P_COUNT];
+  char access[1024]; /* the config's [access] statements for the group */
   repo repos[MAX_REPOS];
   size_t repo_count;
 } group;
@@ -390,8 +391,14 @@ static int load_config(const char *dir) {
     }
     load_group(pending[i].name, pending[i].path);
     for (k = 0; k < access_count; ++k)
-      if (!strcmp(access_lines[k].name, pending[i].name))
-        split_list(access_lines[k].value, access_statement);
+      if (!strcmp(access_lines[k].name, pending[i].name)) {
+        snprintf(cfg_group->access, sizeof(cfg_group->access), "%s", access_lines[k].value);
+        {
+          char copy[1024];
+          snprintf(copy, sizeof(copy), "%s", access_lines[k].value);
+          split_list(copy, access_statement);
+        }
+      }
   }
   return 1;
 }
@@ -883,6 +890,350 @@ done:
   return RNC_OK;
 }
 
+/* resolve_group_permission: the group's own lists only. */
+static int group_allowed(const uint8_t id[16], const group *g, int p) {
+  const perm_set *gp;
+  if (!g)
+    return 0;
+  gp = &g->perms[p];
+  if (gp->none) return 0;
+  if (gp->all) return 1;
+  if (set_has(gp, id)) return 1;
+  if (set_has(&g->perms[P_ADMIN], id)) return 1;
+  return 0;
+}
+static void reload_group(group *g) {
+  char path[PATH_MAX + 16], copy[1024];
+  size_t i;
+  for (i = 0; i < P_COUNT; ++i)
+    memset(&g->perms[i], 0, sizeof(g->perms[i]));
+  snprintf(path, sizeof(path), "%s.allowed", g->path);
+  load_allowed(path, g->perms);
+  cfg_group = g;
+  snprintf(copy, sizeof(copy), "%s", g->access);
+  split_list(copy, access_statement);
+}
+static void reload_repo(repo *r) {
+  char path[PATH_MAX + 16];
+  size_t i;
+  for (i = 0; i < P_COUNT; ++i)
+    memset(&r->perms[i], 0, sizeof(r->perms[i]));
+  snprintf(path, sizeof(path), "%s.allowed", r->path);
+  load_allowed(path, r->perms);
+}
+static int write_atomic(const char *path, const char *text, size_t n) {
+  char tmp[PATH_MAX + 16];
+  FILE *f;
+  int ok;
+  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+  f = fopen(tmp, "w");
+  if (!f)
+    return 0;
+  ok = fwrite(text, 1, n, f) == n;
+  ok = fclose(f) == 0 && ok;
+  if (!ok || rename(tmp, path)) {
+    unlink(tmp);
+    return 0;
+  }
+  return 1;
+}
+static void hex_string(const uint8_t id[16], char out_hex[33]) {
+  size_t i;
+  for (i = 0; i < 16; ++i)
+    snprintf(out_hex + 2 * i, 3, "%02x", id[i]);
+}
+static rnc_result handle_create(void *context, const char *path, const uint8_t *request_data,
+                                size_t size, const uint8_t *identity, uint8_t *out, size_t cap,
+                                size_t *written) {
+  val *pool = malloc(POOL_NODES * sizeof(val)), root;
+  const val *repository;
+  char text[NAME_MAX_LEN * 2 + 2], *slash, full[PATH_MAX], allowed_path[PATH_MAX + 16];
+  group *g;
+  const char *name;
+  int read_access, create_access;
+  (void)context; (void)path;
+  if (!pool)
+    return RNC_NO_SPACE;
+  if (!identity) {
+    reply(out, cap, written, GIT_RES_DISALLOWED, "Not identified");
+    goto done;
+  }
+  if (!parse_request(request_data, size, pool, &root)) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request");
+    goto done;
+  }
+  repository = map_get_int(&root, GIT_IDX_REPOSITORY);
+  if (!repository) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "No repository specified");
+    goto done;
+  }
+  if (!val_copy(repository, text, sizeof(text)) || !(slash = strchr(text, '/')) ||
+      strchr(slash + 1, '/') || strlen(text) > 256 || strlen(slash + 1) > 256) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request");
+    goto done;
+  }
+  *slash = 0;
+  name = slash + 1;
+  if (!*text || !*name) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request");
+    goto done;
+  }
+  g = (group *)find_group(text);
+  if (!g) {
+    reply(out, cap, written, GIT_RES_NOT_FOUND, "Not found");
+    goto done;
+  }
+  read_access = group_allowed(identity, g, P_READ);
+  create_access = group_allowed(identity, g, P_CREATE);
+  if (!create_access) {
+    reply(out, cap, written, read_access ? GIT_RES_DISALLOWED : GIT_RES_NOT_FOUND,
+          read_access ? "Not allowed" : "Not found");
+    goto done;
+  }
+  /* stricter than the reference: no names that start with a dot (".", ".."
+   * and hidden entries) */
+  if (name[0] == '.') {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request");
+    goto done;
+  }
+  if (snprintf(full, sizeof(full), "%s/%s", g->path, name) >= (int)sizeof(full)) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request");
+    goto done;
+  }
+  {
+    struct stat st;
+    const repo *existing = find_repo(g, name);
+    if (existing || !stat(full, &st)) {
+      if (existing && allowed(identity, g, existing, P_READ))
+        reply(out, cap, written, GIT_RES_DISALLOWED, "Repository already exists");
+      else
+        reply(out, cap, written, GIT_RES_NOT_FOUND, "Not found");
+      goto done;
+    }
+  }
+  if (g->repo_count >= MAX_REPOS) {
+    reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Failed to register repository");
+    goto done;
+  }
+  if (mkdir(full, 0755)) {
+    reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Remote error");
+    goto done;
+  }
+  {
+    char *init[] = {"git", "init", "--bare", NULL};
+    char *rm[] = {"rm", "-rf", full, NULL};
+    char hash[33], line[64];
+    repo *r;
+    if (rngit_run(full, init, NULL, 0, NULL).status != 0) {
+      (void)rngit_run(NULL, rm, NULL, 0, NULL);
+      reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Could not initialize repository");
+      goto done;
+    }
+    hex_string(identity, hash);
+    snprintf(allowed_path, sizeof(allowed_path), "%s.allowed", full);
+    snprintf(line, sizeof(line), "adm:%s", hash);
+    if (!write_atomic(allowed_path, line, strlen(line))) {
+      (void)rngit_run(NULL, rm, NULL, 0, NULL);
+      reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Could not initialize repository");
+      goto done;
+    }
+    r = &g->repos[g->repo_count++];
+    memset(r, 0, sizeof(*r));
+    snprintf(r->name, sizeof(r->name), "%s", name);
+    snprintf(r->path, sizeof(r->path), "%s", full);
+    reload_repo(r);
+    log_line("Created repository %s/%s", g->name, name);
+    reply(out, cap, written, GIT_RES_OK, "");
+  }
+done:
+  free(pool);
+  return RNC_OK;
+}
+/* Permission statements the reference accepts: "perm:target" per line, blank
+ * and comment lines ignored. Returns 0 and the offending line on failure. */
+static int valid_statements(const char *content, int *bad_line, char *bad, size_t bad_cap) {
+  char *copy = strdup(content), *line;
+  perm_set scratch[P_COUNT];
+  int n = 0, ok = 1;
+  if (!copy)
+    return 0;
+  /* strtok would skip empty lines and lose the numbering; walk by hand */
+  line = copy;
+  while (ok && line) {
+    char *nl = strchr(line, '\n'), *t;
+    if (nl)
+      *nl = 0;
+    ++n;
+    t = trim(line);
+    if (*t && *t != '#') {
+      size_t before;
+      memset(scratch, 0, sizeof(scratch));
+      apply_statement(t, scratch);
+      before = 0;
+      {
+        size_t i;
+        for (i = 0; i < P_COUNT; ++i)
+          before += scratch[i].entries;
+      }
+      if (!before) {
+        ok = 0;
+        *bad_line = n;
+        snprintf(bad, bad_cap, "%s", t);
+      }
+    }
+    line = nl ? nl + 1 : NULL;
+  }
+  free(copy);
+  return ok;
+}
+static void perms_reply_content(uint8_t *out, size_t cap, size_t *written, const char *path) {
+  char *text = malloc(65536);
+  size_t n = 0;
+  mp_out o = {out, cap, 0, 0};
+  FILE *f = fopen(path, "r");
+  if (!text) {
+    reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Error getting permissions");
+    return;
+  }
+  if (f) {
+    n = fread(text, 1, 65535, f);
+    fclose(f);
+  }
+  text[n] = 0;
+  /* the reference packs {"content": text} after a status byte, all as one bin */
+  {
+    uint8_t body[65536 + 32];
+    mp_out b = {body, sizeof(body), 0, 0};
+    mp_byte(&b, GIT_RES_OK);
+    mp_map(&b, 1);
+    mp_cstr(&b, "content");
+    mp_str(&b, text, n);
+    mp_bin(&o, body, b.n);
+    *written = b.failed || o.failed ? 0 : o.n;
+  }
+  free(text);
+}
+static rnc_result handle_perms(void *context, const char *path, const uint8_t *request_data,
+                               size_t size, const uint8_t *identity, uint8_t *out, size_t cap,
+                               size_t *written) {
+  val *pool = malloc(POOL_NODES * sizeof(val)), root;
+  char operation[16], step[16], target[NAME_MAX_LEN * 2 + 2], allowed_path[PATH_MAX + 16];
+  const val *v;
+  group *g = NULL;
+  repo *r = NULL;
+  int is_group;
+  (void)context; (void)path;
+  if (!pool)
+    return RNC_NO_SPACE;
+  if (!identity) {
+    reply(out, cap, written, GIT_RES_DISALLOWED, "Not identified");
+    goto done;
+  }
+  if (!parse_request(request_data, size, pool, &root) ||
+      !val_copy(map_get(&root, "operation"), operation, sizeof(operation))) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request");
+    goto done;
+  }
+  is_group = !strcmp(operation, "gperms");
+  if (!is_group && strcmp(operation, "rperms")) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request");
+    goto done;
+  }
+  v = map_get_int(&root, is_group ? GIT_IDX_GROUP : GIT_IDX_REPOSITORY);
+  if (!v) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, is_group ? "No group specified" : "No repository specified");
+    goto done;
+  }
+  if (val_copy(v, target, sizeof(target))) {
+    if (is_group) {
+      if (!strchr(target, '/') && strlen(target) <= 256)
+        g = (group *)find_group(target);
+    } else {
+      char *slash = strchr(target, '/');
+      if (slash && !strchr(slash + 1, '/') && strlen(target) <= 256 && strlen(slash + 1) <= 256) {
+        *slash = 0;
+        g = (group *)find_group(target);
+        r = (repo *)find_repo(g, slash + 1);
+      }
+    }
+  }
+  if (is_group ? !g : !r) {
+    reply(out, cap, written, GIT_RES_NOT_FOUND, "Not found");
+    goto done;
+  }
+  /* who may ask: group administration, or administration of the repository */
+  {
+    int read_access = is_group ? group_allowed(identity, g, P_READ) : allowed(identity, g, r, P_READ);
+    int admin_access = is_group ? group_allowed(identity, g, P_ADMIN) : allowed(identity, g, r, P_ADMIN);
+    if (!is_group && !admin_access) {
+      reply(out, cap, written, read_access ? GIT_RES_DISALLOWED : GIT_RES_NOT_FOUND,
+            read_access ? "Not allowed" : "Not found");
+      goto done;
+    }
+    /* the reference's dispatcher asks again, now needing read as well: an
+     * administrator whose own read is set to none is locked out */
+    if (!is_group && !read_access) {
+      reply(out, cap, written, GIT_RES_NOT_FOUND, "Not found");
+      goto done;
+    }
+    if (is_group && !read_access) {
+      reply(out, cap, written, GIT_RES_NOT_FOUND, "Not found");
+      goto done;
+    }
+    if (is_group && !admin_access) {
+      reply(out, cap, written, GIT_RES_DISALLOWED, "Not allowed");
+      goto done;
+    }
+  }
+  if (!val_copy(map_get(&root, "step"), step, sizeof(step))) {
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request");
+    goto done;
+  }
+  snprintf(allowed_path, sizeof(allowed_path), "%s.allowed", is_group ? g->path : r->path);
+  if (!strcmp(step, "get")) {
+    perms_reply_content(out, cap, written, allowed_path);
+  } else if (!strcmp(step, "set")) {
+    const val *content = map_get(&root, "content");
+    char *text = NULL;
+    char bad[200];
+    int bad_line = 0;
+    /* the reference's repository set also needs administration of the group */
+    if (!is_group && (!group_allowed(identity, g, P_READ) || !group_allowed(identity, g, P_ADMIN))) {
+      reply(out, cap, written, group_allowed(identity, g, P_READ) ? GIT_RES_DISALLOWED : GIT_RES_NOT_FOUND,
+            group_allowed(identity, g, P_READ) ? "Not allowed" : "Not found");
+      goto done;
+    }
+    text = calloc(1, (content && val_is_text(content) ? content->n : 0) + 1);
+    if (!text) {
+      reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Error setting permissions");
+      goto done;
+    }
+    if (content && val_is_text(content))
+      memcpy(text, content->p, content->n);
+    if (!valid_statements(text, &bad_line, bad, sizeof(bad))) {
+      char msg[300];
+      snprintf(msg, sizeof(msg), "Invalid permission \"%s\" on line %d", bad, bad_line);
+      reply(out, cap, written, GIT_RES_INVALID_REQ, msg);
+    } else if (access(allowed_path, X_OK) == 0) {
+      reply(out, cap, written, GIT_RES_DISALLOWED,
+            "Executable permission resolvers can only be modified node-side");
+    } else if (!write_atomic(allowed_path, text, strlen(text))) {
+      reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Error setting permissions");
+    } else {
+      if (is_group)
+        reload_group(g);
+      else
+        reload_repo(r);
+      reply(out, cap, written, GIT_RES_OK, "");
+    }
+    free(text);
+  } else
+    reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid step");
+done:
+  free(pool);
+  return RNC_OK;
+}
+
 /* ---- main ---------------------------------------------------------------- */
 static void usage(void) {
   fputs("usage: reticulum-c-git --connect HOST:PORT [--config DIR] [--identity FILE] [--print-identity]\n",
@@ -959,7 +1310,11 @@ int main(int argc, char **argv) {
       rnc_responder_register(G.net.responder, destination, GIT_PATH_PUSH, RNC_SERVICE_ALLOW_ALL,
                              NULL, 0, handle_push, NULL) != RNC_OK ||
       rnc_responder_register(G.net.responder, destination, GIT_PATH_DELETE, RNC_SERVICE_ALLOW_ALL,
-                             NULL, 0, handle_delete, NULL) != RNC_OK) {
+                             NULL, 0, handle_delete, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_CREATE, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_create, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_PERMS, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_perms, NULL) != RNC_OK) {
     fprintf(stderr, "Could not set up the repository destination\n");
     return 1;
   }

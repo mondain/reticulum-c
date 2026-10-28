@@ -32,6 +32,8 @@
 #define GIT_PATH_FETCH "/git/fetch"
 #define GIT_PATH_PUSH "/git/push"
 #define GIT_PATH_DELETE "/git/delete"
+#define GIT_PATH_CREATE "/git/create"
+#define GIT_PATH_PERMS "/mgmt/perms"
 #define GIT_RES_OK 0x00
 #define GIT_RES_DISALLOWED 0x01
 #define GIT_RES_INVALID_REQ 0x02
@@ -39,6 +41,7 @@
 #define GIT_RES_REMOTE_FAIL 0xFF
 #define GIT_IDX_REPOSITORY 0
 #define GIT_IDX_RESULT_CODE 1
+#define GIT_IDX_GROUP 2
 
 static volatile sig_atomic_t rngit_stopping;
 static inline void rngit_on_signal(int sig) {
@@ -393,4 +396,63 @@ static inline void rngit_close_node(rngit_node *a) {
   if (a->has_id)
     rnc_identity_clear(&a->id);
 }
+/* ---- a one-request client ------------------------------------------------ */
+typedef struct rngit_client {
+  rngit_node net;
+  uint8_t destination[16];
+  size_t max_value;
+} rngit_client;
+typedef struct rngit_response {
+  uint8_t *data;
+  size_t size;
+  uint8_t meta[RNC_RESPONDER_METADATA_MAX];
+  size_t meta_size;
+} rngit_response;
+/* One request on its own link; 0 on failure or timeout. The caller frees
+ * out->data. */
+static inline int rngit_request(rngit_client *c, const char *path,
+                                const uint8_t *value, size_t value_size,
+                                uint64_t timeout_ms, rngit_response *out) {
+  rnc_requester_result r;
+  uint64_t started = rngit_monotonic_ms();
+  memset(out, 0, sizeof(*out));
+  out->data = malloc(c->max_value);
+  if (!out->data ||
+      rnc_requester_start(c->net.requester, c->destination, &c->net.id, path,
+                          value, value_size, 1, timeout_ms,
+                          (uint64_t)time(NULL), rngit_monotonic_ms()) != RNC_OK)
+    return 0;
+  while (!rngit_stopping && rngit_monotonic_ms() - started < timeout_ms + 5000u) {
+    rnc_result res;
+    if (!rngit_pump(&c->net))
+      return 0;
+    res = rnc_requester_poll_file(c->net.requester, &r, out->data, c->max_value,
+                                  out->meta, sizeof(out->meta));
+    if (res == RNC_OK) {
+      uint64_t t = rngit_monotonic_ms();
+      out->size = r.size;
+      out->meta_size = r.metadata_size;
+      /* let the link close leave the socket */
+      while (rngit_monotonic_ms() - t < 150u && rngit_pump(&c->net)) {
+      }
+      return r.status == RNC_REQUESTER_DONE;
+    }
+    if (res != RNC_AGAIN)
+      return 0;
+  }
+  return 0;
+}
+/* status byte and message of a plain reply, -1 if it is not one */
+static inline int rngit_plain(const rngit_response *r, const uint8_t **text,
+                              size_t *text_size) {
+  val pool[4];
+  reader rd = {r->data, r->data + r->size, pool, 0, 4};
+  val v;
+  if (r->meta_size || !parse(&rd, &v, 0) || v.type != V_BIN || !v.n)
+    return -1;
+  *text = v.p + 1;
+  *text_size = v.n - 1;
+  return v.p[0];
+}
+
 #endif
