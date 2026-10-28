@@ -52,8 +52,9 @@ static void setup(void) {
   sh("git init -q --bare -b main %s/g/open.git && git init -q --bare -b main %s/g/closed.git", root, root);
   sh("git init -q --bare -b main %s/g/none.git && git init -q -b main %s/seed", root, root);
   sh("cd %s/seed && echo x > f && git add f && git -c user.name=t -c user.email=t@t commit -q -m one && "
-     "git push -q %s/g/open.git main && git push -q %s/g/closed.git main",
-     root, root, root);
+     "git push -q %s/g/open.git main && git push -q %s/g/closed.git main && "
+     "git tag v1 && git push -q %s/g/open.git v1",
+     root, root, root, root);
   identities();
   g = &G.groups[G.group_count++];
   snprintf(g->name, sizeof(g->name), "g");
@@ -62,6 +63,12 @@ static void setup(void) {
   hex(alice, h);
   snprintf(line, sizeof(line), "w:%s", h);
   apply_statement(line, g->perms);
+  hex(alice, h);
+  snprintf(line, sizeof(line), "rel:%s", h);
+  apply_statement(line, g->perms);
+  snprintf(line, sizeof(line), "i:%s", h);
+  apply_statement(line, g->perms);
+  apply_statement("p:all", g->perms);
   hex(bob, h);
   snprintf(line, sizeof(line), "c:%s", h);
   apply_statement(line, g->perms);
@@ -72,7 +79,7 @@ static void setup(void) {
     char a[33], b[33];
     hex(alice, a);
     hex(bob, b);
-    snprintf(g->access, sizeof(g->access), "r:all, w:%s, c:%s, adm:%s", a, b, h);
+    snprintf(g->access, sizeof(g->access), "r:all, w:%s, rel:%s, i:%s, p:all, c:%s, adm:%s", a, a, a, b, h);
   }
   {
     const char *names[] = {"open.git", "closed.git", "none.git"};
@@ -283,6 +290,17 @@ static void hostile_refs(void) {
   }
 }
 
+
+/* The value after the status byte of a reply (a packed map or list). */
+static val reply_pool[512], reply_value_root;
+static const val *reply_value(void) {
+  reader rd = {out, out + out_size, reply_pool, 0, 512}, in;
+  val bin;
+  CHECK(parse(&rd, &bin, 0) && bin.type == V_BIN && bin.n > 1 && bin.p[0] == 0);
+  in = (reader){bin.p + 1, bin.p + bin.n, reply_pool + 256, 0, 256};
+  CHECK(parse(&in, &reply_value_root, 0));
+  return &reply_value_root;
+}
 static void make(const char *name, const uint8_t *who) {
   mp_out o = {malloc(256), 256, 0, 0};
   char repository[128];
@@ -425,6 +443,303 @@ static void permissions_management(void) {
   call(handle_perms, &o, dave);
   CHECK(status() == GIT_RES_INVALID_REQ);
 }
+
+typedef rnc_result (*filehandler)(void *, const char *, const uint8_t *, size_t, const uint8_t *,
+                                  uint8_t *, size_t, size_t *, rnc_responder_file *);
+static uint8_t file_data[1 << 20], file_meta[256];
+static rnc_responder_file file_out = {file_data, sizeof(file_data), 0, file_meta, sizeof(file_meta), 0};
+static void rel_call(mp_out *o, const uint8_t *who) {
+  CHECK(!o->failed);
+  out_size = 0;
+  file_out.data_size = file_out.metadata_size = 0;
+  CHECK(handle_release(NULL, "", o->p, o->n, who, out, sizeof(out), &out_size, &file_out) == RNC_OK);
+  free(o->p);
+}
+static void rel_req(mp_out *o, const char *op, const char *step, const char *tag, const char *extra_key,
+                    const char *extra_value) {
+  size_t pairs = 2 + (step != NULL) + (tag != NULL) + (extra_key != NULL);
+  *o = (mp_out){malloc(1 << 16), 1 << 16, 0, 0};
+  mp_map(o, pairs);
+  mp_uint(o, 0); mp_cstr(o, "g/open.git");
+  mp_cstr(o, "operation"); mp_cstr(o, op);
+  if (step) { mp_cstr(o, "step"); mp_cstr(o, step); }
+  if (tag) { mp_cstr(o, "tag"); mp_cstr(o, tag); }
+  if (extra_key) { mp_cstr(o, extra_key); mp_cstr(o, extra_value); }
+}
+static void releases(void) {
+  mp_out o;
+  /* readers can list (nothing yet) but not create */
+  rel_req(&o, "list", NULL, NULL, NULL, NULL);
+  rel_call(&o, carol);
+  CHECK(status() == GIT_RES_OK);
+  rel_req(&o, "create", "init", "v1", NULL, NULL);
+  rel_call(&o, carol);
+  CHECK(status() == GIT_RES_DISALLOWED);
+  rel_req(&o, "create", "init", "nosuch", NULL, NULL);
+  rel_call(&o, alice);
+  CHECK(status() == GIT_RES_INVALID_REQ && strstr(message(), "does not exist"));
+  rel_req(&o, "create", "init", "..", NULL, NULL);
+  rel_call(&o, alice);
+  CHECK(status() == GIT_RES_INVALID_REQ);
+  rel_req(&o, "create", "init", "v1", "notes", "Fixed things\nin detail");
+  rel_call(&o, alice);
+  CHECK(status() == GIT_RES_OK);
+  rel_req(&o, "create", "init", "v1", NULL, NULL);
+  rel_call(&o, alice);
+  CHECK(status() == GIT_RES_DISALLOWED && !strcmp(message(), "Release already exists"));
+  /* an artifact needs a draft release; the data may be binary */
+  {
+    uint8_t blob[300];
+    size_t i;
+    mp_out a = {malloc(1 << 12), 1 << 12, 0, 0};
+    for (i = 0; i < sizeof(blob); ++i)
+      blob[i] = (uint8_t)(i * 7);
+    mp_map(&a, 5);
+    mp_uint(&a, 0); mp_cstr(&a, "g/open.git");
+    mp_cstr(&a, "operation"); mp_cstr(&a, "create");
+    mp_cstr(&a, "step"); mp_cstr(&a, "artifact");
+    mp_cstr(&a, "tag"); mp_cstr(&a, "v1");
+    mp_cstr(&a, "artifact_name"); mp_cstr(&a, "../evil");
+    rel_call(&a, alice);
+    CHECK(status() == GIT_RES_INVALID_REQ); /* the name would leave the artifacts directory (and has no data) */
+    a = (mp_out){malloc(1 << 12), 1 << 12, 0, 0};
+    mp_map(&a, 6);
+    mp_uint(&a, 0); mp_cstr(&a, "g/open.git");
+    mp_cstr(&a, "operation"); mp_cstr(&a, "create");
+    mp_cstr(&a, "step"); mp_cstr(&a, "artifact");
+    mp_cstr(&a, "tag"); mp_cstr(&a, "v1");
+    mp_cstr(&a, "artifact_name"); mp_cstr(&a, "tool.bin");
+    mp_cstr(&a, "artifact_data"); mp_bin(&a, blob, sizeof(blob));
+    rel_call(&a, alice);
+    CHECK(status() == GIT_RES_OK);
+  }
+  rel_req(&o, "create", "finalize", "v1", NULL, NULL);
+  rel_call(&o, alice);
+  CHECK(status() == GIT_RES_OK);
+  rel_req(&o, "create", "finalize", "v1", NULL, NULL);
+  rel_call(&o, alice);
+  CHECK(status() == GIT_RES_DISALLOWED && strstr(message(), "finalized"));
+  /* list and view show the published release as latest */
+  rel_req(&o, "list", NULL, NULL, NULL, NULL);
+  rel_call(&o, carol);
+  CHECK(status() == GIT_RES_OK);
+  {
+    val pool[64];
+    reader rd = {out, out + out_size, pool, 0, 64};
+    val bin, listing;
+    const val *rels, *latest;
+    CHECK(parse(&rd, &bin, 0) && bin.type == V_BIN);
+    {
+      reader in = {bin.p + 1, bin.p + bin.n, pool, 0, 64};
+      CHECK(parse(&in, &listing, 0) && listing.type == V_MAP);
+    }
+    rels = map_get(&listing, "releases");
+    latest = map_get(&listing, "latest");
+    CHECK(rels && rels->type == V_ARR && rels->n == 1);
+    CHECK(latest && latest->type == V_STR && latest->n == 2 && !memcmp(latest->p, "v1", 2));
+    CHECK(map_get(&rels->kids[0], "artifacts") && as_uint(map_get(&rels->kids[0], "artifacts")) == 1);
+    CHECK(map_get(&rels->kids[0], "preview") && !memcmp(map_get(&rels->kids[0], "preview")->p, "Fixed things\nin detail", 22));
+  }
+  rel_req(&o, "view", NULL, "latest", NULL, NULL);
+  rel_call(&o, carol);
+  CHECK(status() == GIT_RES_OK);
+  {
+    const val *v = reply_value(), *arts = map_get(v, "artifacts"), *notes = map_get(v, "notes");
+    CHECK(arts && arts->type == V_ARR && arts->n == 1 && as_uint(map_get(&arts->kids[0], "size")) == 300);
+    CHECK(notes && notes->n == 22 && !memcmp(notes->p, "Fixed things\nin detail", 22));
+    CHECK(map_get(v, "status") && !memcmp(map_get(v, "status")->p, "published", 9));
+  }
+  /* fetch answers with the file and its name as metadata */
+  {
+    mp_out f = {malloc(1 << 12), 1 << 12, 0, 0};
+    mp_map(&f, 4);
+    mp_uint(&f, 0); mp_cstr(&f, "g/open.git");
+    mp_cstr(&f, "operation"); mp_cstr(&f, "fetch");
+    mp_cstr(&f, "tag"); mp_cstr(&f, "latest");
+    mp_cstr(&f, "artifact"); mp_cstr(&f, "tool.bin");
+    rel_call(&f, carol);
+    CHECK(file_out.data_size == 300 && file_out.metadata_size > 0);
+    CHECK(file_data[1] == 7 && file_data[299] == (uint8_t)(299 * 7));
+    f = (mp_out){malloc(1 << 12), 1 << 12, 0, 0};
+    mp_map(&f, 4);
+    mp_uint(&f, 0); mp_cstr(&f, "g/open.git");
+    mp_cstr(&f, "operation"); mp_cstr(&f, "fetch");
+    mp_cstr(&f, "tag"); mp_cstr(&f, "v1");
+    mp_cstr(&f, "artifact"); mp_cstr(&f, "../../v1/META");
+    rel_call(&f, carol);
+    CHECK(status() == GIT_RES_INVALID_REQ && !file_out.data_size);
+  }
+  /* the reference would remove the releases directory's parent here */
+  rel_req(&o, "delete", NULL, "..", NULL, NULL);
+  rel_call(&o, alice);
+  CHECK(status() == GIT_RES_INVALID_REQ && exists("open.git/HEAD"));
+  rel_req(&o, "delete", NULL, "v1", NULL, NULL);
+  rel_call(&o, carol);
+  CHECK(status() == GIT_RES_DISALLOWED && exists("open.git.releases/v1"));
+  rel_req(&o, "delete", NULL, "v1", NULL, NULL);
+  rel_call(&o, alice);
+  CHECK(status() == GIT_RES_OK && !exists("open.git.releases/v1"));
+}
+
+static rnc_identity wa, wb, wc, wd;
+static void grant(const rnc_identity *id, const char *perm) {
+  char h[33], line[64];
+  hex(id->hash, h);
+  snprintf(line, sizeof(line), "%s:%s", perm, h);
+  apply_statement(line, G.groups[0].perms);
+}
+static void work_req(mp_out *o, const char *op, long doc_id, const char *title, const char *content,
+                     const rnc_identity *signer, const char *scope, const char *step, const char *bad_sig) {
+  uint8_t sig[64];
+  size_t pairs = 2 + (doc_id > 0) + (title != NULL) + (content != NULL) + (signer != NULL || bad_sig != NULL) +
+                 (scope != NULL) + (step != NULL);
+  *o = (mp_out){malloc(1 << 16), 1 << 16, 0, 0};
+  mp_map(o, pairs);
+  mp_uint(o, 0); mp_cstr(o, "g/open.git");
+  mp_cstr(o, "operation"); mp_cstr(o, op);
+  if (doc_id > 0) { mp_cstr(o, "doc_id"); mp_uint(o, (uint64_t)doc_id); }
+  if (title) { mp_cstr(o, "title"); mp_cstr(o, title); }
+  if (content) { mp_cstr(o, "content"); mp_cstr(o, content); }
+  if (signer) {
+    CHECK(rnc_identity_sign(signer, content ? content : "", content ? strlen(content) : 0, sig) == RNC_OK);
+    mp_cstr(o, "signature"); mp_bin(o, sig, 64);
+  } else if (bad_sig) {
+    memset(sig, 0x55, 64);
+    mp_cstr(o, "signature"); mp_bin(o, sig, 64);
+  }
+  if (scope) { mp_cstr(o, "scope"); mp_cstr(o, scope); }
+  if (step) { mp_cstr(o, "step"); mp_cstr(o, step); }
+}
+static void work_call(mp_out *o, const rnc_identity *who) {
+  CHECK(!o->failed);
+  test_identity = who;
+  out_size = 0;
+  CHECK(handle_work(NULL, "", o->p, o->n, who->hash, out, sizeof(out), &out_size) == RNC_OK);
+  test_identity = NULL;
+  free(o->p);
+}
+static void work_documents(void) {
+  mp_out o;
+  char h[33], text[300];
+  const val *v;
+  CHECK(rnc_identity_generate(&wa, rngit_random, NULL) == RNC_OK);
+  CHECK(rnc_identity_generate(&wb, rngit_random, NULL) == RNC_OK);
+  CHECK(rnc_identity_generate(&wc, rngit_random, NULL) == RNC_OK);
+  CHECK(rnc_identity_generate(&wd, rngit_random, NULL) == RNC_OK);
+  grant(&wa, "w"); grant(&wa, "i");
+  grant(&wb, "i");
+  grant(&wd, "adm");
+  /* a signed document by a writer who may interact */
+  work_req(&o, "create", 0, "Bug one", "It breaks", &wa, NULL, NULL, NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_OK);
+  v = reply_value();
+  CHECK(as_uint(map_get(v, "id")) == 1 && map_get(v, "scope") && !memcmp(map_get(v, "scope")->p, "active", 6));
+  work_req(&o, "create", 0, "Bug two", "x", NULL, NULL, NULL, "bad");
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_INVALID_REQ && !strcmp(message(), "Invalid signature"));
+  work_req(&o, "create", 0, "Bug two", "x", NULL, NULL, NULL, NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_INVALID_REQ && !strcmp(message(), "No signature provided"));
+  work_req(&o, "create", 0, "Bug three", "x", &wc, NULL, NULL, NULL);
+  work_call(&o, &wc); /* a reader cannot create */
+  CHECK(status() == GIT_RES_DISALLOWED);
+  work_req(&o, "create", 0, "", "content", &wa, NULL, NULL, NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_INVALID_REQ && !strcmp(message(), "Title is required"));
+  /* list and view */
+  work_req(&o, "list", 0, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wc);
+  CHECK(status() == GIT_RES_OK);
+  v = reply_value();
+  CHECK(map_get(v, "active")->n == 1 && map_get(v, "completed")->n == 0);
+  CHECK(!memcmp(map_get(&map_get(v, "active")->kids[0], "title")->p, "Bug one", 7));
+  work_req(&o, "view", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wc);
+  CHECK(status() == GIT_RES_OK);
+  v = reply_value();
+  hex(wa.hash, h);
+  CHECK(!memcmp(map_get(v, "content")->p, "It breaks", 9));
+  CHECK(!memcmp(map_get(map_get(v, "meta"), "author")->p, h, 32));
+  CHECK(map_get(map_get(v, "meta"), "signature")->type == V_BIN && map_get(map_get(v, "meta"), "signature")->n == 64);
+  CHECK(map_get(map_get(v, "meta"), "identity")->n == 64);
+  /* only the author edits, with a signature over the content as sent */
+  work_req(&o, "edit", 1, NULL, "Now it fails twice", &wb, NULL, NULL, NULL);
+  work_call(&o, &wb);
+  CHECK(status() == GIT_RES_DISALLOWED); /* wb has no write */
+  work_req(&o, "edit", 1, NULL, "Now it fails twice", &wa, NULL, NULL, NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_OK);
+  work_req(&o, "view", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wc);
+  v = reply_value();
+  CHECK(!memcmp(map_get(v, "content")->p, "Now it fails twice", 18) && !memcmp(map_get(map_get(v, "meta"), "title")->p, "Bug one", 7));
+  /* comments need to interact */
+  work_req(&o, "comment", 1, NULL, "me too", NULL, NULL, NULL, NULL);
+  work_call(&o, &wb);
+  CHECK(status() == GIT_RES_OK && as_uint(map_get(reply_value(), "id")) == 1);
+  work_req(&o, "comment", 1, NULL, "me three", NULL, NULL, NULL, NULL);
+  work_call(&o, &wc);
+  CHECK(status() == GIT_RES_DISALLOWED);
+  work_req(&o, "view", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wc);
+  v = reply_value();
+  CHECK(map_get(v, "comments")->n == 1 && !memcmp(map_get(&map_get(v, "comments")->kids[0], "content")->p, "me too", 6));
+  /* anyone with propose may propose; the proposer owns it */
+  work_req(&o, "propose", 0, "An idea", "Do the thing", &wc, NULL, NULL, NULL);
+  work_call(&o, &wc);
+  CHECK(status() == GIT_RES_OK && as_uint(map_get(reply_value(), "id")) == 2);
+  file_text("open.git.work/2.allowed", text, sizeof(text));
+  hex(wc.hash, h);
+  CHECK(strstr(text, h) && strstr(text, "i:") && strstr(text, "w:"));
+  /* completing and reactivating move the document between scopes */
+  work_req(&o, "complete", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wb);
+  CHECK(status() == GIT_RES_DISALLOWED); /* interact but no write: no manage rights */
+  work_req(&o, "complete", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_OK && !memcmp(map_get(reply_value(), "scope")->p, "completed", 9));
+  work_req(&o, "list", 0, NULL, NULL, NULL, "all", NULL, NULL);
+  work_call(&o, &wc);
+  v = reply_value();
+  CHECK(map_get(v, "active")->n == 0 && map_get(v, "completed")->n == 1 && map_get(v, "proposed")->n == 1);
+  work_req(&o, "activate", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_OK && !memcmp(map_get(reply_value(), "scope")->p, "active", 6));
+  /* document permissions: administrators only */
+  work_req(&o, "perms", 2, NULL, NULL, NULL, NULL, "get", NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_DISALLOWED);
+  work_req(&o, "perms", 2, NULL, "r:none\n", NULL, NULL, "set", NULL);
+  work_call(&o, &wd);
+  CHECK(status() == GIT_RES_OK);
+  work_req(&o, "view", 2, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wb); /* the document now hides itself from readers */
+  CHECK(status() == GIT_RES_NOT_FOUND);
+  work_req(&o, "perms", 2, NULL, "garbage\n", NULL, NULL, "set", NULL);
+  work_call(&o, &wd);
+  CHECK(status() == GIT_RES_INVALID_REQ);
+  /* deleting: the author or an administrator */
+  work_req(&o, "delete", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wb);
+  CHECK(status() == GIT_RES_DISALLOWED); /* no manage right */
+  work_req(&o, "delete", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_OK && !exists("open.git.work/active/1"));
+  work_req(&o, "view", 1, NULL, NULL, NULL, NULL, NULL, NULL);
+  work_call(&o, &wa);
+  CHECK(status() == GIT_RES_NOT_FOUND);
+  /* a path-like document id is not a document */
+  {
+    mp_out w = {malloc(1 << 10), 1 << 10, 0, 0};
+    mp_map(&w, 3);
+    mp_uint(&w, 0); mp_cstr(&w, "g/open.git");
+    mp_cstr(&w, "operation"); mp_cstr(&w, "view");
+    mp_cstr(&w, "doc_id"); mp_cstr(&w, "../1");
+    work_call(&w, &wa);
+    CHECK(status() == GIT_RES_INVALID_REQ);
+  }
+}
 int main(void) {
   setup();
   permissions();
@@ -434,6 +749,8 @@ int main(void) {
   hostile_refs();
   creating();
   permissions_management();
+  releases();
+  work_documents();
   cleanup();
   return 0;
 }

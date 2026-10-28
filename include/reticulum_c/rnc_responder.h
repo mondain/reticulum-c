@@ -7,7 +7,7 @@ extern "C" {
 #endif
 #define RNC_RESPONDER_LINKS 8u
 #define RNC_RESPONDER_DESTINATIONS 4u
-#define RNC_RESPONDER_HANDLERS 8u
+#define RNC_RESPONDER_HANDLERS 16u
 
 /* Link-terminating destinations for a node: accepts link requests addressed to
  * registered destinations, runs one request/response service per link and calls

@@ -43,6 +43,7 @@ typedef struct perm_set {
 typedef struct repo {
   char name[NAME_MAX_LEN];
   char path[PATH_MAX];
+  char fork_src[512], mirror_src[512]; /* upstream of a fork or a mirror */
   perm_set perms[P_COUNT];
 } repo;
 typedef struct group {
@@ -67,6 +68,7 @@ typedef struct git_node {
   uint8_t blocked[MAX_IDS][16];
   size_t blocked_count;
   unsigned announce_minutes;
+  unsigned mirror_hours; /* mirror sync interval, 0 = never */
   size_t max_bundle;
   rngit_node net;
 } git_node;
@@ -261,6 +263,7 @@ static int is_bare_git(const char *path) {
   snprintf(cfg, sizeof(cfg), "%s/config", path);
   return !stat(head, &st) && !stat(cfg, &st);
 }
+static void repo_kind_load(repo *r);
 static void load_group(const char *name, const char *path) {
   group *g;
   DIR *d;
@@ -302,6 +305,7 @@ static void load_group(const char *name, const char *path) {
     strcpy(r->path, full);
     snprintf(full, sizeof(full), "%s.allowed", r->path);
     load_allowed(full, r->perms);
+    repo_kind_load(r);
   }
   closedir(d);
 }
@@ -369,6 +373,8 @@ static int load_config(const char *dir) {
       } else if (!strcmp(section, "rngit")) {
         if (!strcmp(key, "announce_interval"))
           G.announce_minutes = (unsigned)strtoul(value, NULL, 10);
+        else if (!strcmp(key, "mirror_interval"))
+          G.mirror_hours = (unsigned)strtoul(value, NULL, 10);
         else if (!strcmp(key, "blocked_identities"))
           snprintf(blocked_text, sizeof(blocked_text), "%s", value);
         else if (!strcmp(key, "max_bundle")) {
@@ -1042,6 +1048,7 @@ static rnc_result handle_create(void *context, const char *path, const uint8_t *
     snprintf(r->name, sizeof(r->name), "%s", name);
     snprintf(r->path, sizeof(r->path), "%s", full);
     reload_repo(r);
+    repo_kind_load(r);
     log_line("Created repository %s/%s", g->name, name);
     reply(out, cap, written, GIT_RES_OK, "");
   }
@@ -1234,7 +1241,51 @@ done:
   return RNC_OK;
 }
 
+#include "rngit_clone.h"
+#include "rngit_release.h"
+#include "rngit_work.h"
+
 /* ---- main ---------------------------------------------------------------- */
+static void idle_pump(void) {
+  (void)rngit_pump(&G.net);
+}
+/* git runs `git-remote-rns` for rns:// sources: make sure it resolves to the
+ * helper beside this binary, attached to the same node, using this node's
+ * client identity. */
+static void prepare_git_environment(const char *argv0, const char *connect) {
+  char self[PATH_MAX], dir[PATH_MAX], link_dir[PATH_MAX + 32], link_path[PATH_MAX + 64], helper[PATH_MAX + 32];
+  const char *path = getenv("PATH");
+  ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+  char *slash;
+  if (n < 0) {
+    snprintf(self, sizeof(self), "%s", argv0);
+    n = (ssize_t)strlen(self);
+  } else
+    self[n] = 0;
+  snprintf(dir, sizeof(dir), "%s", self);
+  slash = strrchr(dir, '/');
+  if (slash)
+    *slash = 0;
+  else
+    snprintf(dir, sizeof(dir), ".");
+  snprintf(helper, sizeof(helper), "%s/reticulum-c-git-remote", dir);
+  if (!getenv("RNGIT_CONNECT"))
+    setenv("RNGIT_CONNECT", connect, 1);
+  if (!getenv("RNGIT_CONFIG"))
+    setenv("RNGIT_CONFIG", G.config_dir, 1);
+  if (!is_file(helper))
+    return;
+  snprintf(link_dir, sizeof(link_dir), "%s/bin", G.config_dir);
+  snprintf(link_path, sizeof(link_path), "%s/git-remote-rns", link_dir);
+  if (!is_dir(link_dir))
+    (void)mkdir(link_dir, 0755);
+  unlink(link_path);
+  if (!symlink(helper, link_path)) {
+    char newpath[PATH_MAX * 3];
+    snprintf(newpath, sizeof(newpath), "%s:%s", link_dir, path ? path : "/usr/bin:/bin");
+    setenv("PATH", newpath, 1);
+  }
+}
 static void usage(void) {
   fputs("usage: reticulum-c-git --connect HOST:PORT [--config DIR] [--identity FILE] [--print-identity]\n",
         stderr);
@@ -1244,9 +1295,10 @@ int main(int argc, char **argv) {
   char default_config[PATH_MAX], identity_path[PATH_MAX + 32];
   int i, print_identity = 0;
   uint8_t destination[16];
-  uint64_t last_announce = 0;
+  uint64_t last_announce = 0, last_mirror_check = 0;
   int announced = 0;
   G.max_bundle = (size_t)DEFAULT_MAX_BUNDLE_MIB << 20;
+  G.mirror_hours = 24;
   for (i = 1; i < argc; ++i) {
 #define VALUE (i + 1 < argc ? argv[++i] : (usage(), exit(2), (char *)NULL))
     if (!strcmp(argv[i], "--connect"))
@@ -1314,10 +1366,22 @@ int main(int argc, char **argv) {
       rnc_responder_register(G.net.responder, destination, GIT_PATH_CREATE, RNC_SERVICE_ALLOW_ALL,
                              NULL, 0, handle_create, NULL) != RNC_OK ||
       rnc_responder_register(G.net.responder, destination, GIT_PATH_PERMS, RNC_SERVICE_ALLOW_ALL,
-                             NULL, 0, handle_perms, NULL) != RNC_OK) {
+                             NULL, 0, handle_perms, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_FORK, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_fork, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_MIRROR, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_mirror, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_SYNC, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_sync, NULL) != RNC_OK ||
+      rnc_responder_register_file(G.net.responder, destination, GIT_PATH_RELEASE,
+                                  RNC_SERVICE_ALLOW_ALL, NULL, 0, handle_release, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_WORK, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_work, NULL) != RNC_OK) {
     fprintf(stderr, "Could not set up the repository destination\n");
     return 1;
   }
+  prepare_git_environment(argv[0], connect);
+  rngit_idle_hook = idle_pump;
   fputs("Reticulum Git Node listening on <", stdout);
   for (i = 0; i < 16; ++i) printf("%02x", destination[i]);
   puts(">");
@@ -1326,6 +1390,10 @@ int main(int argc, char **argv) {
     uint64_t now = rngit_monotonic_ms();
     if (!rngit_pump(&G.net))
       break;
+    if (now - last_mirror_check > 60000u) {
+      last_mirror_check = now;
+      sync_due_mirrors();
+    }
     if (!announced || (G.announce_minutes && now - last_announce > (uint64_t)G.announce_minutes * 60000u)) {
       rnc_host_status s;
       if (rnc_host_get_status(G.net.host, 1, &s) == RNC_OK && s.online) {
