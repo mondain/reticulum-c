@@ -5,14 +5,28 @@
 //   - nRF52840 (Adafruit nRF52 core):   RNG peripheral, InternalFileSystem for state
 // and runs rnc_mcu_app_step from its own FreeRTOS task with a 16 KB stack.
 //
-// The serial port ("Serial": a UART behind the board's USB bridge, or the native USB
-// CDC port) carries ONLY the HDLC byte stream of the Reticulum SerialInterface: the
-// application's log hook is not wired, and framework logging is switched off, so no
-// log text is ever mixed into the stream. See README.txt in this directory.
+// In serial mode (the default; the only mode of the nRF52 boards) the serial port
+// ("Serial": a UART behind the board's USB bridge, or the native USB CDC port) carries
+// ONLY the HDLC byte stream of the Reticulum SerialInterface: the application's log hook
+// is not wired, and framework logging is switched off, so no log text is ever mixed
+// into the stream. On ESP32 / ESP32-S3 the board can instead be provisioned (at runtime,
+// no credentials in the firmware) to run the HDLC stream over Wi-Fi and a TCP connection
+// to a Reticulum node: see wifi_mode.h and README.txt in this directory.
+//
+// Optionally a LoRa radio (mcu/radio) on the board selected by the build environment. Its
+// settings (lora.mode, lora.freq, lora.bw, lora.sf, lora.cr, lora.txp, lora.airtime) are
+// provisioned at runtime like the Wi-Fi ones and the radio stays OFF until every transmit
+// setting has been given: no frequency, bandwidth, spreading factor, coding rate or power
+// is compiled into any image (REGULATORY, see mcu/radio/README.txt). lora.mode leaf makes
+// LoRa the only interface (Serial is then free for status text); gateway keeps the serial
+// or Wi-Fi interface and adds LoRa with Reticulum transport on.
 #include <Arduino.h>
 #include <string.h>
 
+#include "radio_hal.h"
 #include "rnc_mcu_app.h"
+#include "rnc_radio.h"
+#include "wifi_mode.h"
 
 #ifndef RNC_MCU_FIRMWARE_BOARD
 #define RNC_MCU_FIRMWARE_BOARD "arduino"
@@ -58,11 +72,14 @@ static int platform_load(void *, const char *key, void *buffer, size_t capacity)
   return result;
 }
 static size_t platform_free_heap(void *) { return ESP.getFreeHeap(); }
+static bool g_wifi_mode = false; // the transport is the Wi-Fi TCP connection
 static void hardware_init(void) {
-  esp_log_level_set("*", ESP_LOG_NONE); // nothing but HDLC on the serial port
-  // esp_fill_random is a true random source only while the RF subsystem or the SAR
-  // ADC entropy source runs; this firmware uses no Wi-Fi or Bluetooth.
-  bootloader_random_enable();
+  esp_log_level_set("*", ESP_LOG_NONE); // nothing but HDLC (or the console) on the serial port
+}
+// Wi-Fi mode logs status text to Serial (it is free for people there); serial mode wires
+// no log hook at all
+static void platform_log(void *, const char *line) {
+  Serial.println(line);
 }
 #define STACK_DEPTH(bytes) (bytes) // FreeRTOS in ESP-IDF counts bytes
 
@@ -157,11 +174,43 @@ static size_t platform_free_heap(void *) {
   return free_bytes > 0 ? (size_t)free_bytes : 0;
 }
 static void hardware_init(void) { InternalFS.begin(); }
+static void platform_log(void *, const char *line) { Serial.println(line); }
 #define STACK_DEPTH(bytes) ((bytes) / 4) // vanilla FreeRTOS counts words
 
 #else
 #error "reticulum-c example: unsupported architecture (ESP32 or nRF52840 only)"
 #endif
+
+// ----------------------------------------------------------- the radio -------
+static rnc_radio g_radio; // drivers and interface, about 3 KB
+static rnc_radio_hal g_radio_hal;
+static rnc_lora_cfg g_lora;
+static bool g_lora_active = false; // the LoRa interface is handed to the application
+
+static uint32_t radio_random32(void *) {
+  uint32_t v = 0;
+  if (platform_random(NULL, (uint8_t *)&v, sizeof(v)) != 0)
+    v = micros();
+  return v;
+}
+
+// Starts the radio if, and only if, the settings allow it. rnc_radio_setup is the gate: with the
+// mode off or any transmit setting missing the chip is not even spoken to.
+static int lora_start(const rnc_mcu_cfg *cfg) {
+  const rnc_board *board = rnc_board_find(RNC_MCU_FIRMWARE_BOARD);
+  int status;
+  g_lora = cfg->lora;
+  if (cfg->lora.mode == RNC_LORA_MODE_OFF || !rnc_lora_cfg_ready(&cfg->lora) || !board ||
+      !board->supported) {
+    status = rnc_radio_setup(&g_radio, board, NULL, &cfg->lora, radio_random32, NULL);
+  } else if (rnc_radio_hal_init(board, &g_radio_hal) != 0) {
+    status = RNC_RADIO_BOARD_UNSUPPORTED;
+  } else {
+    status = rnc_radio_setup(&g_radio, board, &g_radio_hal, &cfg->lora, radio_random32, NULL);
+  }
+  g_lora_active = status == RNC_RADIO_OK || status == RNC_RADIO_CHIP_FAILED;
+  return status;
+}
 
 // ----------------------------------------------------------- transport -------
 static size_t transport_write(void *, const uint8_t *data, size_t size) {
@@ -210,6 +259,21 @@ static void reticulum_task(void *) {
 #else
   config.bitrate = RNC_MCU_BAUD;
 #endif
+#if defined(ARDUINO_ARCH_ESP32)
+  if (g_wifi_mode) {
+    platform.write = rnc_wifi_write;
+    platform.read = rnc_wifi_read;
+    platform.link_up = rnc_wifi_link_up;
+    platform.log = platform_log;
+    config.bitrate = 10000000u; // a TCP interface, like Reticulum's TCPClientInterface
+  }
+#endif
+  if (g_lora_active) {
+    config.lora = &g_radio.li;
+    config.lora_mode = g_lora.mode;
+    if (g_lora.mode == RNC_LORA_MODE_LEAF)
+      platform.log = platform_log; // Serial is free for status text
+  }
   rnc_mcu_app *app = rnc_mcu_app_new(&platform, &config);
   if (!app) { // out of memory or no usable random source: nothing to run
     for (;;)
@@ -228,6 +292,39 @@ void setup() {
   Serial.setRxBufferSize(2048);
 #endif
   Serial.begin(RNC_MCU_BAUD);
+  // Runtime provisioning (wifi_mode.h, nrf_mode.cpp): the console runs when Wi-Fi mode has no
+  // usable settings, or on request in a short window after boot.
+  rnc_mcu_cfg cfg;
+  bool compiled_in = rnc_settings_load(&cfg);
+  bool lora_leaf = cfg.lora.mode == RNC_LORA_MODE_LEAF && rnc_lora_cfg_ready(&cfg.lora);
+#if defined(ARDUINO_ARCH_ESP32)
+  if (rnc_mcu_cfg_wifi_mode(&cfg) && !rnc_mcu_cfg_wifi_ready(&cfg) && !lora_leaf)
+    rnc_provision_console(&cfg, "Wi-Fi mode is selected but ssid, password or host are missing or invalid.");
+#endif
+  if (rnc_provision_requested(RNC_MCU_PROVISION_WINDOW_MS))
+    rnc_provision_console(&cfg, "Requested at boot.");
+  // the radio, if the settings allow it; with it off or incomplete the board is the serial or
+  // Wi-Fi leaf it always was
+  (void)lora_start(&cfg);
+  lora_leaf = g_lora_active && g_lora.mode == RNC_LORA_MODE_LEAF;
+#if defined(ARDUINO_ARCH_ESP32)
+  if (!lora_leaf && rnc_mcu_cfg_wifi_mode(&cfg)) {
+    g_wifi_mode = true;
+    if (compiled_in)
+      Serial.println("WARNING: developer build, Wi-Fi credentials are compiled into this image");
+    Serial.printf("Wi-Fi mode: joining \"%s\", then connecting to %s:%u\r\n", cfg.ssid, cfg.host,
+                  (unsigned)cfg.port);
+    rnc_wifi_start(&cfg);
+    memset(cfg.password, 0, sizeof(cfg.password)); // the driver has its own copy
+    // the radio is the entropy source for esp_fill_random now
+  } else {
+    // esp_fill_random is a true random source only while the RF subsystem or the SAR
+    // ADC entropy source runs; this mode uses no Wi-Fi or Bluetooth.
+    bootloader_random_enable();
+  }
+#else
+  (void)compiled_in;
+#endif
   xTaskCreate(reticulum_task, "reticulum", STACK_DEPTH(RNC_MCU_STACK_BYTES), NULL, 2, NULL);
 }
 

@@ -58,6 +58,20 @@ fi
 PIO=$VENV/bin/pio
 export PLATFORMIO_CORE_DIR=${PLATFORMIO_CORE_DIR:-$HOME/.platformio}
 export PLATFORMIO_NO_ANSI=true PLATFORMIO_DISABLE_PROGRESSBAR=true PLATFORMIO_CHECK_PLATFORMS_INTERVAL=0
+# RELEASE BUILDS MUST NOT CONTAIN Wi-Fi CREDENTIALS. Developers can compile defaults in
+# with PLATFORMIO_BUILD_FLAGS (-DRNC_MCU_DEV_WIFI_SSID=... see mcu/platformio/README.txt);
+# such a build is marked "dev-wifi-defaults: yes" in build-info.txt (the release packaging
+# refuses it) and this script fails when RNC_RELEASE=1 is set.
+DEV_WIFI=no
+case "${PLATFORMIO_BUILD_FLAGS:-}" in
+  *RNC_MCU_DEV_WIFI*)
+    DEV_WIFI=yes
+    echo "WARNING: Wi-Fi credentials are compiled in (RNC_MCU_DEV_WIFI_*): developer build, do not distribute" >&2
+    if [ "${RNC_RELEASE:-0}" = 1 ]; then
+      echo "refusing: RNC_RELEASE=1 and credentials are compiled in" >&2
+      exit 1
+    fi ;;
+esac
 # one build epoch for every environment (the clock policy in mcu/app/rnc_mcu_app.h);
 # SOURCE_DATE_EPOCH makes it reproducible
 RNC_MCU_BUILD_EPOCH=${RNC_MCU_BUILD_EPOCH:-${SOURCE_DATE_EPOCH:-$(date +%s)}}
@@ -87,6 +101,7 @@ for env in $ENVS; do
     echo "firmware:  platformio-$env"
     echo "platformio: $PIO_VERSION"
     echo "epoch:     $RNC_MCU_BUILD_EPOCH"
+    echo "dev-wifi-defaults: $DEV_WIFI"
     echo "built:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "packages:"
     (cd "$PROJECT" && "$PIO" pkg list -e "$env" 2>/dev/null) | grep -v '^Resolving' | sed 's/^/  /' || true

@@ -1056,7 +1056,41 @@ RAM on nRF52, leaving about 115 KB of heap after the node and a 16 KB task). The
 firmware clock is a build-time epoch plus uptime with a persisted high-water mark
 so announces stay fresh across reboots (policy in `rnc_mcu_app.h`). All builds run
 in CI and in the release. Not verified: any run on hardware (flashing, USB CDC,
-the nRF52 bootloader flow, real heap use), a LoRa radio (no driver exists: the
-boards talk to a node over serial), the T-Deck (no PlatformIO board), and whether
+the nRF52 bootloader flow, real heap use), a LoRa radio on air (see the next section), the T-Deck (no PlatformIO board), and whether
 the T114, T-Echo and RAK4631 use the Adafruit bootloader and S140 memory map their
 derived board definitions assume.
+
+### Wi-Fi transport and LoRa radio (mcu)
+
+Wi-Fi: the ESP32 firmware connects to a node's TCP interface (HDLC framing) and
+reconnects and re-announces when the node restarts. Host tests drive the same app
+logic against a real `reticulum-c-node`, including a node kill and restart, and
+the reference Python RNS reaches it afterwards. The lwIP/Wi-Fi calls and NVS
+handling are compiled but have not run on a board. Credentials are provisioned at
+run time; the release packaging refuses images with compiled-in credentials.
+Flash and RAM grow substantially (ESP32 app 251 KB to 775 KB with Wi-Fi).
+
+LoRa (`mcu/radio/`, portable C behind a small HAL): SX126x and SX127x drivers, the
+RNode air format (one header byte with a random sequence nibble and a split flag,
+packets over 254 bytes in two frames, explicit header, CRC, private sync word),
+time on air, listen-before-talk and an hourly airtime budget. The facts come from
+reading the GPL RNode firmware; no code was copied (PROVENANCE.md). Bit rate
+matches the unmodified reference RNodeInterface for all 320 settings and time on
+air matches published Semtech values. The low-data-rate rule follows the RNode
+firmware's integer rule, which differs from the datasheet at SF12/250k, SF11/125k,
+SF10/62.5k and SF9/31.25k, because a mismatch makes the ends undecodable. Known
+difference: a 508-byte packet is sent as two frames (the RNode adds a third,
+header-only frame); Reticulum never sends more than 500. On receive, stale orphan
+halves expire and duplicates are dropped, which changes nothing that is sent.
+Modes: off (default), leaf, gateway (transport only there); the mcu profile limits
+a gateway to two interfaces.
+
+Evidence: driver tests against strict command-level SX126x and register-level
+SX127x models, frames between the two families, a shared-medium simulator with
+loss, collision and hidden-node cases, two app instances speaking Reticulum over
+simulated LoRa (announce, path request, link, `/echo`, `/info`, a 900-byte
+Resource), a default-build `reticulum-c-node` reaching a simulated board through a
+simulated gateway, and 30 of 30 mutations caught. Not verified: anything on real
+chips or on air, interop with a real RNode (the models were written from the same
+datasheets as the drivers, so a shared misreading would pass), TCXO voltages, board
+pins, the AXP192 sequence, CAD parameters (implemented, unused by the interface).

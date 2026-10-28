@@ -37,3 +37,33 @@ any external reference project or dependency.
 It is compiled only into the optional `-DRNC_CRYPTO=portable` backend, which uses it
 for X25519 and Ed25519 (including its SHA-512). SHA-256, HMAC, HKDF and AES-256-CBC
 for that backend are original code in `src/crypto_portable.c`.
+
+## LoRa radio support (`mcu/radio/`): what was taken from the RNode firmware
+
+The over-the-air format of the LoRa interface, the modem settings and the board pin maps
+were established by reading the RNode firmware (https://github.com/markqvist/RNode_Firmware,
+GPL-3.0, shallow clone of the default branch taken on 2026-10-28 into a scratch directory
+outside this repository) AS A SOURCE OF FACTS. Taken, as facts
+only: the header byte layout (random sequence nibble in bits 7..4, split flag in bit 0,
+other bits zero); the frame limits (255 bytes per frame, MTU 508, split at 254 packet
+bytes) and the receiver's rule for pending halves; the sync words (SX127x 0x12, SX126x
+0x1424 in registers 0x0740/0x0741); explicit header, CRC on, standard IQ; the preamble
+targets (24 ms, 6 ms above 30 kbit/s, floor 18 symbols; the SX127x register holds the count
+minus 4); the integer low data rate rule; the bit rate formula; the CSMA slot (12 symbols,
+24 to 100 ms, 6 ms minimum above 30 kbit/s) and DIFS (two slots); the airtime accounting
+period (one hour) and the unit of the airtime limit commands (hundredths of a percent);
+register addresses and values that the datasheet erratas call for (0x0736 bit 2, 0x0889
+bit 2, 0x08D8, 0x08AC, 0x08E7 setting 0x28); the TCXO voltage code per board; whether DIO2
+drives the antenna switch per board; board pin numbers and chip variants; the AXP192 LDO2
+use on the original T-Beam. No source code, no comments and no identifiers were copied or
+translated from that firmware, and no file of it is in this repository or its releases.
+Everything in `mcu/radio/` was written independently from those facts and from the public
+Semtech documents (SX1261/2 and SX1276/77/78/79 data sheets, AN1200.13). Facts that could
+not be established from the source are listed under "Not established" in
+`mcu/radio/README.txt`. The RNode firmware keeps its own licence.
+
+RNode firmware commit read: 56775c51b60a6190242e324c210997dcc7637e53.
+
+The unmodified reference `RNodeInterface.updateBitrate` (RNS 1.5.5, the snapshot above) is
+called by `mcu/tests/ref_rnode_bitrate.py` for a comparison test (only with
+`RNC_INTEROP_TESTS`); it is not redistributed.

@@ -641,7 +641,52 @@ if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE
         add_test(NAME reticulum_mcu_host COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_host.sh
             ${CMAKE_SOURCE_DIR} $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>)
         set_tests_properties(reticulum_mcu_host PROPERTIES LABELS "mcu;network;pty" TIMEOUT 600)
+        # the application's unit tests (clock, link handling, network helpers), built
+        # in their own mcu-profile build; no sockets, no node
+        add_test(NAME reticulum_mcu_unit COMMAND ${RNC_BASH_MCU}
+            ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_unit.sh ${CMAKE_SOURCE_DIR})
+        set_tests_properties(reticulum_mcu_unit PROPERTIES LABELS mcu TIMEOUT 600)
+        # the LoRa support: radio core, SX126x/SX127x drivers against the chip models, the
+        # interface on a simulated shared channel, and the application over simulated LoRa
+        add_test(NAME reticulum_mcu_radio COMMAND ${RNC_BASH_MCU}
+            ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_radio.sh ${CMAKE_SOURCE_DIR})
+        set_tests_properties(reticulum_mcu_radio PROPERTIES LABELS mcu TIMEOUT 900)
+        # mutation checks: the tests above must fail when the header layout, the split
+        # reassembly, the sync word, the airtime limiter ... are broken
+        add_test(NAME reticulum_mcu_radio_mutations COMMAND ${RNC_BASH_MCU}
+            ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_radio_mutations.sh ${CMAKE_SOURCE_DIR} ${CMAKE_C_COMPILER})
+        set_tests_properties(reticulum_mcu_radio_mutations PROPERTIES LABELS mcu TIMEOUT 1800)
+        # gateway mode: a reticulum-c-node reaches a board on a simulated LoRa segment
+        # through the firmware logic in gateway mode (TCP side plus modelled radio)
+        add_test(NAME reticulum_mcu_gateway COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_gateway.sh
+            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>)
+        set_tests_properties(reticulum_mcu_gateway PROPERTIES LABELS "mcu;network" TIMEOUT 900)
         if(RNC_INTEROP_TESTS)
+            # the on-air bit rate against what the unmodified reference RNodeInterface computes
+            add_test(NAME reticulum_mcu_radio_reference COMMAND ${RNC_BASH_MCU}
+                ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_radio_reference.sh ${CMAKE_SOURCE_DIR}
+                ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
+            set_tests_properties(reticulum_mcu_radio_reference PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                LABELS "mcu;reticulum_interop" SKIP_RETURN_CODE 77 TIMEOUT 300)
+        endif()
+        # the Wi-Fi provisioning tool: input validation and, where an NVS image generator
+        # (pip, ESP-IDF or the Docker image) exists, the image contents (skipped otherwise)
+        add_test(NAME reticulum_mcu_wifi_config COMMAND ${RNC_BASH_MCU}
+            ${CMAKE_SOURCE_DIR}/mcu/tests/test_wifi_config.sh ${CMAKE_SOURCE_DIR})
+        set_tests_properties(reticulum_mcu_wifi_config PROPERTIES LABELS mcu SKIP_RETURN_CODE 77 TIMEOUT 300)
+        # the firmware logic over its Wi-Fi transport (TCP client, reconnect)
+        add_test(NAME reticulum_mcu_tcp COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_tcp.sh
+            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>)
+        set_tests_properties(reticulum_mcu_tcp PROPERTIES LABELS "mcu;network" TIMEOUT 600)
+        if(RNC_INTEROP_TESTS)
+            add_test(NAME reticulum_mcu_tcp_reference COMMAND ${RNC_BASH_MCU}
+                ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_tcp.sh ${CMAKE_SOURCE_DIR}
+                $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>
+                ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
+            set_tests_properties(reticulum_mcu_tcp_reference PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                LABELS "mcu;reticulum_interop;network" TIMEOUT 600)
             add_test(NAME reticulum_mcu_host_reference COMMAND ${RNC_BASH_MCU}
                 ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_host.sh ${CMAKE_SOURCE_DIR}
                 $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>

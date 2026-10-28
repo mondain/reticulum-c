@@ -39,7 +39,15 @@
       "+<src/i2p.c>",
       "+<src/third_party/monocypher/monocypher.c>",
       "+<src/third_party/monocypher/monocypher-ed25519.c>",
-      "+<mcu/app/rnc_mcu_app.c>"
+      "+<mcu/app/rnc_mcu_app.c>",
+      "+<mcu/radio/rnc_lora_phy.c>",
+      "+<mcu/radio/rnc_lora_air.c>",
+      "+<mcu/radio/rnc_lora_mac.c>",
+      "+<mcu/radio/rnc_lora_if.c>",
+      "+<mcu/radio/rnc_sx126x.c>",
+      "+<mcu/radio/rnc_sx127x.c>",
+      "+<mcu/radio/rnc_boards.c>",
+      "+<mcu/radio/rnc_radio.c>"
     ],
     "flags": [
       "-DRNC_PROFILE_MCU=1",

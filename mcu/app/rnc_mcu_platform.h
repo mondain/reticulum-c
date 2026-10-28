@@ -52,6 +52,21 @@ typedef struct rnc_mcu_platform {
   int (*load)(void *context, const char *key, void *buffer, size_t capacity);
   /* OPTIONAL. Free heap in bytes, reported by /info. */
   size_t (*free_heap)(void *context);
+  /* OPTIONAL. Whether the transport is connected right now: nonzero = up, 0 =
+   * down. NULL means a transport that is always up (a serial line), which is the
+   * behaviour of every port before connection oriented transports existed. A TCP
+   * client over Wi-Fi returns 0 while it is (re)connecting.
+   *
+   * The application polls it at every step and reacts to the changes:
+   *  - while down it reads nothing, writes nothing (frames the node produces are
+   *    counted and dropped rather than delivered late over a new connection) and
+   *    does not announce;
+   *  - when it goes from down to up it resets the HDLC decoder (a half frame of
+   *    the old connection must not be glued to the new stream) and announces again
+   *    after RNC_MCU_LINK_UP_DELAY_MS (then once more FIRST_REPEAT later, as at boot),
+   *    so the peer learns the path again without waiting for the regular interval.
+   * The hook must be cheap and non-blocking. */
+  int (*link_up)(void *context);
 
   const char *board; /* shown by /info, for example "heltec_wifi_lora_32_v3"; may be NULL */
 } rnc_mcu_platform;

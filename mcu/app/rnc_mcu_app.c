@@ -5,6 +5,8 @@
 #include <reticulum_c/rnc_ipc.h>
 #include <reticulum_c/rnc_node.h>
 #include <reticulum_c/rnc_responder.h>
+#include "rnc_lora_cfg.h"
+#include "rnc_lora_if.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +16,7 @@
 #endif
 
 #define IFACE_ID 1u
+#define IFACE_LORA 2u
 #define READ_CHUNK 64u
 #define MAX_REQUEST 1024u
 #define FIRST_REPEAT_MS 5000u /* the second announce, after the first may have been lost */
@@ -30,6 +33,13 @@ struct rnc_mcu_app {
   uint64_t base, last_unix, last_persist_unix;
   int persist_time;
   uint64_t last_now_ms;
+  /* transport link (platform link_up): -1 unknown, 0 down, 1 up */
+  int link;
+  rnc_mcu_stats stats;
+  /* second interface (LoRa) and what the mode makes of the first */
+  struct rnc_lora_if *lora;
+  int primary; /* the serial/Wi-Fi interface is in use */
+  int lora_up; /* the radio was up at the last step */
   /* announce schedule */
   unsigned announces;
   uint64_t next_announce_ms;
@@ -39,6 +49,7 @@ struct rnc_mcu_app {
   rnc_node_event event;
   uint8_t frame[RNC_MAX_FRAME];
   uint8_t wire[RNC_MAX_FRAME + 8u];
+  uint8_t lora_packet[RNC_AIR_PACKET_MAX];
   uint8_t hdlc_out[RNC_HDLC_MAX];
   uint8_t readbuf[READ_CHUNK];
   char logline[128];
@@ -136,7 +147,8 @@ static rnc_result handle_info(void *context, const char *path, const uint8_t *re
   rnc_mcu_app *app = context;
   rnc_rpc_writer w;
   size_t heap = app->platform.free_heap ? app->platform.free_heap(app->platform.context) : 0;
-  size_t pairs = 4u + (heap ? 1u : 0u);
+  size_t pairs = 4u + (heap ? 1u : 0u) + (app->lora ? 1u : 0u);
+  char lora_text[48];
   (void)path;
   (void)request;
   (void)size;
@@ -155,6 +167,14 @@ static rnc_result handle_info(void *context, const char *path, const uint8_t *re
     (void)rnc_rpc_write_string(&w, "heap");
     (void)rnc_rpc_write_uint(&w, heap);
   }
+  if (app->lora) {
+    (void)snprintf(lora_text, sizeof(lora_text), "%s %luHz bw%lu sf%u cr4/%u",
+                   app->config.lora_mode == RNC_LORA_MODE_GATEWAY ? "gateway" : "leaf",
+                   (unsigned long)app->lora->params.freq_hz, (unsigned long)app->lora->params.bw_hz,
+                   (unsigned)app->lora->params.sf, (unsigned)app->lora->params.cr);
+    (void)rnc_rpc_write_string(&w, "lora");
+    (void)rnc_rpc_write_string(&w, lora_text);
+  }
   return rnc_rpc_writer_finish(&w, written);
 }
 
@@ -164,9 +184,25 @@ static rnc_result random_adapter(void *context, uint8_t *out, size_t size) {
   return app->platform.random(app->platform.context, out, size) == 0 ? RNC_OK : RNC_CRYPTO;
 }
 
+static void transmit_lora(rnc_mcu_app *app, const rnc_packet *packet, uint64_t now_ms) {
+  size_t wire_size = 0;
+  if (!app->lora || rnc_packet_encode(packet, app->wire, sizeof(app->wire), &wire_size) != RNC_OK)
+    return;
+  if (rnc_lora_if_send(app->lora, app->wire, wire_size, now_ms * 1000u) == 0)
+    app->stats.lora_tx_packets++;
+  else
+    app->stats.lora_tx_dropped++;
+}
+
 static void transmit(rnc_mcu_app *app, const rnc_packet *packet) {
   size_t wire_size = 0, framed = 0, done = 0;
   unsigned stalls = 0;
+  if (!app->primary)
+    return;
+  if (app->link == 0) { /* no connection: a late delivery over the next one helps nobody */
+    app->stats.tx_dropped++;
+    return;
+  }
   if (rnc_packet_encode(packet, app->wire, sizeof(app->wire), &wire_size) != RNC_OK ||
       rnc_hdlc_encode(app->wire, wire_size, app->hdlc_out, sizeof(app->hdlc_out),
                       &framed) != RNC_OK)
@@ -185,7 +221,10 @@ static void transmit(rnc_mcu_app *app, const rnc_packet *packet) {
 static void drain(rnc_mcu_app *app, uint64_t unix_now, uint64_t now_ms) {
   while (rnc_node_poll(app->node, &app->event) == RNC_OK) {
     if (app->event.type == RNC_NODE_SEND) {
-      transmit(app, &app->event.packet);
+      if (app->event.interface_id == IFACE_LORA)
+        transmit_lora(app, &app->event.packet, now_ms);
+      else
+        transmit(app, &app->event.packet);
     } else if (app->event.type == RNC_NODE_LOCAL) {
       rnc_result r = rnc_responder_input(app->responder, &app->event, unix_now, now_ms);
       if (r != RNC_OK && r != RNC_AGAIN)
@@ -194,14 +233,24 @@ static void drain(rnc_mcu_app *app, uint64_t unix_now, uint64_t now_ms) {
   }
 }
 
-static void receive_frame(rnc_mcu_app *app, size_t size, uint64_t unix_now, uint64_t now_ms) {
+static void receive_frame(rnc_mcu_app *app, uint32_t iface, const uint8_t *data, size_t size,
+                          uint64_t unix_now, uint64_t now_ms) {
   rnc_result r;
-  if (rnc_packet_decode(app->frame, size, &app->packet) != RNC_OK)
+  if (rnc_packet_decode(data, size, &app->packet) != RNC_OK) {
+    if (iface == IFACE_LORA)
+      app->stats.lora_rx_bad++;
+    else
+      app->stats.rx_bad++;
     return;
-  r = rnc_node_input(app->node, IFACE_ID, &app->packet, unix_now, now_ms);
+  }
+  if (iface == IFACE_LORA)
+    app->stats.lora_rx_packets++;
+  else
+    app->stats.rx_packets++;
+  r = rnc_node_input(app->node, iface, &app->packet, unix_now, now_ms);
   if (r == RNC_AGAIN) { /* the node's queue is full: hand it out, then retry */
     drain(app, unix_now, now_ms);
-    r = rnc_node_input(app->node, IFACE_ID, &app->packet, unix_now, now_ms);
+    r = rnc_node_input(app->node, iface, &app->packet, unix_now, now_ms);
   }
   if (r != RNC_OK && r != RNC_AGAIN && r != RNC_PROTOCOL && r != RNC_INVALID)
     say_n(app, "node rejected a packet, result", (long)r);
@@ -210,6 +259,8 @@ static void receive_frame(rnc_mcu_app *app, size_t size, uint64_t unix_now, uint
 
 static void read_serial(rnc_mcu_app *app, uint64_t unix_now, uint64_t now_ms) {
   unsigned rounds;
+  if (!app->primary || app->link == 0)
+    return; /* leave unread bytes where they are; the port drops them when it reconnects */
   for (rounds = 0; rounds < 16u; rounds++) {
     size_t got = app->platform.read(app->platform.context, app->readbuf, sizeof(app->readbuf)), i;
     if (!got)
@@ -218,9 +269,18 @@ static void read_serial(rnc_mcu_app *app, uint64_t unix_now, uint64_t now_ms) {
       size_t frame_size = 0;
       if (rnc_hdlc_feed(&app->hdlc, app->readbuf[i], app->frame, sizeof(app->frame),
                         &frame_size) == RNC_OK)
-        receive_frame(app, frame_size, unix_now, now_ms);
+        receive_frame(app, IFACE_ID, app->frame, frame_size, unix_now, now_ms);
     }
   }
+}
+
+static void read_lora(rnc_mcu_app *app, uint64_t unix_now, uint64_t now_ms) {
+  size_t n;
+  if (!app->lora)
+    return;
+  (void)rnc_lora_if_step(app->lora, now_ms * 1000u);
+  while ((n = rnc_lora_if_recv(app->lora, app->lora_packet, sizeof(app->lora_packet))) > 0)
+    receive_frame(app, IFACE_LORA, app->lora_packet, n, unix_now, now_ms);
 }
 
 /* ---- public API ----------------------------------------------------------- */
@@ -264,8 +324,25 @@ rnc_mcu_app *rnc_mcu_app_new(const rnc_mcu_platform *platform, const rnc_mcu_con
       k[i] = 0;
   }
 
-  app->node = rnc_node_new(&app->identity, 0, random_adapter, app);
-  if (!app->node || rnc_node_add_interface(app->node, IFACE_ID, app->config.bitrate) != RNC_OK ||
+  /* the modes: no LoRa = the serial/Wi-Fi leaf; leaf = LoRa only; gateway = both with
+   * transport on (only then does the board forward other nodes' packets) */
+  app->primary = 1;
+  if (app->config.lora && app->config.lora_mode != RNC_LORA_MODE_OFF) {
+    app->lora = app->config.lora;
+    if (app->config.lora_mode == RNC_LORA_MODE_LEAF)
+      app->primary = 0;
+  } else {
+    app->config.lora_mode = RNC_LORA_MODE_OFF;
+    app->config.lora = NULL;
+  }
+  app->node = rnc_node_new(&app->identity, app->config.lora_mode == RNC_LORA_MODE_GATEWAY,
+                           random_adapter, app);
+  if (!app->node ||
+      (app->primary &&
+       rnc_node_add_interface(app->node, IFACE_ID, app->config.bitrate) != RNC_OK) ||
+      (app->lora &&
+       (rnc_node_add_interface(app->node, IFACE_LORA, rnc_lora_if_bitrate(app->lora)) != RNC_OK ||
+        rnc_node_interface_mtu(app->node, IFACE_LORA, RNC_LORA_MTU) != RNC_OK)) ||
       rnc_node_add_destination(app->node, &app->identity, RNC_MCU_APP_NAME, NULL, 0,
                                app->destination) != RNC_OK)
     goto fail;
@@ -279,6 +356,7 @@ rnc_mcu_app *rnc_mcu_app_new(const rnc_mcu_platform *platform, const rnc_mcu_con
     goto fail;
   app->announces = 0;
   app->next_announce_ms = 0;
+  app->link = app->primary ? -1 : 1;
   return app;
 fail:
   rnc_mcu_app_free(app);
@@ -294,11 +372,41 @@ void rnc_mcu_app_free(rnc_mcu_app *app) {
   free(app);
 }
 
+struct rnc_node *rnc_mcu_app_node(rnc_mcu_app *app) { return app ? app->node : NULL; }
+
 int rnc_mcu_app_destination(const rnc_mcu_app *app, uint8_t hash[16]) {
   if (!app || !hash)
     return -1;
   memcpy(hash, app->destination, 16);
   return 0;
+}
+
+void rnc_mcu_app_get_stats(const rnc_mcu_app *app, rnc_mcu_stats *stats) {
+  if (app && stats)
+    *stats = app->stats;
+}
+
+/* Polls the platform's link_up and applies the transitions (see rnc_mcu_platform.h). */
+static void update_link(rnc_mcu_app *app, uint64_t now_ms) {
+  int up = app->platform.link_up ? app->platform.link_up(app->platform.context) != 0 : 1;
+  if (up == app->link)
+    return;
+  if (up) {
+    app->stats.link_ups++;
+    memset(&app->hdlc, 0, sizeof(app->hdlc));
+    if (app->link == 0) { /* a reconnect: announce again soon, then the early repeat */
+      app->announces = 0;
+      app->next_announce_ms = now_ms + RNC_MCU_LINK_UP_DELAY_MS;
+    } else if (app->platform.link_up) { /* first sight of a link that came up after start */
+      app->next_announce_ms = now_ms + RNC_MCU_LINK_UP_DELAY_MS;
+    }
+    say(app, "transport up");
+  } else {
+    if (app->link == 1)
+      app->stats.link_downs++;
+    say(app, "transport down");
+  }
+  app->link = up;
 }
 
 unsigned rnc_mcu_app_step(rnc_mcu_app *app, uint64_t now_ms) {
@@ -309,22 +417,42 @@ unsigned rnc_mcu_app_step(rnc_mcu_app *app, uint64_t now_ms) {
   app->last_now_ms = now_ms;
   unix_now = rnc_mcu_app_unix(app, now_ms);
 
+  if (app->primary)
+    update_link(app, now_ms);
   read_serial(app, unix_now, now_ms);
+  if (app->lora) {
+    int up;
+    read_lora(app, unix_now, now_ms);
+    up = rnc_lora_if_up(app->lora);
+    if (up && !app->lora_up) { /* the radio came up (or came back): announce soon */
+      app->lora_up = 1;
+      app->announces = 0;
+      app->next_announce_ms = now_ms + RNC_MCU_LINK_UP_DELAY_MS;
+      say(app, "lora up");
+    } else if (!up && app->lora_up) {
+      app->lora_up = 0;
+      say(app, "lora down");
+    }
+  }
   (void)rnc_node_tick(app->node, unix_now, now_ms);
   (void)rnc_responder_tick(app->responder, unix_now, now_ms);
   drain(app, unix_now, now_ms);
 
-  if (now_ms >= app->next_announce_ms) {
+  if (((app->primary && app->link != 0) || app->lora_up) && now_ms >= app->next_announce_ms) {
     rnc_result r = rnc_node_announce(app->node, app->destination, unix_now, now_ms);
     if (r != RNC_OK)
       say_n(app, "announce failed, result", (long)r);
     app->announces++;
+    app->stats.announces++;
     app->next_announce_ms =
         now_ms + (app->announces == 1u ? FIRST_REPEAT_MS : app->config.announce_interval_ms);
     drain(app, unix_now, now_ms);
   }
   persist_time(app, unix_now);
-  if (app->next_announce_ms > now_ms && app->next_announce_ms - now_ms < wait)
+  if (((app->primary && app->link != 0) || app->lora_up) && app->next_announce_ms > now_ms &&
+      app->next_announce_ms - now_ms < wait)
     wait = (unsigned)(app->next_announce_ms - now_ms);
+  if (app->lora && wait > 5u)
+    wait = 5u; /* the radio is polled */
   return wait;
 }

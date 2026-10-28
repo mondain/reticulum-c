@@ -74,8 +74,16 @@ def esp32(build, art):
             "    --flash_mode %s --flash_freq %s --flash_size %s %s\n\n"
             "Replace /dev/ttyUSB0 with the board's port (/dev/ttyACM0 on a native USB port, COMx on\n"
             "Windows). If the board does not enter the bootloader by itself, hold BOOT, tap RESET,\n"
-            "release BOOT. Install esptool with: pip install esptool\n"
-            % (chip, chip, flash_mode, flash_freq, flash_size, args))
+            "release BOOT. Install esptool with: pip install esptool\n\n"
+            "The firmware starts in serial mode (HDLC on the serial port). To run it over Wi-Fi\n"
+            "instead, provision it after flashing; no credentials are in the image:\n\n"
+            "  wifi-config.sh --arduino --chip %s --device /dev/ttyUSB0 --ssid NAME --host NODE\n"
+            "      (mcu/tools/ in the repository, tools/ in the release zip)\n"
+            "      (replaces the board's NVS partition, so the node gets a new identity)\n"
+            "  or, with a serial terminal at 115200 baud: send the line  rnc-config  within 2\n"
+            "  seconds after reset (or press BOOT), then  set mode wifi, set ssid ..., set password\n"
+            "  ..., set host ..., save, reboot  (see MANUAL.txt).\n"
+            % (chip, chip, flash_mode, flash_freq, flash_size, args, chip))
 
 
 def nrf52(build, art):

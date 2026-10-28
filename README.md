@@ -163,12 +163,27 @@ Each firmware archive holds the flashable files and flash instructions; the
 ESP-IDF component and PlatformIO library are also released as source archives
 for use in your own firmware. `mcu/README.txt` and `mcu/platformio/README.txt`
 cover prerequisites, building, flashing and wiring a board to a node daemon.
-Limits: there is no LoRa radio driver yet (the board talks over serial), AES is
+Network and radio. ESP32 and ESP32-S3 firmware can join a network over Wi-Fi as
+a TCP client of any node. A board can also carry a LoRa radio (SX1262/SX1268 or
+SX1276 families) speaking the RNode air format, as a standalone leaf node
+(`lora.mode leaf`) or as a gateway between its serial/Wi-Fi link and LoRa
+(`lora.mode gateway`, the only mode with transport on). Wi-Fi credentials and
+radio settings are provisioned at run time (serial console or
+`mcu/tools/wifi-config.sh`); release images contain none. The radio is off until
+mode, frequency, bandwidth, spreading factor, coding rate and power are all set:
+there are no transmit defaults, the hourly airtime budget defaults to 1%, and the
+operator is responsible for legal frequency, power and duty cycle. The ESP-IDF
+release images are generic and select no radio board; the seven PlatformIO
+archives include the board's pin table. Board pin tables are in
+`mcu/radio/README.txt`; the T-Beam v1.2 and Supreme (AXP2101) are not supported.
+
+Limits: the radio drivers and air framing are tested only against software models
+of the chips and a simulated shared channel, never on air and never against a real
+RNode; pin maps, TCXO voltages and the T-Beam power sequence are unverified. AES is
 the table-based software version (a timing side channel the hardware AES engines
 would avoid), the T-Deck has no PlatformIO board definition, the nRF52 board
-definitions are derived from the Adafruit Feather nRF52840 (no pin maps), and
-nothing has been run on real hardware: the builds are proven, behaviour on a
-board is not.
+definitions are derived from the Adafruit Feather nRF52840, and nothing has been
+run on real hardware: the builds are proven, behaviour on a board is not.
 
 ## Generic C text example
 
