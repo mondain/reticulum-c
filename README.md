@@ -138,10 +138,37 @@ Each holds `bin/` (the node daemon and the tools above), `include/` and `lib/`
 `BUILDINFO` and the documentation; `SHA256SUMS` accompanies the release. To link
 the SDK from CMake use `-DCMAKE_PREFIX_PATH=<unpacked directory>
 -DOPENSSL_USE_STATIC_LIBS=ON`. The workflow can also be run by hand for a trial
-build that only keeps the archives as workflow artifacts. The library needs a
-POSIX host with OpenSSL, so microcontroller boards (ESP32 and nRF52 based:
-Heltec, T-Beam, RAK4631, T-Echo) are not covered; run these builds on the
-computer a radio is attached to.
+build that only keeps the archives as workflow artifacts. Microcontroller boards
+are covered by the firmware archives described below.
+
+## Microcontroller boards (ESP32 and nRF52)
+
+The `mcu/` directory builds the SDK core, with no OpenSSL, for microcontrollers:
+a portable crypto backend (`-DRNC_CRYPTO=portable`, Monocypher plus our own
+SHA-256, HMAC, HKDF and AES-256-CBC) and a small capacity profile
+(`-DRNC_PROFILE=mcu`: MTU 500, small tables; about 87 KB of heap for a node with
+two links and a responder, 12 KB of task stack). A portable example application
+(`mcu/app`) is a Reticulum node that speaks HDLC over a serial port, announces
+itself and answers `/echo` and `/info`; it runs on the board and, unchanged, on
+the host, where a test drives it through a real `reticulum-c-node`.
+
+| Boards | Build | Release archive |
+| --- | --- | --- |
+| Heltec WiFi LoRa 32 V2, other ESP32 | ESP-IDF (`mcu/build-esp-idf.sh`) | `mcu-esp-idf-esp32` |
+| Heltec WiFi LoRa 32 V3, other ESP32-S3 | ESP-IDF | `mcu-esp-idf-esp32s3` |
+| Heltec V3, V2, T-Beam, LilyGo T3-S3 | PlatformIO/Arduino (`mcu/build-platformio.sh`) | `mcu-<board>` |
+| RAK4631, Heltec T114, LilyGo T-Echo (nRF52840) | PlatformIO/Arduino | `mcu-<board>` |
+
+Each firmware archive holds the flashable files and flash instructions; the
+ESP-IDF component and PlatformIO library are also released as source archives
+for use in your own firmware. `mcu/README.txt` and `mcu/platformio/README.txt`
+cover prerequisites, building, flashing and wiring a board to a node daemon.
+Limits: there is no LoRa radio driver yet (the board talks over serial), AES is
+the table-based software version (a timing side channel the hardware AES engines
+would avoid), the T-Deck has no PlatformIO board definition, the nRF52 board
+definitions are derived from the Adafruit Feather nRF52840 (no pin maps), and
+nothing has been run on real hardware: the builds are proven, behaviour on a
+board is not.
 
 ## Generic C text example
 

@@ -1013,3 +1013,50 @@ documents, binary, CRLF and UTF-8 files, a PNG converted to WebP) and compares
 relative times, version, destination hash and the stats numbers: no
 differences. The SDK gained `rnc_responder_request_link_id` and room for 24
 request paths per destination.
+
+## Microcontroller port: portable crypto, capacity profile, ESP32 and nRF52 firmware
+
+The core library has an internal crypto backend interface
+(`src/crypto_backend.h`): SHA-256, HMAC, HKDF, AES-256-CBC, X25519, Ed25519,
+constant-time compare and cleanse. `-DRNC_CRYPTO=openssl` (the default) keeps the
+behaviour the library always had; `-DRNC_CRYPTO=portable` links no OpenSSL at all:
+Monocypher 4.0.2 (vendored, unmodified, see PROVENANCE.md) supplies X25519 and
+Ed25519, and SHA-256, HMAC, HKDF and AES-256-CBC are written in portable C (AES
+uses table lookups, a cache-timing tradeoff on chips without a hardware AES
+engine). The reference's RPC handshake needs MD5, SHA-384 and SHA3, which the
+portable backend carries too (about 3 KB; `RNC_PORTABLE_NO_RPC_DIGESTS` drops
+them for firmware without RPC). Token and identity encryption now works in the
+caller's buffer, which removed a per-call allocation of up to 16 MB.
+
+Every capacity constant (MTU, node tables, queues, windows, responder and service
+slots) can be overridden at compile time, and `-DRNC_PROFILE=mcu` selects a small
+profile (`rnc_profile_mcu.h`; a custom header via `RNC_PROFILE_HEADER`). The MTU
+stays at the Reticulum default of 500. The host profile is unchanged: a link is
+920 KB there and 11 KB in the mcu profile. A node with two destinations, a
+responder and two active links with services peaks at 86 KB of heap (about 7.7 KB
+of stack measured; use at least 12 KB). The constants size public structures, so
+every consumer of the headers must be built with the same profile.
+
+Evidence: known-answer tests (NIST, RFC 4231, 5869, 7748, 8032) pass on both
+backends, a differential test runs 57,000 random comparisons between them
+(mutations of the AES polynomial, the HKDF counter and a SHA-256 rotation each
+fail both), the existing suite passes with the portable backend (also with no
+OpenSSL installed, and under sanitizers), and the interop tests against the
+unmodified reference pass with the portable backend. In the mcu profile 131 of
+164 core tests pass; the rest assume an MTU above 500 or feed many packets
+without draining events and are not applicable there. The reference
+Python RNS reaches the example firmware logic through a node and gets correct
+`/echo` and `/info` answers.
+
+Firmware: an ESP-IDF component and example (esp32 and esp32s3; the images are
+317 KB and 341 KB with 12 and 14 KB of static RAM) and a PlatformIO/Arduino
+project covering Heltec V3 and V2, a T-Beam, a LilyGo T3-S3 and the nRF52840
+boards RAK4631, Heltec T114 and LilyGo T-Echo (203 KB of flash and 13 KB of static
+RAM on nRF52, leaving about 115 KB of heap after the node and a 16 KB task). The
+firmware clock is a build-time epoch plus uptime with a persisted high-water mark
+so announces stay fresh across reboots (policy in `rnc_mcu_app.h`). All builds run
+in CI and in the release. Not verified: any run on hardware (flashing, USB CDC,
+the nRF52 bootloader flow, real heap use), a LoRa radio (no driver exists: the
+boards talk to a node over serial), the T-Deck (no PlatformIO board), and whether
+the T114, T-Echo and RAK4631 use the Adafruit bootloader and S140 memory map their
+derived board definitions assume.
