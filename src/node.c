@@ -6,20 +6,38 @@
 #include <reticulum_c/rnc_security.h>
 #include <stdlib.h>
 #include <string.h>
-#define NODE_QUEUE 64u
-#define NODE_HASHES 256u
-#define NODE_REVERSE 128u
-#define NODE_REQUESTS 32u
+#ifndef RNC_NODE_QUEUE
+#define RNC_NODE_QUEUE 64u
+#endif
+#ifndef RNC_NODE_HASHES
+#define RNC_NODE_HASHES 256u
+#endif
+#ifndef RNC_NODE_REVERSE
+#define RNC_NODE_REVERSE 128u
+#endif
+#ifndef RNC_NODE_REQUESTS
+#define RNC_NODE_REQUESTS 32u
+#endif
 #define PATH_LIFETIME UINT64_C(604800000)
 #define PACKET_LIFETIME UINT64_C(300000)
 #define REQUEST_LIFETIME UINT64_C(15000)
-#define NODE_ANNOUNCES 64u
-#define NODE_RATES 128u
+#ifndef RNC_NODE_ANNOUNCES
+#define RNC_NODE_ANNOUNCES 64u
+#endif
+#ifndef RNC_NODE_RATES
+#define RNC_NODE_RATES 128u
+#endif
 /* PATHFINDER_G (5s grace) + PATHFINDER_RW (0.5s window) before the one retry. */
 #define ANNOUNCE_RETRY_MS UINT64_C(5500)
 #define LOCAL_REBROADCASTS_MAX 2u
-#define NODE_HELD 32u
+#ifndef RNC_NODE_HELD
+#define RNC_NODE_HELD 32u
+#endif
 #define FREQ_SAMPLES 48u
+/* rnc_node_input needs room for one event per interface, one per pending path request
+ * and two more; a profile with fewer events than that would refuse all input. */
+_Static_assert(RNC_NODE_EVENTS >= RNC_NODE_INTERFACES + RNC_NODE_REQUESTS + 2u,
+               "RNC_NODE_EVENTS must be >= RNC_NODE_INTERFACES + RNC_NODE_REQUESTS + 2");
 #define FREQ_DECAY_MS UINT64_C(10000)
 typedef struct node_freq {
   uint64_t t[FREQ_SAMPLES];
@@ -148,19 +166,19 @@ struct rnc_node {
   node_route routes[RNC_NODE_ROUTES];
   node_destination destinations[RNC_NODE_DESTINATIONS];
   node_link links[RNC_NODE_LINKS];
-  node_hash hashes[NODE_HASHES];
+  node_hash hashes[RNC_NODE_HASHES];
   size_t next_hash;
-  node_reverse reverse[NODE_REVERSE];
-  node_request requests[NODE_REQUESTS];
+  node_reverse reverse[RNC_NODE_REVERSE];
+  node_request requests[RNC_NODE_REQUESTS];
   node_receipt receipts[RNC_NODE_RECEIPTS];
-  node_announce announces[NODE_ANNOUNCES];
-  node_held held[NODE_HELD];
+  node_announce announces[RNC_NODE_ANNOUNCES];
+  node_held held[RNC_NODE_HELD];
   node_known known[RNC_NODE_KNOWN];
   node_blackhole blackhole[RNC_NODE_BLACKHOLE];
   const rnc_packet *input_packet;
   int releasing;
-  node_rate rates[NODE_RATES];
-  node_queued queued[NODE_QUEUE];
+  node_rate rates[RNC_NODE_RATES];
+  node_queued queued[RNC_NODE_QUEUE];
   rnc_node_event events[RNC_NODE_EVENTS];
   size_t head, count;
 };
@@ -285,7 +303,7 @@ static int room(const rnc_node *n, size_t wanted) {
 }
 static size_t queue_free(const rnc_node *n) {
   size_t i, c = 0;
-  for (i = 0; i < NODE_QUEUE; i++)
+  for (i = 0; i < RNC_NODE_QUEUE; i++)
     c += !n->queued[i].used;
   return c;
 }
@@ -336,20 +354,20 @@ static int receipt_complete(rnc_node *n, const rnc_packet *proof,
 }
 static int duplicate(const rnc_node *n, const uint8_t hash[32], uint64_t now) {
   size_t i;
-  for (i = 0; i < NODE_HASHES; i++)
+  for (i = 0; i < RNC_NODE_HASHES; i++)
     if (n->hashes[i].expiry > now && !memcmp(hash, n->hashes[i].hash, 32))
       return 1;
   return 0;
 }
 static void remember(rnc_node *n, const uint8_t hash[32], uint64_t now) {
-  node_hash *h = &n->hashes[n->next_hash++ % NODE_HASHES];
+  node_hash *h = &n->hashes[n->next_hash++ % RNC_NODE_HASHES];
   memcpy(h->hash, hash, 32);
   h->expiry = after(now, PACKET_LIFETIME);
 }
 static void queue(rnc_node *n, uint32_t iface, const rnc_packet *p,
                   uint64_t due) {
   size_t i;
-  for (i = 0; i < NODE_QUEUE; i++)
+  for (i = 0; i < RNC_NODE_QUEUE; i++)
     if (!n->queued[i].used) {
       n->queued[i].used = 1;
       n->queued[i].iface = iface;
@@ -481,13 +499,13 @@ rnc_result rnc_node_remove_interface(rnc_node *n, uint32_t id) {
   for (i = 0; i < RNC_NODE_LINKS; i++)
     if (n->links[i].in == id || n->links[i].out == id)
       n->links[i].used = 0;
-  for (i = 0; i < NODE_REVERSE; i++)
+  for (i = 0; i < RNC_NODE_REVERSE; i++)
     if (n->reverse[i].in == id || n->reverse[i].out == id)
       n->reverse[i].used = 0;
-  for (i = 0; i < NODE_REQUESTS; i++)
+  for (i = 0; i < RNC_NODE_REQUESTS; i++)
     if (n->requests[i].ingress == id)
       n->requests[i].used = 0;
-  for (i = 0; i < NODE_QUEUE; i++)
+  for (i = 0; i < RNC_NODE_QUEUE; i++)
     if (n->queued[i].iface == id)
       n->queued[i].used = 0;
   /* Already-polled SEND events belong to the host; unpolled events are
@@ -804,12 +822,12 @@ static int egress_limit_pr(node_interface *i, uint64_t now) {
 }
 static void hold_announce(rnc_node *n, uint32_t iface, const rnc_packet *wire,
                           uint8_t hops) {
-  size_t i, free_slot = NODE_HELD, mine = 0;
+  size_t i, free_slot = RNC_NODE_HELD, mine = 0;
   const node_interface *f = interface(n, iface);
   size_t limit = f->ingress.max_held ? f->ingress.max_held : 256u;
   if (hops >= 127)
     return;
-  for (i = 0; i < NODE_HELD; i++) {
+  for (i = 0; i < RNC_NODE_HELD; i++) {
     if (!n->held[i].used) {
       free_slot = i;
       continue;
@@ -823,7 +841,7 @@ static void hold_announce(rnc_node *n, uint32_t iface, const rnc_packet *wire,
       mine++;
     }
   }
-  if (free_slot == NODE_HELD || mine >= limit)
+  if (free_slot == RNC_NODE_HELD || mine >= limit)
     return;
   n->held[free_slot].used = 1;
   n->held[free_slot].iface = iface;
@@ -835,7 +853,7 @@ static void hold_announce(rnc_node *n, uint32_t iface, const rnc_packet *wire,
 static int path_request_pending(const rnc_node *n, const uint8_t d[16],
                                 uint64_t now) {
   size_t i;
-  for (i = 0; i < NODE_REQUESTS; i++)
+  for (i = 0; i < RNC_NODE_REQUESTS; i++)
     if (n->requests[i].used && n->requests[i].expiry > now &&
         same(n->requests[i].destination, d))
       return 1;
@@ -988,7 +1006,7 @@ static int rate_blocked(rnc_node *n, const node_interface *iface,
   size_t i;
   if (!iface->rate_target)
     return 0;
-  for (i = 0; i < NODE_RATES; i++) {
+  for (i = 0; i < RNC_NODE_RATES; i++) {
     if (n->rates[i].used && same(n->rates[i].destination, destination)) {
       r = &n->rates[i];
       break;
@@ -1024,7 +1042,7 @@ static void heard_rebroadcast(rnc_node *n, const rnc_packet *p, uint64_t now) {
   size_t i;
   if (!(p->flags & 0x40u))
     return;
-  for (i = 0; i < NODE_ANNOUNCES; i++) {
+  for (i = 0; i < RNC_NODE_ANNOUNCES; i++) {
     node_announce *a = &n->announces[i];
     if (!a->used || !same(a->destination, p->destination))
       continue;
@@ -1038,7 +1056,7 @@ static void heard_rebroadcast(rnc_node *n, const rnc_packet *p, uint64_t now) {
 static void schedule_retry(rnc_node *n, const rnc_packet *relay,
                            uint32_t ingress, uint64_t due) {
   size_t i;
-  for (i = 0; i < NODE_ANNOUNCES; i++)
+  for (i = 0; i < RNC_NODE_ANNOUNCES; i++)
     if (!n->announces[i].used || same(n->announces[i].destination, relay->destination)) {
       node_announce *a = &n->announces[i];
       memset(a, 0, sizeof(*a));
@@ -1317,7 +1335,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   update = !route || stamp > route->route.announced_at;
   if (route && !memcmp(a.random_hash, route->route.announce.random_hash, 10))
     update = 0;
-  for (i = 0; i < NODE_REQUESTS; i++)
+  for (i = 0; i < RNC_NODE_REQUESTS; i++)
     if (n->requests[i].used && n->requests[i].pending &&
         n->requests[i].expiry > now && n->requests[i].ingress != ingress &&
         same(n->requests[i].destination, p->destination))
@@ -1377,7 +1395,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   }
   /* A cached PATH_RESPONSE can satisfy pending requests even if route data is
    * already known; it never causes unsolicited flooding. */
-  for (i = 0; i < NODE_REQUESTS; i++)
+  for (i = 0; i < RNC_NODE_REQUESTS; i++)
     if (n->requests[i].used && n->requests[i].pending &&
         n->requests[i].expiry > now &&
         same(n->requests[i].destination, p->destination)) {
@@ -1398,13 +1416,13 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
   node_route *route;
   rnc_packet reply;
   node_request entry = {0};
-  size_t i, slot = NODE_REQUESTS;
+  size_t i, slot = RNC_NODE_REQUESTS;
   int pr_limited, filtered = 0;
   rnc_result r;
   r = rnc_path_request_decode(packet, &request);
   if (r != RNC_OK)
     return r;
-  for (i = 0; i < NODE_REQUESTS; i++) {
+  for (i = 0; i < RNC_NODE_REQUESTS; i++) {
     if (n->requests[i].used && n->requests[i].expiry > now &&
         same(n->requests[i].destination, request.destination) &&
         n->requests[i].tag_size == request.tag_size &&
@@ -1437,7 +1455,7 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
     if (!search || pr_limited || !n->transport || !relay_count(n, ingress))
       return RNC_OK;
   }
-  if (slot == NODE_REQUESTS)
+  if (slot == RNC_NODE_REQUESTS)
     return RNC_AGAIN;
   if (d || route) {
     if (!queue_free(n))
@@ -1513,7 +1531,7 @@ rnc_result rnc_node_request_path_ex(rnc_node *n, const uint8_t address[16],
   if (r != RNC_OK)
     return r;
   if (iface && recursive) {
-    for (i = 0; i < NODE_QUEUE; i++)
+    for (i = 0; i < RNC_NODE_QUEUE; i++)
       if (n->queued[i].used && n->queued[i].iface == interface_id)
         return RNC_AGAIN;
     if (iface->announce_after > now)
@@ -1637,14 +1655,14 @@ static rnc_result forward(rnc_node *n, uint32_t ingress, rnc_packet *p,
     r = rnc_packet_hash(p, hash);
     if (r != RNC_OK)
       return r;
-    for (i = 0; i < NODE_REVERSE; i++)
+    for (i = 0; i < RNC_NODE_REVERSE; i++)
       if (n->reverse[i].used && n->reverse[i].expiry > now &&
           !memcmp(n->reverse[i].hash, hash, 32)) {
         v = &n->reverse[i];
         break;
       }
     if (!v) {
-      for (i = 0; i < NODE_REVERSE; i++)
+      for (i = 0; i < RNC_NODE_REVERSE; i++)
         if (!n->reverse[i].used || n->reverse[i].expiry <= now) {
           v = &n->reverse[i];
           break;
@@ -1865,7 +1883,7 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
     return r;
   if (size > interface(n, ingress)->mtu)
     return RNC_PROTOCOL;
-  if (!room(n, interface_count(n) + NODE_REQUESTS + 2u))
+  if (!room(n, interface_count(n) + RNC_NODE_REQUESTS + 2u))
     return RNC_AGAIN;
   p = *packet;
   if (p.hops >= 127)
@@ -1929,7 +1947,7 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
       r = RNC_STATE;
   } else if (type == RNC_PROOF && p.context == 0) {
     r = RNC_OK;
-    for (i = 0; i < NODE_REVERSE; i++) {
+    for (i = 0; i < RNC_NODE_REVERSE; i++) {
       node_reverse *v = &n->reverse[i];
       if (!v->used || v->expiry <= now || !same(v->hash, p.destination))
         continue;
@@ -2005,24 +2023,24 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
   for (i = 0; i < RNC_NODE_LINKS; i++)
     if (n->links[i].used && !n->links[i].local && n->links[i].expiry <= now)
       n->links[i].used = 0;
-  for (i = 0; i < NODE_REVERSE; i++)
+  for (i = 0; i < RNC_NODE_REVERSE; i++)
     if (n->reverse[i].used && n->reverse[i].expiry <= now)
       n->reverse[i].used = 0;
-  for (i = 0; i < NODE_REQUESTS; i++)
+  for (i = 0; i < RNC_NODE_REQUESTS; i++)
     if (n->requests[i].used && n->requests[i].expiry <= now)
       n->requests[i].used = 0;
   for (i = 0; i < RNC_NODE_INTERFACES; i++) {
     node_interface *in = &n->interfaces[i];
-    size_t k, best = NODE_HELD, count = 0;
+    size_t k, best = RNC_NODE_HELD, count = 0;
     rnc_result r;
     if (!in->id)
       continue;
     (void)ingress_limit(in, now);
     (void)ingress_limit_pr(in, now);
-    for (k = 0; k < NODE_HELD; k++)
+    for (k = 0; k < RNC_NODE_HELD; k++)
       if (n->held[k].used && n->held[k].iface == in->id) {
         count++;
-        if (best == NODE_HELD || n->held[k].hops < n->held[best].hops)
+        if (best == RNC_NODE_HELD || n->held[k].hops < n->held[best].hops)
           best = k;
       }
     if (!count || now <= in->ic_held_release ||
@@ -2039,7 +2057,7 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
       in->ic_held_release = now + ic_ms(in->ingress.held_release_interval_s, 5u);
     }
   }
-  for (i = 0; i < NODE_ANNOUNCES; i++) {
+  for (i = 0; i < RNC_NODE_ANNOUNCES; i++) {
     node_announce *a = &n->announces[i];
     if (a->used && a->retry_at <= now)
       announce_retry(n, a, now);
@@ -2057,18 +2075,18 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
     }
   for (i = 0; i < RNC_NODE_INTERFACES && room(n, 1); i++) {
     node_interface *iface = &n->interfaces[i];
-    size_t best = NODE_QUEUE, wire;
+    size_t best = RNC_NODE_QUEUE, wire;
     uint8_t raw[RNC_MTU];
     uint64_t wait;
     if (!iface->id || iface->announce_after > now)
       continue;
-    for (j = 0; j < NODE_QUEUE; j++)
+    for (j = 0; j < RNC_NODE_QUEUE; j++)
       if (n->queued[j].used && n->queued[j].iface == iface->id &&
           n->queued[j].due <= now &&
-          (best == NODE_QUEUE ||
+          (best == RNC_NODE_QUEUE ||
            n->queued[j].packet.hops < n->queued[best].packet.hops))
         best = j;
-    if (best == NODE_QUEUE)
+    if (best == RNC_NODE_QUEUE)
       continue;
     if (rnc_packet_encode(&n->queued[best].packet, raw, sizeof(raw), &wire) !=
         RNC_OK)
@@ -2225,7 +2243,7 @@ rnc_result rnc_node_state_import(rnc_node *n, const rnc_identity *owner,
   for (i = 0; i < RNC_NODE_LINKS; i++)
     if (n->links[i].used)
       return RNC_STATE;
-  for (i = 0; i < NODE_QUEUE; i++)
+  for (i = 0; i < RNC_NODE_QUEUE; i++)
     if (n->queued[i].used)
       return RNC_STATE;
   routes = calloc(RNC_NODE_ROUTES, sizeof(*routes));

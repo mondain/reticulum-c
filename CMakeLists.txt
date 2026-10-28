@@ -30,7 +30,14 @@ else()
     set(RNC_HAVE_OPENSSL OFF)
 endif()
 option(RNC_SANITIZERS "Enable address and undefined-behavior sanitizers" OFF)
-option(RNC_BUILD_EXAMPLES "Build the generic POSIX C text peer" ${RNC_TOP_LEVEL})
+# The POSIX host and its tools are host programs sized for the default profile
+# (the rngit page server alone registers 17 request paths); they are off by default
+# with -DRNC_PROFILE=mcu.
+set(RNC_HOST_DEFAULT ${RNC_TOP_LEVEL})
+if(RNC_PROFILE STREQUAL "mcu")
+    set(RNC_HOST_DEFAULT OFF)
+endif()
+option(RNC_BUILD_EXAMPLES "Build the generic POSIX C text peer" ${RNC_HOST_DEFAULT})
 option(RNC_INTEROP_TESTS "Run against a pinned external RNS 1.5.5 checkout" OFF)
 set(RNC_REFERENCE_DIR "" CACHE PATH "Pinned RNS 1.5.5 reference checkout")
 set(RNC_INTEROP_PYTHONPATH "" CACHE STRING "Extra Python module paths for the external oracle")
@@ -59,6 +66,12 @@ else()
     set_source_files_properties(src/third_party/monocypher/monocypher.c
         src/third_party/monocypher/monocypher-ed25519.c PROPERTIES COMPILE_OPTIONS "-w")
     target_compile_definitions(reticulum_c PRIVATE RNC_CRYPTO_PORTABLE=1)
+    # MD5/SHA-384/SHA3 HMAC exist only so the host RPC handshake can answer any
+    # digest Python's multiprocessing names; firmware without RPC can drop them.
+    option(RNC_PORTABLE_RPC_DIGESTS "Portable backend: include MD5/SHA-384/SHA3 HMAC for the RPC handshake" ON)
+    if(NOT RNC_PORTABLE_RPC_DIGESTS)
+        target_compile_definitions(reticulum_c PRIVATE RNC_PORTABLE_NO_RPC_DIGESTS=1)
+    endif()
 endif()
 if(RNC_PROFILE STREQUAL "mcu")
     # Public: the capacity constants shape public structs, so consumers need them too.
@@ -106,6 +119,19 @@ if(BUILD_TESTING)
             src/third_party/monocypher/monocypher-ed25519.c PROPERTIES COMPILE_OPTIONS "-w")
         target_link_libraries(test_crypto_differential PRIVATE OpenSSL::Crypto)
         add_test(NAME reticulum_crypto_differential COMMAND test_crypto_differential)
+    endif()
+    if(UNIX AND NOT APPLE)
+        # Memory footprint report: sizeof the big structs and the heap one node, a
+        # responder and two active links use (counting malloc via linker --wrap).
+        add_executable(footprint tests/footprint.c)
+        target_link_libraries(footprint PRIVATE reticulum_c)
+        target_include_directories(footprint PRIVATE src)
+        target_link_options(footprint PRIVATE
+            -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free)
+        if(RNC_PROFILE STREQUAL "mcu")
+            # Budget for node + destinations + responder + 2 active links.
+            add_test(NAME reticulum_footprint_mcu COMMAND footprint 98304)
+        endif()
     endif()
     add_executable(test_node tests/test_node.c)
     target_link_libraries(test_node PRIVATE reticulum_c)
@@ -280,7 +306,7 @@ if(RNC_HAVE_OPENSSL)
     include(cmake/Leviculum.cmake)
 endif()
 
-option(RNC_BUILD_HOST "Build the optional POSIX interface host and node daemon" ${RNC_TOP_LEVEL})
+option(RNC_BUILD_HOST "Build the optional POSIX interface host and node daemon" ${RNC_HOST_DEFAULT})
 if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
     add_library(reticulum_c_host src/host_posix.c)
     add_library(reticulum_c::host ALIAS reticulum_c_host)

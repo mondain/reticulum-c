@@ -95,6 +95,12 @@ static void test_hmac(void) {
         CHECK(rnc_hmac_digest(RNC_DIGEST_SHA256, (const uint8_t *)"Jefe", 4, "what do ya want for nothing?", 28, o, sizeof(o), &w) &&
               w == 32 && same_hex(o, 32, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"));
         CHECK(!rnc_hmac_digest(99, key, 4, "x", 1, o, sizeof(o), &w));
+        /* RFC 2202 (MD5) and RFC 4231 (SHA-384) test case 2; the portable backend may
+         * be built without these RPC-only digests, in which case it returns 0. */
+        if (rnc_hmac_digest(RNC_DIGEST_MD5, (const uint8_t *)"Jefe", 4, "what do ya want for nothing?", 28, o, sizeof(o), &w))
+            CHECK(w == 16 && same_hex(o, 16, "750c783e6ab0b503eaa86e310a5db738"));
+        if (rnc_hmac_digest(RNC_DIGEST_SHA384, (const uint8_t *)"Jefe", 4, "what do ya want for nothing?", 28, o, sizeof(o), &w))
+            CHECK(w == 48 && same_hex(o, 48, "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649"));
     }
 }
 

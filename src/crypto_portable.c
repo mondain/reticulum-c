@@ -188,14 +188,27 @@ int rnc_hmac_sha256(const uint8_t *key, size_t key_size, const void *data, size_
     return 1;
 }
 
+#ifndef RNC_PORTABLE_NO_RPC_DIGESTS
+#include "crypto_portable_digest.h"
+#endif
+
 int rnc_hmac_digest(int digest, const uint8_t *key, size_t key_size, const void *data,
                     size_t size, uint8_t *out, size_t out_capacity, size_t *written) {
-    uint8_t mac[32];
-    size_t n;
-    if (digest != RNC_DIGEST_SHA256)
-        return 0; /* MD5, SHA-384 and SHA-3 are only needed by the host RPC channel */
-    rnc_hmac_sha256(key, key_size, data, size, mac);
-    n = out_capacity < 32u ? out_capacity : 32u;
+    uint8_t mac[48];
+    size_t n = 32;
+    if (digest == RNC_DIGEST_SHA256) {
+        rnc_hmac_sha256(key, key_size, data, size, mac);
+    } else {
+#ifndef RNC_PORTABLE_NO_RPC_DIGESTS
+        /* MD5, SHA-384 and SHA-3 exist only for the host RPC channel handshake */
+        if (!xhmac(digest, key, key_size, data, size, mac, &n))
+            return 0;
+#else
+        return 0;
+#endif
+    }
+    if (out_capacity < n)
+        n = out_capacity;
     memcpy(out, mac, n);
     *written = n;
     return 1;

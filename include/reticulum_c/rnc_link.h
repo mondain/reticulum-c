@@ -9,10 +9,16 @@ extern "C" {
 #define RNC_LINK_MAX_MDU (((RNC_MAX_MTU - 68u) / 16u) * 16u - 1u)
 #define RNC_CHANNEL_MDU (RNC_LINK_MDU - 6u)
 #define RNC_CHANNEL_MAX_MDU (RNC_LINK_MAX_MDU - 6u)
+#ifndef RNC_LINK_EVENTS
 #define RNC_LINK_EVENTS 64u
+#endif
+#ifndef RNC_CHANNEL_RX_WINDOW
 #define RNC_CHANNEL_RX_WINDOW 48u
+#endif
 #define RNC_CHANNEL_TX_WINDOW 2u
+#ifndef RNC_CHANNEL_TX_MAX
 #define RNC_CHANNEL_TX_MAX 48u
+#endif
 #define RNC_LINK_TOKEN_MAX (16u * 1024u * 1024u)
 #define RNC_RESOURCE_SDU 464u
 #define RNC_RESOURCE_MAX_SDU (RNC_MAX_MTU - 36u)

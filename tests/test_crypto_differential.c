@@ -27,6 +27,7 @@ typedef struct {
     int P##_ed25519_public(const uint8_t *, uint8_t *);                                   \
     int P##_ed25519_sign(const uint8_t *, const void *, size_t, uint8_t *);               \
     int P##_ed25519_verify(const uint8_t *, const void *, size_t, const uint8_t *);       \
+    int P##_hmac_digest(int, const uint8_t *, size_t, const void *, size_t, uint8_t *, size_t, size_t *); \
     int P##_ct_memcmp(const void *, const void *, size_t);
 DECLARE(ossl)
 DECLARE(port)
@@ -157,6 +158,18 @@ int main(void) {
                 }
                 SAME(ossl_ed25519_verify(pub1, data, on, sg) == port_ed25519_verify(pub1, data, on, sg),
                      "ed25519 non-canonical S");
+            }
+        }
+        {
+            /* the RPC handshake digests: MD5, SHA-256, SHA-384, SHA3-256, SHA3-384 */
+            int id;
+            for (id = 1; id <= 5; id++) {
+                uint8_t o1[64], o2[64];
+                size_t w1 = 0, w2 = 0;
+                SAME(ossl_hmac_digest(id, key, kn, data, n, o1, sizeof(o1), &w1) &&
+                         port_hmac_digest(id, key, kn, data, n, o2, sizeof(o2), &w2) && w1 == w2 &&
+                         !memcmp(o1, o2, w1),
+                     "hmac digest");
             }
         }
         SAME((ossl_ct_memcmp(a, b, n % 40 + 1) == 0) == (port_ct_memcmp(a, b, n % 40 + 1) == 0),

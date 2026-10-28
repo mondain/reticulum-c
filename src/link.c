@@ -8,6 +8,11 @@ _Static_assert(sizeof(double) == 8 && DBL_MANT_DIG == 53,
                "IEEE binary64 required for RTT messages");
 _Static_assert(sizeof(float) == 4 && FLT_MANT_DIG == 24, "IEEE binary32 required for RTT messages");
 
+/* A channel packet needs room for a full receive window of delivered messages plus
+ * two bookkeeping events (see rnc_link_input). */
+_Static_assert(RNC_LINK_EVENTS >= RNC_CHANNEL_RX_WINDOW + 2u,
+               "RNC_LINK_EVENTS must be >= RNC_CHANNEL_RX_WINDOW + 2");
+
 rnc_link *rnc_link_new(rnc_random_fn random, void *context) {
     rnc_link *link;
     if (!random)

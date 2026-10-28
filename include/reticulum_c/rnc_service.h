@@ -4,10 +4,18 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+#ifndef RNC_SERVICE_PENDING
 #define RNC_SERVICE_PENDING 8u
+#endif
+#ifndef RNC_SERVICE_HANDLERS
 #define RNC_SERVICE_HANDLERS 24u
+#endif
+#ifndef RNC_SERVICE_EVENTS
 #define RNC_SERVICE_EVENTS 8u
+#endif
+#ifndef RNC_SERVICE_ALLOWLIST
 #define RNC_SERVICE_ALLOWLIST 8u
+#endif
 typedef struct rnc_service rnc_service;
 typedef enum rnc_service_policy {
     RNC_SERVICE_ALLOW_NONE = 0,
