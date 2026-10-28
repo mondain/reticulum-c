@@ -7,7 +7,7 @@ extern "C" {
 #endif
 #define RNC_RESPONDER_LINKS 8u
 #define RNC_RESPONDER_DESTINATIONS 4u
-#define RNC_RESPONDER_HANDLERS 16u
+#define RNC_RESPONDER_HANDLERS 24u
 
 /* Link-terminating destinations for a node: accepts link requests addressed to
  * registered destinations, runs one request/response service per link and calls
@@ -73,6 +73,11 @@ rnc_result rnc_responder_register_file(
  * caller did not identify. */
 rnc_result rnc_responder_request_identity(const rnc_responder *responder,
                                           rnc_identity *identity);
+/* The id of the link the request a handler is running for arrived on (to tell
+ * links apart, as the reference's link_id argument does); RNC_STATE outside a
+ * handler. */
+rnc_result rnc_responder_request_link_id(const rnc_responder *responder,
+                                         uint8_t link_id[16]);
 /* A handler may keep the node serviced while it works (a long subprocess, say)
  * by feeding events to rnc_responder_input and calling rnc_responder_tick from
  * inside the handler: link keepalives and other links' packets keep being

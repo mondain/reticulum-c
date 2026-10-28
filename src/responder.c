@@ -428,6 +428,15 @@ rnc_result rnc_responder_reply(rnc_responder *r, rnc_responder_ticket *t,
     }
   return RNC_STATE;
 }
+rnc_result rnc_responder_request_link_id(const rnc_responder *r,
+                                         uint8_t link_id[16]) {
+  if (!r || !link_id)
+    return RNC_INVALID;
+  if (!r->busy || !r->current)
+    return RNC_STATE;
+  memcpy(link_id, r->current->id, 16);
+  return RNC_OK;
+}
 rnc_result rnc_responder_request_identity(const rnc_responder *r,
                                           rnc_identity *identity) {
   if (!r || !identity)
