@@ -39,8 +39,8 @@ for i in $(seq 1 50); do grep -q "Ready identity=" "$D/node.log" 2>/dev/null && 
 grep -q "Ready identity=" "$D/node.log" || fail "node did not start"
 
 # repositories
-mkdir -p "$D/repos/pub" "$D/repos/priv" "$D/repos/locked" "$D/srv"
-for g in pub priv locked; do
+mkdir -p "$D/repos/pub" "$D/repos/priv" "$D/repos/locked" "$D/repos/ro" "$D/srv"
+for g in pub priv locked ro; do
   git init -q --bare -b main "$D/repos/$g/proj.git"
 done
 # seed content into pub/proj.git
@@ -49,6 +49,7 @@ echo one > "$D/seed/a.txt"; git -C "$D/seed" add a.txt; git -C "$D/seed" commit 
 git -C "$D/seed" push -q "$D/repos/pub/proj.git" main
 git -C "$D/seed" push -q "$D/repos/locked/proj.git" main
 git -C "$D/seed" push -q "$D/repos/priv/proj.git" main
+git -C "$D/seed" push -q "$D/repos/ro/proj.git" main
 
 # client identity (the hash is needed for the permissions)
 mkdir -p "$D/cli" "$D/rns"
@@ -70,7 +71,7 @@ if [ "$MODE" = ref_server ]; then
 enable_transport = No
 share_instance = No
 [logging]
-loglevel = 2
+loglevel = 4
 [interfaces]
   [[T]]
     type = TCPClientInterface
@@ -81,12 +82,16 @@ CFG
   cat > "$D/srv/config" <<CFG
 [rngit]
 announce_interval = 1
+[logging]
+loglevel = 4
 [repositories]
 pub = $D/repos/pub
 priv = $D/repos/priv
 locked = $D/repos/locked
+ro = $D/repos/ro
 [access]
 pub = r:all, w:all
+ro = r:all
 priv = rw:$CLIENT_HASH
 locked = r:none
 CFG
@@ -106,8 +111,10 @@ announce_interval = 1
 pub = $D/repos/pub
 priv = $D/repos/priv
 locked = $D/repos/locked
+ro = $D/repos/ro
 [access]
 pub = r:all, w:all
+ro = r:all
 priv = rw:$CLIENT_HASH
 locked = r:none
 CFG
@@ -182,4 +189,10 @@ set +e
 git clone -q "$URL/priv/proj.git" "$D/w3" 2>/dev/null || fail "clone priv as allowed identity"
 if git clone -q "$URL/locked/proj.git" "$D/w4" 2>/dev/null; then fail "clone of locked repository was allowed"; fi
 if git clone -q "$URL/pub/nosuch.git" "$D/w5" 2>/dev/null; then fail "clone of unknown repository was allowed"; fi
+# a read-only group can be cloned but not pushed to, and its refs cannot be deleted
+git clone -q "$URL/ro/proj.git" "$D/w6" 2>/dev/null || fail "clone read-only repository"
+echo extra > "$D/w6/x.txt"; git -C "$D/w6" add x.txt; git -C "$D/w6" commit -q -m extra
+if git -C "$D/w6" push -q origin main 2>/dev/null; then fail "push to a read-only repository was allowed"; fi
+if git -C "$D/w6" push -q origin :refs/heads/main 2>/dev/null; then fail "ref delete in a read-only repository was allowed"; fi
+[ "$(git -C "$D/repos/ro/proj.git" rev-parse main)" = "$(git -C "$D/seed" rev-parse main)" ] || fail "read-only repository changed"
 echo PASS

@@ -811,3 +811,51 @@ daemon tests, and a differential test in which the unmodified reference's
 from an endpoint and sends its own announce to it. The tests fail when the
 duplicate window, the signature check, the peer timeout or the endpoint in the
 command is removed. Not tested on real hardware.
+
+## rngit: git over Reticulum (`feature/rngit`)
+
+`reticulum-c-git` is a repository node for the reference `rngit` protocol and
+`reticulum-c-git-remote` is a remote helper for `rns://DESTINATION/GROUP/REPO`
+URLs (install it as `git-remote-rns`). Both attach to a node over TCP, like the
+other tools; the helper takes the node from `RNGIT_CONNECT=HOST:PORT` or the
+`connect` key of `client_config`.
+
+The SDK gained what the protocol needs: a service, responder and requester can
+answer and receive a *file*, raw data plus one MessagePack metadata value sent
+as one Resource bound to the request (the reference's file-object response, used
+for fetch bundles), through `rnc_service_respond_file`,
+`rnc_responder_register_file` and `rnc_requester_poll_file`.
+
+The node serves four paths under the destination `git.repositories`:
+`/git/list` (refs and the HEAD symref, `for_push` checks write access),
+`/git/fetch` (a bundle of the requested refs minus what the client has, or
+a bare success when the bundle would be empty), `/git/push` (a bundle that is
+verified and fetched into the ref, or `update_ref` operations when the objects
+are already there) and `/git/delete`. Permissions resolve as in the reference:
+a repository's own list for a permission replaces the group's for that
+permission, `none` wins, an administrator passes, blocked identities never do.
+The configuration directory has the reference's `config`, `group.allowed` and
+`NAME.allowed` files (an executable one is run and its output used). Refs and
+SHAs are checked with the reference's rules (a corpus run through the reference's
+own `san_ref` is a test), and every git invocation is an argument vector, never a
+shell.
+
+Differences from the reference: the whole of a bundle is held in memory, so a
+request or response is limited (`max_bundle`, 8 MiB by default, 15 MiB at most;
+the reference has no limit); a request is answered synchronously, so a git
+operation that outlives the 30 second request window is lost; the helper opens a
+link per request where the reference keeps one; a SHA with whitespace in it is
+refused (the reference accepts it); a missing field in a request is answered
+with an invalid-request status rather than a remote error. Not implemented:
+creating repositories, forks, mirrors and sync, permission and release
+management, work documents, statistics, the CLI subcommands of `rngit`, the
+nomadnet page server and commit signatures.
+
+Evidence: a real `git clone`, `push`, `pull`, branch push and delete, push of
+history the node already has, and permission checks (read, write, none, unknown
+repository) in three pairings against an unmodified reference: the reference
+helper with the C node, the C helper with the C node, and the C helper with the
+reference server. Handler tests send the requests a git client never would
+(writes without permission, hostile ref names, an unidentified peer). The tests
+fail when the write check of the push handler, the `refs/` restriction of
+delete or the ref rules are removed. Not tested on real radio links.

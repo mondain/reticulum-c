@@ -203,7 +203,7 @@ static inline int rngit_san_ref(const char *ref) {
       ref[n - 1] == '.')
     return 0;
   if (!strchr(ref, '/') || strstr(ref, "..") || strstr(ref, "/.") ||
-      strstr(ref, "//"))
+      strstr(ref, "//") || strstr(ref, "@{") || !strcmp(ref, "@"))
     return 0;
   for (i = 0; i <= n; ++i)
     if (ref[i] == '/' || ref[i] == 0) {
