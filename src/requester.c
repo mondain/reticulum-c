@@ -2,6 +2,7 @@
 #include <openssl/crypto.h>
 #include <reticulum_c/rnc_link.h>
 #include <reticulum_c/rnc_requester.h>
+#include <reticulum_c/rnc_responder.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,8 +25,8 @@ typedef struct requester_job {
   uint32_t tag;
   uint64_t deadline, close_deadline;
   rnc_requester_status status;
-  uint8_t *response;
-  size_t response_size;
+  uint8_t *response, *metadata;
+  size_t response_size, metadata_size;
 } requester_job;
 struct rnc_requester {
   rnc_node *node;
@@ -70,6 +71,7 @@ static void job_clear(rnc_requester *r, requester_job *j) {
     OPENSSL_cleanse(j->value, j->value_size);
   free(j->value);
   free(j->response);
+  free(j->metadata);
   OPENSSL_cleanse(j, sizeof(*j));
 }
 void rnc_requester_free(rnc_requester *r) {
@@ -187,16 +189,23 @@ static void job_service_events(rnc_requester *r, requester_job *j,
                                uint64_t now) {
   rnc_service_event event;
   size_t got;
-  while (rnc_service_poll(j->service, &event, r->scratch, r->max_value, &got) ==
+  uint8_t meta[RNC_RESPONDER_METADATA_MAX];
+  size_t meta_got;
+  while (rnc_service_poll_file(j->service, &event, r->scratch, r->max_value,
+                               &got, meta, sizeof(meta), &meta_got) ==
          RNC_OK) {
     if (event.type == RNC_SERVICE_RESPONSE && !j->finished) {
       j->response = got ? malloc(got) : NULL;
-      if (got && !j->response)
+      j->metadata = meta_got ? malloc(meta_got) : NULL;
+      if ((got && !j->response) || (meta_got && !j->metadata))
         job_finish(j, RNC_REQUESTER_FAILED, now);
       else {
         if (got)
           memcpy(j->response, r->scratch, got);
+        if (meta_got)
+          memcpy(j->metadata, meta, meta_got);
         j->response_size = got;
+        j->metadata_size = meta_got;
         job_finish(j, RNC_REQUESTER_DONE, now);
       }
     } else if (event.type == RNC_SERVICE_TIMEOUT ||
@@ -298,6 +307,12 @@ rnc_result rnc_requester_progress(const rnc_requester *r, uint32_t tag,
 }
 rnc_result rnc_requester_poll(rnc_requester *r, rnc_requester_result *result,
                               void *response, size_t capacity) {
+  return rnc_requester_poll_file(r, result, response, capacity, NULL, 0);
+}
+rnc_result rnc_requester_poll_file(rnc_requester *r,
+                                   rnc_requester_result *result, void *response,
+                                   size_t capacity, void *metadata,
+                                   size_t metadata_capacity) {
   size_t i;
   if (!r || !result)
     return RNC_INVALID;
@@ -310,10 +325,14 @@ rnc_result rnc_requester_poll(rnc_requester *r, rnc_requester_result *result,
     result->status = j->status;
     memcpy(result->destination, j->destination, 16);
     result->size = j->response_size;
-    if (j->response_size > capacity || (j->response_size && !response))
+    result->metadata_size = j->metadata_size;
+    if (j->response_size > capacity || (j->response_size && !response) ||
+        (metadata && j->metadata_size > metadata_capacity))
       return RNC_NO_SPACE;
     if (j->response_size)
       memcpy(response, j->response, j->response_size);
+    if (metadata && j->metadata_size)
+      memcpy(metadata, j->metadata, j->metadata_size);
     job_clear(r, j);
     return RNC_OK;
   }

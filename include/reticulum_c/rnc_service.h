@@ -29,6 +29,8 @@ typedef struct rnc_service_event {
     int identified;
     double requested_at;
     size_t data_size;
+    int has_metadata;     /* RESPONSE only: a file response, see respond_file */
+    size_t metadata_size;
 } rnc_service_event;
 /* Borrows link/RNG. Encoded values are complete MessagePack objects, copied on
  * acceptance, never interpreted as application commands. One outgoing and one
@@ -73,6 +75,14 @@ rnc_result rnc_service_set_max_request_size(rnc_service *service, size_t max_siz
 /* Only responds once to an admitted, unexpired request. */
 rnc_result rnc_service_respond(rnc_service *service, const uint8_t request_id[16],
                                const void *encoded_value, size_t value_size, uint64_t now_ms);
+/* Answers with a file instead of a MessagePack value: `data` (raw bytes, at
+ * most max_value) and one complete encoded MessagePack `metadata` value travel
+ * as a single Resource bound to the request, with no [id, value] envelope. This
+ * is what a reference handler returning a file object produces; the requester's
+ * RequestReceipt then carries the data as its response and the metadata. */
+rnc_result rnc_service_respond_file(rnc_service *service, const uint8_t request_id[16],
+                                    const void *data, size_t size, const void *metadata,
+                                    size_t metadata_size, uint64_t now_ms);
 /* Forward link packet/resource/closed events; AGAIN means unhandled, or retry
  * when the bounded application event queue is full. Retain the event then. */
 rnc_result rnc_service_input(rnc_service *service, const rnc_link_event *event, uint64_t now_ms);
@@ -82,6 +92,13 @@ rnc_result rnc_service_tick(rnc_service *service, uint64_t now_ms);
  * the required capacity in *written and does not alter event/output bytes. */
 rnc_result rnc_service_poll(rnc_service *service, rnc_service_event *event, void *value,
                             size_t capacity, size_t *written);
+/* Like rnc_service_poll, and also copies the metadata of a file response
+ * (event.has_metadata) into `metadata`. NO_SPACE when either buffer is too
+ * small leaves the event queued and reports the data size in *written and the
+ * metadata size in *metadata_written. */
+rnc_result rnc_service_poll_file(rnc_service *service, rnc_service_event *event, void *value,
+                                 size_t capacity, size_t *written, void *metadata,
+                                 size_t metadata_capacity, size_t *metadata_written);
 #ifdef __cplusplus
 }
 #endif

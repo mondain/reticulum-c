@@ -29,6 +29,23 @@ typedef rnc_result (*rnc_responder_handler)(void *context, const char *path,
                                             uint8_t *response, size_t capacity,
                                             size_t *written);
 
+/* A handler that may answer with a file (the reference's file-object
+ * response): raw `data` plus one encoded MessagePack `metadata` value, sent as a
+ * Resource. The buffers belong to the responder; fill them and set the sizes.
+ * data_capacity is max_value, metadata_capacity RNC_RESPONDER_METADATA_MAX.
+ * Set data_size (and metadata_size) to answer with the file; otherwise the
+ * handler answers like a plain one through `response`/`written`. */
+#define RNC_RESPONDER_METADATA_MAX 256u
+typedef struct rnc_responder_file {
+  uint8_t *data;
+  size_t data_capacity, data_size;
+  uint8_t *metadata;
+  size_t metadata_capacity, metadata_size;
+} rnc_responder_file;
+typedef rnc_result (*rnc_responder_file_handler)(
+    void *context, const char *path, const uint8_t *request, size_t request_size,
+    const uint8_t *identity_hash, uint8_t *response, size_t capacity,
+    size_t *written, rnc_responder_file *file);
 /* max_value bounds each request and response (0 = 1 MiB). */
 rnc_responder *rnc_responder_new(rnc_node *node, size_t max_value,
                                  rnc_random_fn random, void *random_context);
@@ -46,6 +63,11 @@ rnc_result rnc_responder_register(rnc_responder *responder,
                                   const uint8_t (*allowed)[16],
                                   size_t allowed_count,
                                   rnc_responder_handler handler, void *context);
+/* As rnc_responder_register, for a handler that can answer with a file. */
+rnc_result rnc_responder_register_file(
+    rnc_responder *responder, const uint8_t destination[16], const char *path,
+    rnc_service_policy policy, const uint8_t (*allowed)[16],
+    size_t allowed_count, rnc_responder_file_handler handler, void *context);
 /* Destination.set_max_request_size for every link to the destination, present
  * and future (RNC_SERVICE_NO_LIMIT removes the limit). */
 rnc_result rnc_responder_set_max_request_size(rnc_responder *responder,

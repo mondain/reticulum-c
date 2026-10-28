@@ -292,6 +292,52 @@ static void bulk_replay_test(void) {
     CHECK(s.requests == 2 && s.responses == 1 && !s.timeouts);
     sfinish(&s);
 }
+/* A response sent as a file: the raw data and its metadata travel as one
+ * Resource bound to the request, with no [id, value] envelope (what a reference
+ * handler returning a file object produces). */
+static void file_test(void) {
+    spair s;
+    size_t i, n, m, got = 0;
+    uint8_t req = 0xc0, meta[] = {0x81, 0x01, 0x00}, *data, *buf, mbuf[16];
+    rnc_service_event e;
+    unsigned step;
+    sinit(&s, 8000, RNC_SERVICE_ALLOW_ALL);
+    s.value = &req;
+    s.size = 1;
+    data = malloc(5000);
+    buf = malloc(8100);
+    CHECK(data && buf);
+    for (i = 0; i < 5000; i++)
+        data[i] = (uint8_t)(i * 31u + 7u);
+    CHECK(rnc_service_request(s.a, "/echo", &req, 1, 1700000000, s.links.now, 30000, s.id) ==
+          RNC_OK);
+    for (step = 0; step < 3000 && !got; step++) {
+        CHECK(rnc_service_pump(s.a, s.links.now) == RNC_OK);
+        CHECK(rnc_service_pump(s.b, s.links.now) == RNC_OK);
+        swire(&s, s.links.a, s.links.b, s.a);
+        swire(&s, s.links.b, s.links.a, s.b);
+        while (rnc_service_poll(s.b, &e, buf, 8100, &n) == RNC_OK)
+            if (e.type == RNC_SERVICE_REQUEST) {
+                CHECK(rnc_service_respond_file(s.b, e.request_id, data, 5000, meta, sizeof(meta),
+                                               s.links.now) == RNC_OK);
+                s.requests++;
+            }
+        while (rnc_service_poll_file(s.a, &e, buf, 8100, &n, mbuf, sizeof(mbuf), &m) == RNC_OK)
+            if (e.type == RNC_SERVICE_RESPONSE) {
+                CHECK(e.has_metadata && n == 5000 && !memcmp(buf, data, 5000));
+                CHECK(m == sizeof(meta) && !memcmp(mbuf, meta, m));
+                CHECK(!memcmp(e.request_id, s.id, 16));
+                got = 1;
+            }
+        s.links.now += 10;
+        CHECK(rnc_service_tick(s.a, s.links.now) == RNC_OK);
+        CHECK(rnc_service_tick(s.b, s.links.now) == RNC_OK);
+    }
+    CHECK(got && s.requests == 1);
+    free(data);
+    free(buf);
+    sfinish(&s);
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     if (!strcmp(argv[1], "inline"))
@@ -308,6 +354,8 @@ int main(int argc, char **argv) {
         recovery_test();
     else if (!strcmp(argv[1], "backpressure"))
         backpressure_test();
+    else if (!strcmp(argv[1], "file"))
+        file_test();
     else if (!strcmp(argv[1], "bulk_replay"))
         bulk_replay_test();
     else

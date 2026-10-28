@@ -13,6 +13,7 @@ typedef struct responder_handler {
   uint8_t allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t allowed_count;
   rnc_responder_handler function;
+  rnc_responder_file_handler file_function;
   void *context;
 } responder_handler;
 typedef struct responder_destination {
@@ -34,7 +35,7 @@ struct rnc_responder {
   size_t max_value;
   rnc_random_fn random;
   void *random_context;
-  uint8_t *request, *response;
+  uint8_t *request, *response, *file_data, *file_meta;
   responder_destination destinations[RNC_RESPONDER_DESTINATIONS];
   responder_slot slots[RNC_RESPONDER_LINKS];
 };
@@ -76,8 +77,12 @@ void rnc_responder_free(rnc_responder *r) {
     slot_release(r, &r->slots[i]);
   OPENSSL_cleanse(r->request, r->max_value);
   OPENSSL_cleanse(r->response, r->max_value);
+  if (r->file_data)
+    OPENSSL_cleanse(r->file_data, r->max_value);
   free(r->request);
   free(r->response);
+  free(r->file_data);
+  free(r->file_meta);
   OPENSSL_cleanse(r, sizeof(*r));
   free(r);
 }
@@ -109,18 +114,19 @@ rnc_result rnc_responder_add_destination(rnc_responder *r,
     }
   return RNC_NO_SPACE;
 }
-rnc_result rnc_responder_register(rnc_responder *r,
-                                  const uint8_t destination[16],
-                                  const char *path, rnc_service_policy policy,
-                                  const uint8_t (*allowed)[16],
-                                  size_t allowed_count,
-                                  rnc_responder_handler handler,
-                                  void *context) {
+static rnc_result register_handler(rnc_responder *r,
+                                   const uint8_t destination[16],
+                                   const char *path, rnc_service_policy policy,
+                                   const uint8_t (*allowed)[16],
+                                   size_t allowed_count,
+                                   rnc_responder_handler handler,
+                                   rnc_responder_file_handler file_handler,
+                                   void *context) {
   responder_destination *d;
   responder_handler *h = NULL;
   uint8_t full[32];
   size_t i, n;
-  if (!r || !destination || !path || !*path || !handler ||
+  if (!r || !destination || !path || !*path || (!handler && !file_handler) ||
       policy < RNC_SERVICE_ALLOW_NONE || policy > RNC_SERVICE_ALLOW_LIST ||
       allowed_count > RNC_SERVICE_ALLOWLIST || (!allowed && allowed_count) ||
       (policy != RNC_SERVICE_ALLOW_LIST && allowed_count))
@@ -152,8 +158,40 @@ rnc_result rnc_responder_register(rnc_responder *r,
   if (allowed_count)
     memcpy(h->allowed, allowed, allowed_count * 16);
   h->function = handler;
+  h->file_function = file_handler;
   h->context = context;
   return RNC_OK;
+}
+rnc_result rnc_responder_register(rnc_responder *r,
+                                  const uint8_t destination[16],
+                                  const char *path, rnc_service_policy policy,
+                                  const uint8_t (*allowed)[16],
+                                  size_t allowed_count,
+                                  rnc_responder_handler handler,
+                                  void *context) {
+  if (!handler)
+    return RNC_INVALID;
+  return register_handler(r, destination, path, policy, allowed, allowed_count,
+                          handler, NULL, context);
+}
+rnc_result rnc_responder_register_file(
+    rnc_responder *r, const uint8_t destination[16], const char *path,
+    rnc_service_policy policy, const uint8_t (*allowed)[16],
+    size_t allowed_count, rnc_responder_file_handler handler, void *context) {
+  if (!handler)
+    return RNC_INVALID;
+  if (r && !r->file_data) {
+    r->file_data = malloc(r->max_value);
+    r->file_meta = malloc(RNC_RESPONDER_METADATA_MAX);
+    if (!r->file_data || !r->file_meta) {
+      free(r->file_data);
+      free(r->file_meta);
+      r->file_data = r->file_meta = NULL;
+      return RNC_NO_SPACE;
+    }
+  }
+  return register_handler(r, destination, path, policy, allowed, allowed_count,
+                          NULL, handler, context);
 }
 rnc_result rnc_responder_set_max_request_size(rnc_responder *r,
                                               const uint8_t destination[16],
@@ -265,11 +303,26 @@ static void run_requests(rnc_responder *r, responder_slot *s, uint64_t now) {
     for (i = 0; i < RNC_RESPONDER_HANDLERS; i++)
       if (d->handlers[i].used &&
           !memcmp(d->handlers[i].hash, event.path_hash, 16)) {
-        rnc_result result = d->handlers[i].function(
-            d->handlers[i].context, d->handlers[i].path, r->request, got,
-            event.identified ? event.identity_hash : NULL, r->response,
-            r->max_value, &written);
-        if (result == RNC_OK && written)
+        rnc_result result;
+        rnc_responder_file file = {r->file_data, r->file_data ? r->max_value : 0, 0,
+                                   r->file_meta, r->file_meta ? RNC_RESPONDER_METADATA_MAX : 0, 0};
+        const uint8_t *who = event.identified ? event.identity_hash : NULL;
+        if (d->handlers[i].file_function)
+          result = d->handlers[i].file_function(
+              d->handlers[i].context, d->handlers[i].path, r->request, got, who,
+              r->response, r->max_value, &written, &file);
+        else
+          result = d->handlers[i].function(
+              d->handlers[i].context, d->handlers[i].path, r->request, got, who,
+              r->response, r->max_value, &written);
+        if (result == RNC_OK && file.data_size && file.metadata_size &&
+            file.data_size <= r->max_value &&
+            file.metadata_size <= RNC_RESPONDER_METADATA_MAX)
+          (void)rnc_service_respond_file(s->service, event.request_id,
+                                         file.data, file.data_size,
+                                         file.metadata, file.metadata_size,
+                                         now);
+        else if (result == RNC_OK && written)
           (void)rnc_service_respond(s->service, event.request_id, r->response,
                                     written, now);
         break;

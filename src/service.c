@@ -22,7 +22,7 @@ typedef struct service_pending {
 } service_pending;
 typedef struct service_queued {
     rnc_service_event event;
-    uint8_t *data;
+    uint8_t *data, *metadata;
 } service_queued;
 struct rnc_service {
     rnc_link *link;
@@ -79,9 +79,10 @@ static int empty_slot(service_pending *p) {
             return (int)i;
     return -1;
 }
-static rnc_result queue(rnc_service *s, const rnc_service_event *e, const uint8_t *data, size_t n) {
+static rnc_result queue_file(rnc_service *s, const rnc_service_event *e, const uint8_t *data,
+                             size_t n, const uint8_t *metadata, size_t mn) {
     service_queued *q;
-    uint8_t *copy = NULL;
+    uint8_t *copy = NULL, *mcopy = NULL;
     if (s->count == RNC_SERVICE_EVENTS)
         return RNC_AGAIN;
     if (n) {
@@ -90,12 +91,26 @@ static rnc_result queue(rnc_service *s, const rnc_service_event *e, const uint8_
             return RNC_NO_SPACE;
         memcpy(copy, data, n);
     }
+    if (mn) {
+        mcopy = malloc(mn);
+        if (!mcopy) {
+            free(copy);
+            return RNC_NO_SPACE;
+        }
+        memcpy(mcopy, metadata, mn);
+    }
     q = &s->events[(s->head + s->count) % RNC_SERVICE_EVENTS];
     q->event = *e;
     q->event.data_size = n;
+    q->event.has_metadata = mn != 0;
+    q->event.metadata_size = mn;
     q->data = copy;
+    q->metadata = mcopy;
     s->count++;
     return RNC_OK;
+}
+static rnc_result queue(rnc_service *s, const rnc_service_event *e, const uint8_t *data, size_t n) {
+    return queue_file(s, e, data, n, NULL, 0);
 }
 static int array(rmp *p, uint64_t expected) {
     const uint8_t *b;
@@ -175,6 +190,7 @@ void rnc_service_free(rnc_service *s) {
             OPENSSL_cleanse(s->events[i].data, s->events[i].event.data_size);
             free(s->events[i].data);
         }
+        free(s->events[i].metadata);
     }
     rnc_resource_free(s->tx);
     rnc_resource_free(s->rx);
@@ -323,6 +339,33 @@ rnc_result rnc_service_respond(rnc_service *s, const uint8_t id[16], const void 
     }
     return result;
 }
+rnc_result rnc_service_respond_file(rnc_service *s, const uint8_t id[16], const void *data,
+                                    size_t n, const void *metadata, size_t mn, uint64_t now) {
+    int index;
+    rnc_result result;
+    rnc_resource_options o = {0};
+    if (!s || !id || !data || !n || n > s->max_value || !metadata || !mn || mn > s->max_value ||
+        !rmp_value(metadata, mn) || now < s->now)
+        return RNC_INVALID;
+    if (!rnc_link_is_active(s->link))
+        return RNC_STATE;
+    index = slot(s->incoming, id);
+    if (index < 0 || now >= s->incoming[index].deadline)
+        return RNC_STATE;
+    o.request_id = id;
+    o.is_response = 1;
+    o.metadata = metadata;
+    o.metadata_size = mn;
+    result = rnc_resource_send(s->tx, data, n, &o, now);
+    if (result == RNC_OK) {
+        memcpy(s->tx_id, id, 16);
+        s->tx_request = 0;
+        remember_request(s, id);
+        OPENSSL_cleanse(&s->incoming[index], sizeof(s->incoming[index]));
+        s->now = now;
+    }
+    return result;
+}
 static rnc_result accept_request(rnc_service *s, const uint8_t id[16], const uint8_t *p, size_t n,
                                  uint64_t now) {
     rmp m = {p, n, 0};
@@ -409,6 +452,24 @@ static rnc_result accept_response(rnc_service *s, const uint8_t *binding, const 
     e.type = RNC_SERVICE_RESPONSE;
     memcpy(e.request_id, id, 16);
     result = queue(s, &e, p + start, n - start);
+    if (result == RNC_OK)
+        OPENSSL_cleanse(&s->pending[index], sizeof(s->pending[index]));
+    return result;
+}
+static rnc_result accept_file_response(rnc_service *s, const uint8_t *id, const uint8_t *p,
+                                       size_t n, const uint8_t *meta, size_t mn, uint64_t now) {
+    rnc_service_event e = {0};
+    rnc_result result;
+    int index = slot(s->pending, id);
+    if (index < 0)
+        return RNC_OK; /* Authenticated late/unknown responses are discarded. */
+    if (s->pending[index].timed_out || now >= s->pending[index].deadline) {
+        s->pending[index].timed_out = 1;
+        return RNC_OK;
+    }
+    e.type = RNC_SERVICE_RESPONSE;
+    memcpy(e.request_id, id, 16);
+    result = queue_file(s, &e, p, n, meta, mn);
     if (result == RNC_OK)
         OPENSSL_cleanse(&s->pending[index], sizeof(s->pending[index]));
     return result;
@@ -544,9 +605,20 @@ rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
         size_t n;
         if (!p)
             return RNC_NO_SPACE;
+        size_t mn = 0;
+        uint8_t *meta = NULL;
         result = rnc_resource_read(s->rx, p, s->max_value + 64u, &n);
+        if (result == RNC_OK && s->rx_response) {
+            meta = malloc(s->max_value + 64u);
+            if (!meta)
+                result = RNC_NO_SPACE;
+            else
+                result = rnc_resource_metadata(s->rx, meta, s->max_value + 64u, &mn);
+        }
         if (result == RNC_OK) {
-            if (s->rx_response)
+            if (s->rx_response && mn)
+                result = accept_file_response(s, s->rx_id, p, n, meta, mn, now);
+            else if (s->rx_response)
                 result = accept_response(s, s->rx_id, p, n, now);
             else {
                 result = rnc_hash(p, n, hash);
@@ -558,6 +630,10 @@ rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
         }
         OPENSSL_cleanse(p, s->max_value + 64u);
         free(p);
+        if (meta) {
+            OPENSSL_cleanse(meta, s->max_value + 64u);
+            free(meta);
+        }
         if (result == RNC_AGAIN)
             return RNC_OK;
         /* Completed input is consumed even when its service envelope is
@@ -605,30 +681,46 @@ rnc_result rnc_service_tick(rnc_service *s, uint64_t now) {
     s->now = now;
     return rnc_service_pump(s, now);
 }
-rnc_result rnc_service_poll(rnc_service *s, rnc_service_event *event, void *value, size_t cap,
-                            size_t *written) {
+rnc_result rnc_service_poll_file(rnc_service *s, rnc_service_event *event, void *value, size_t cap,
+                                 size_t *written, void *metadata, size_t mcap, size_t *mwritten) {
     service_queued *q;
     if (written)
         *written = 0;
-    if (!s || !event || !written || (!value && cap))
+    if (mwritten)
+        *mwritten = 0;
+    if (!s || !event || !written || (!value && cap) || (!metadata && mcap) || (metadata && !mwritten))
         return RNC_INVALID;
     if (!s->count)
         return RNC_AGAIN;
     q = &s->events[s->head];
-    if (cap < q->event.data_size) {
+    if (cap < q->event.data_size || (metadata && mcap < q->event.metadata_size)) {
         *written = q->event.data_size;
+        if (mwritten)
+            *mwritten = q->event.metadata_size;
         return RNC_NO_SPACE;
     }
     *event = q->event;
     if (q->event.data_size)
         memcpy(value, q->data, q->event.data_size);
     *written = q->event.data_size;
+    if (metadata && q->event.metadata_size)
+        memcpy(metadata, q->metadata, q->event.metadata_size);
+    if (mwritten)
+        *mwritten = metadata ? q->event.metadata_size : 0;
     if (q->data) {
         OPENSSL_cleanse(q->data, q->event.data_size);
         free(q->data);
+    }
+    if (q->metadata) {
+        OPENSSL_cleanse(q->metadata, q->event.metadata_size);
+        free(q->metadata);
     }
     memset(q, 0, sizeof(*q));
     s->head = (s->head + 1u) % RNC_SERVICE_EVENTS;
     s->count--;
     return RNC_OK;
+}
+rnc_result rnc_service_poll(rnc_service *s, rnc_service_event *event, void *value, size_t cap,
+                            size_t *written) {
+    return rnc_service_poll_file(s, event, value, cap, written, NULL, 0, NULL);
 }
