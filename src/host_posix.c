@@ -4,6 +4,7 @@
 #endif
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -11,6 +12,7 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <openssl/crypto.h>
+#include <openssl/rand.h>
 #include <poll.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_i2p.h>
@@ -269,7 +271,8 @@ typedef struct host_frame {
 #define TNC_KIND(k) ((k) == RNC_HOST_KISS || (k) == RNC_HOST_AX25)
 /* Kinds backed by a device node, as opposed to sockets. */
 #define DEVICE_KIND(k)                                                       \
-  (((k) >= RNC_HOST_SERIAL && (k) <= RNC_HOST_AX25) || (k) == RNC_HOST_RNODE_MULTI)
+  (((k) >= RNC_HOST_SERIAL && (k) <= RNC_HOST_AX25) ||                        \
+   (k) == RNC_HOST_RNODE_MULTI || (k) == RNC_HOST_WEAVE)
 /* I2P: the SAM conversation a socket is in. Zero once the socket carries the
  * stream (or, for the controller, never: it keeps answering PING). */
 enum { SAM_NONE = 0, SAM_SESSION, SAM_CONNECT, SAM_ACCEPT };
@@ -292,6 +295,17 @@ enum {
 #define I2P_READ_TIMEOUT_MS 110000u
 #define I2P_PEER_MAX 704u
 #define HOST_FLAP_SLOTS 32u
+/* Weave: WDCL frames in HDLC to a switch at 3 Mbaud; every endpoint the
+ * switch reports is a peer interface. */
+#define WEAVE_MTU 1024u
+#define WEAVE_BITRATE 250000u
+#define WEAVE_BAUD 3000000u
+#define WEAVE_HANDSHAKE_MS 2000u
+#define WEAVE_PEER_TIMEOUT_MS 20000u
+#define WEAVE_RETRY_MS 5000u
+#define WEAVE_DEDUPE_SLOTS 48u
+#define WEAVE_DEDUPE_TTL_MS 750u
+enum { WEAVE_IDLE = 0, WEAVE_DISCOVERING, WEAVE_CONNECTING, WEAVE_CONNECTED };
 typedef struct host_flap {
   char ip[INET6_ADDRSTRLEN];
   uint64_t last;
@@ -336,6 +350,17 @@ typedef struct host_interface {
   uint32_t tx_owner;
   rnc_host_subradio subs[RNC_HOST_SUBRADIOS];
   char sub_names[RNC_HOST_SUBRADIOS][64];
+  /* WEAVE: the switch identity, kept across reconnects, and what the handshake
+   * learnt; a peer (weave_peer) keeps the switch id and its endpoint. The
+   * dedupe ring drops a packet that two endpoints deliver in quick succession,
+   * as the reference does when a switch relays through several routes. */
+  int weave_peer, weave_step;
+  rnc_identity weave_id;
+  uint8_t weave_sw[4], weave_remote[4], weave_endpoint[8];
+  uint64_t weave_deadline;
+  uint8_t dedupe[WEAVE_DEDUPE_SLOTS][8];
+  uint64_t dedupe_at[WEAVE_DEDUPE_SLOTS];
+  unsigned dedupe_used, dedupe_next;
   unsigned tries;
   uint64_t connect_deadline;
   char ax_call[7];
@@ -555,6 +580,17 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
     f->tx_owner = 0;
     f->radio_deadline = 0;
   }
+  if (f->status.kind == RNC_HOST_WEAVE && !f->weave_peer) {
+    size_t i;
+    for (i = 0; i < RNC_HOST_SLOTS; ++i)
+      if (h->interfaces[i].used && h->interfaces[i].weave_peer &&
+          h->interfaces[i].status.parent_id == f->status.interface_id)
+        (void)rnc_host_remove(h, h->interfaces[i].status.interface_id);
+    f->weave_step = WEAVE_IDLE;
+    f->weave_deadline = 0;
+    f->tx_owner = 0;
+    f->dedupe_used = f->dedupe_next = 0;
+  }
   f->status.online = 0;
   f->sam_step = 0;
   f->sam_len = 0;
@@ -581,8 +617,9 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
                                 ? f->radio.reconnect_wait_ms
                                 : 5000u);
   }
-  else if (f->status.kind == RNC_HOST_RNODE_MULTI)
-    f->retry_at = h->now + 5000u; /* the reference's RNode Multi reconnect wait */
+  else if (f->status.kind == RNC_HOST_RNODE_MULTI ||
+           (f->status.kind == RNC_HOST_WEAVE && !f->weave_peer))
+    f->retry_at = h->now + 5000u; /* the reference's reconnect wait */
   else if (f->status.kind == RNC_HOST_PIPE)
     f->retry_at = h->now + (f->radio.respawn_delay_ms
                                 ? f->radio.respawn_delay_ms
@@ -739,6 +776,10 @@ static speed_t baud_value(unsigned value) {
 #ifdef B230400
   case 230400:
     return B230400;
+#endif
+#ifdef B3000000
+  case 3000000:
+    return B3000000;
 #endif
   default:
     return (speed_t)0;
@@ -1185,13 +1226,19 @@ void rnc_host_free(rnc_host *h) {
   OPENSSL_cleanse(h, sizeof(*h));
   free(h);
 }
+static rnc_result weave_begin(host_interface *f);
+static rnc_result host_random(void *context, uint8_t *out, size_t size) {
+  (void)context;
+  return size <= INT_MAX && RAND_priv_bytes(out, (int)size) == 1 ? RNC_OK
+                                                                  : RNC_CRYPTO;
+}
 rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   host_interface *f;
   struct sockaddr_storage bind_address;
   socklen_t bind_size;
   rnc_result r = RNC_STATE;
   if (!h || !c || !id || id >= 0x80000000u || c->kind < RNC_HOST_TCP_LISTEN ||
-      c->kind > RNC_HOST_RNODE_MULTI || c->kiss_port > 15 || find_interface(h, id))
+      c->kind > RNC_HOST_WEAVE || c->kiss_port > 15 || find_interface(h, id))
     return RNC_INVALID;
   if (c->kind == RNC_HOST_RNODE &&
       (!c->frequency || !c->bandwidth || c->spreading_factor < 5 ||
@@ -1237,6 +1284,10 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     return RNC_INVALID;
   if (c->kiss_framing && c->kind != RNC_HOST_TCP_CONNECT)
     return RNC_INVALID;
+  if (c->kind == RNC_HOST_WEAVE &&
+      (!c->address || !*c->address || (c->mtu && c->mtu != WEAVE_MTU) ||
+       (c->serial_baud && !baud_value(c->serial_baud))))
+    return RNC_INVALID;
   if (c->kind == RNC_HOST_I2P) {
     size_t k;
     if (!c->i2p_key_path || !*c->i2p_key_path ||
@@ -1259,7 +1310,8 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
         return RNC_INVALID;
   }
   if (c->mtu && (c->mtu < RNC_MTU || c->mtu > RNC_MAX_MTU ||
-                 (DEVICE_KIND(c->kind) && c->mtu > RNC_MTU) ||
+                 (DEVICE_KIND(c->kind) && c->kind != RNC_HOST_WEAVE &&
+                  c->mtu > RNC_MTU) ||
                  (c->kind == RNC_HOST_AUTO && c->mtu > 1196)))
     return RNC_INVALID;
   if (c->ifac && (!c->ifac->size || c->ifac->size > RNC_IFAC_MAX_SIZE))
@@ -1278,6 +1330,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->status.mtu = c->mtu                       ? c->mtu
                   : c->kind == RNC_HOST_AUTO ? 1196
                   : c->kind == RNC_HOST_I2P  ? I2P_MTU
+                  : c->kind == RNC_HOST_WEAVE ? WEAVE_MTU
                                              : RNC_MTU;
   f->status.mode = c->mode;
   f->status.announce_cap_permille = c->announce_cap_permille;
@@ -1297,7 +1350,8 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     goto fail;
   }
   f->target_port = c->target_port;
-  f->baud = c->serial_baud;
+  f->baud = c->kind == RNC_HOST_WEAVE && !c->serial_baud ? WEAVE_BAUD
+                                                          : c->serial_baud;
   f->kiss_port = c->kiss_port;
   f->flow_control = c->flow_control;
   f->ready = !c->flow_control;
@@ -1325,6 +1379,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     f->bitrate = c->kind == RNC_HOST_PIPE  ? 1000000u
                  : c->kind == RNC_HOST_I2P  ? 256000u
                  : c->kind == RNC_HOST_AX25 ? 1200u
+                 : c->kind == RNC_HOST_WEAVE ? WEAVE_BITRATE
                                             : 10000000u;
   f->status.bitrate = f->bitrate;
   f->status.local = c->local;
@@ -1371,6 +1426,14 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
         used += n;
       }
     }
+  }
+  if (c->kind == RNC_HOST_WEAVE) {
+    /* the switch identity is new for every run, as in the reference */
+    if (rnc_identity_generate(&f->weave_id, host_random, NULL) != RNC_OK) {
+      r = RNC_CRYPTO;
+      goto fail;
+    }
+    memcpy(f->weave_sw, f->weave_id.public_key + 60, 4);
   }
   if (c->kind == RNC_HOST_AX25) {
     size_t k;
@@ -1482,6 +1545,13 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       f->fd = device_open(f);
       if (f->fd < 0)
         goto fail;
+      if (c->kind == RNC_HOST_WEAVE) {
+        /* the switch is not itself a node interface; its endpoints are */
+        r = weave_begin(f);
+        if (r != RNC_OK)
+          goto fail;
+        return RNC_OK;
+      }
       if (c->kind == RNC_HOST_RNODE_MULTI) {
         /* the device is not itself a node interface; its radios are */
         f->status.online = 1;
@@ -1587,6 +1657,21 @@ static rnc_result queue_packet(host_interface *f, const rnc_packet *p) {
   if (f->status.kind == RNC_HOST_UDP || f->status.kind == RNC_HOST_AUTO) {
     memcpy(q->data, wire, m);
     q->size = m;
+  } else if (f->weave_peer) {
+    /* a command to the switch: deliver this packet to one endpoint */
+    uint8_t cmd[RNC_MAX_FRAME];
+    if (m + 15u > sizeof(cmd))
+      return RNC_NO_SPACE;
+    memcpy(cmd, f->weave_remote, 4);
+    cmd[4] = 0x02; /* WDCL command */
+    cmd[5] = 0x00;
+    cmd[6] = 0x01; /* deliver an endpoint packet */
+    memcpy(cmd + 7, f->weave_endpoint, 8);
+    memcpy(cmd + 15, wire, m);
+    r = rnc_host_frame_encode(RNC_HOST_HDLC, 0, cmd, 15u + m, q->data,
+                              sizeof(q->data), &q->size);
+    if (r != RNC_OK)
+      return r;
   } else if (f->status.kind == RNC_HOST_AX25) {
     uint8_t ax[16 + RNC_MAX_FRAME];
     size_t k;
@@ -2494,6 +2579,224 @@ static void multi_spawn(rnc_host *h, host_interface *dev) {
   dev->subs_spawned = 1;
   dev->radio_deadline = 0;
 }
+/* Weave. Every frame of the switch's protocol (WDCL) starts with the four byte
+ * id of the switch it is for, then a type: discovery, connection, command,
+ * log, display and endpoint packet. The host's id is the last four bytes of a
+ * signing key it makes up for the run. */
+enum {
+  WDCL_DISCOVER = 0x00,
+  WDCL_CONNECT = 0x01,
+  WDCL_CMD = 0x02,
+  WDCL_LOG = 0x03,
+  WDCL_ENDPOINT_PKT = 0x05
+};
+enum {
+  WEAVE_EVT_CONNECTION = 0x3002,
+  WEAVE_EVT_HOST_ENDPOINT = 0x3003,
+  WEAVE_EVT_EP_ALIVE = 0x3102
+};
+static rnc_result weave_send(host_interface *f, const uint8_t dest[4],
+                             uint8_t type, const uint8_t *body, size_t size) {
+  uint8_t frame[RNC_MAX_FRAME];
+  host_frame *q;
+  rnc_result r;
+  if (f->queue_count == RNC_HOST_QUEUE_FRAMES)
+    return RNC_AGAIN;
+  if (size + 5u > sizeof(frame))
+    return RNC_NO_SPACE;
+  memcpy(frame, dest, 4);
+  frame[4] = type;
+  if (size)
+    memcpy(frame + 5, body, size);
+  q = &f->queue[f->queue_count];
+  memset(q, 0, sizeof(*q));
+  q->control = 1;
+  r = rnc_host_frame_encode(RNC_HOST_HDLC, 0, frame, size + 5u, q->data,
+                            sizeof(q->data), &q->size);
+  if (r == RNC_OK)
+    ++f->queue_count;
+  return r;
+}
+/* The first step of a connection: ask whoever is on the line who they are. */
+static rnc_result weave_begin(host_interface *f) {
+  static const uint8_t broadcast[4] = {0xff, 0xff, 0xff, 0xff};
+  f->weave_step = WEAVE_DISCOVERING;
+  f->weave_deadline = 0;
+  return weave_send(f, broadcast, WDCL_DISCOVER, f->weave_sw, 4);
+}
+static host_interface *weave_find(rnc_host *h, const host_interface *dev,
+                                  const uint8_t endpoint[8]) {
+  size_t i;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    host_interface *c = &h->interfaces[i];
+    if (c->used && c->weave_peer && c->status.parent_id == dev->status.interface_id &&
+        !memcmp(c->weave_endpoint, endpoint, 8))
+      return c;
+  }
+  return NULL;
+}
+static int weave_blocked(rnc_host *h, const host_interface *dev) {
+  size_t i;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i)
+    if (h->interfaces[i].used && h->interfaces[i].weave_peer &&
+        h->interfaces[i].status.parent_id == dev->status.interface_id &&
+        h->interfaces[i].pending)
+      return 1;
+  return 0;
+}
+/* An endpoint of the switch is a peer: an interface of its own that sends to
+ * that endpoint alone. Heard again, it is kept; not heard for twenty seconds,
+ * it goes. */
+static host_interface *weave_peer(rnc_host *h, host_interface *dev,
+                                  const uint8_t endpoint[8]) {
+  static const char digits[] = "0123456789abcdef";
+  host_interface *c = weave_find(h, dev, endpoint);
+  char name[sizeof(c->status.name)];
+  size_t k;
+  if (c) {
+    c->last_heard = h->now;
+    return c;
+  }
+  if (dev->weave_step != WEAVE_CONNECTED)
+    return NULL;
+  c = empty_interface(h);
+  if (!c || h->next_id < 0x80000000u)
+    return NULL;
+  memset(c, 0, sizeof(*c));
+  c->used = 1;
+  c->fd = c->discovery_fd = c->unicast_fd = -1;
+  c->weave_peer = 1;
+  memcpy(c->weave_endpoint, endpoint, 8);
+  memcpy(c->weave_remote, dev->weave_remote, 4);
+  c->status.kind = RNC_HOST_WEAVE;
+  c->status.interface_id = h->next_id++;
+  c->status.parent_id = dev->status.interface_id;
+  c->status.mtu = dev->status.mtu;
+  c->status.mode = dev->status.mode;
+  c->status.announce_cap_permille = dev->status.announce_cap_permille;
+  c->status.radio_ready = 1;
+  c->policy = dev->policy;
+  c->no_output = dev->no_output;
+  c->bitrate = dev->bitrate;
+  c->status.bitrate = dev->bitrate;
+  c->has_ifac = dev->has_ifac;
+  if (dev->has_ifac) {
+    c->ifac = dev->ifac;
+    c->status.ifac_size = dev->status.ifac_size;
+    memcpy(c->status.ifac_signature, dev->status.ifac_signature,
+           sizeof(c->status.ifac_signature));
+  }
+  c->last_heard = h->now;
+  {
+    char hex[17];
+    for (k = 0; k < 8; ++k) {
+      hex[2 * k] = digits[endpoint[k] >> 4];
+      hex[2 * k + 1] = digits[endpoint[k] & 15u];
+    }
+    hex[16] = 0;
+    (void)snprintf(name, sizeof(name), "%.90s[%s]", dev->status.name, hex);
+  }
+  (void)copy_text(c->status.name, sizeof(c->status.name), name);
+  (void)rnc_hash(c->status.name, strlen(c->status.name), c->status.hash);
+  if (activate(h, c) != RNC_OK) {
+    rnc_logf(RNC_LOG_WARNING, "host", "%s: no room for endpoint %s",
+             dev->status.name, name);
+    OPENSSL_cleanse(c, sizeof(*c));
+    return NULL;
+  }
+  return c;
+}
+/* The same bytes from a second endpoint within three quarters of a second are
+ * one packet that took two routes. */
+static int weave_duplicate(host_interface *dev, const uint8_t *data,
+                           size_t size, uint64_t now) {
+  uint8_t hash[32];
+  unsigned i;
+  if (rnc_hash(data, size, hash) != RNC_OK)
+    return 0;
+  for (i = 0; i < dev->dedupe_used; ++i)
+    if (!memcmp(dev->dedupe[i], hash, 8) &&
+        now < dev->dedupe_at[i] + WEAVE_DEDUPE_TTL_MS)
+      return 1;
+  memcpy(dev->dedupe[dev->dedupe_next], hash, 8);
+  dev->dedupe_at[dev->dedupe_next] = now;
+  dev->dedupe_next = (dev->dedupe_next + 1u) % WEAVE_DEDUPE_SLOTS;
+  if (dev->dedupe_used < WEAVE_DEDUPE_SLOTS)
+    ++dev->dedupe_used;
+  return 0;
+}
+/* The switch answered the discovery with its key and a signature of the id the
+ * host announced; the host replies with its own key and a signature of the
+ * switch's id. */
+static void weave_discovered(rnc_host *h, host_interface *dev,
+                             const uint8_t *frame) {
+  uint8_t key[64], body[32 + 64];
+  rnc_identity remote;
+  (void)h;
+  memcpy(key, frame + 5, 32);
+  memcpy(key + 32, frame + 5, 32);
+  if (rnc_identity_from_public(&remote, key) != RNC_OK ||
+      rnc_identity_verify(&remote, frame, 4, frame + 5 + 32) != RNC_OK) {
+    rnc_logf(RNC_LOG_ERROR, "host",
+             "%s: invalid remote device discovery response",
+             dev->status.name);
+    return;
+  }
+  memcpy(dev->weave_remote, frame + 5 + 28, 4);
+  memcpy(body, dev->weave_id.public_key + 32, 32);
+  if (rnc_identity_sign(&dev->weave_id, dev->weave_remote, 4, body + 32) !=
+      RNC_OK)
+    return;
+  if (weave_send(dev, dev->weave_remote, WDCL_CONNECT, body, sizeof(body)) ==
+      RNC_OK)
+    dev->weave_step = WEAVE_CONNECTING;
+}
+static void weave_event(rnc_host *h, host_interface *dev, unsigned event,
+                        const uint8_t *data, size_t size) {
+  switch (event) {
+  case WEAVE_EVT_CONNECTION:
+    if (dev->weave_step != WEAVE_CONNECTED) {
+      dev->weave_step = WEAVE_CONNECTED;
+      dev->weave_deadline = 0;
+      dev->status.online = 1;
+      dev->status.last_errno = 0;
+      rnc_logf(RNC_LOG_INFO, "host", "%s: connected to Weave switch %02x%02x%02x%02x",
+               dev->status.name, dev->weave_remote[0], dev->weave_remote[1],
+               dev->weave_remote[2], dev->weave_remote[3]);
+    }
+    break;
+  case WEAVE_EVT_HOST_ENDPOINT:
+    if (size == 8)
+      memcpy(dev->weave_endpoint, data, 8);
+    break;
+  case WEAVE_EVT_EP_ALIVE:
+    if (size == 8)
+      (void)weave_peer(h, dev, data);
+    break;
+  default:
+    break;
+  }
+}
+static rnc_result weave_frame(rnc_host *h, host_interface *dev,
+                              const uint8_t *f, size_t n,
+                              uint64_t unix_seconds) {
+  if (n <= 5)
+    return RNC_OK;
+  if (f[4] == WDCL_ENDPOINT_PKT && n >= 13 &&
+      !memcmp(f, dev->weave_sw, 4)) {
+    host_interface *peer = weave_peer(h, dev, f + n - 8);
+    size_t size = n - 13;
+    if (!peer || !size || weave_duplicate(dev, f + 5, size, h->now))
+      return RNC_OK;
+    return input_packet(h, peer, f + 5, size, unix_seconds);
+  }
+  if (f[4] == WDCL_DISCOVER && n == 4 + 1 + 32 + 64 &&
+      dev->weave_step != WEAVE_IDLE)
+    weave_discovered(h, dev, f);
+  else if (f[4] == WDCL_LOG && n >= 14)
+    weave_event(h, dev, (unsigned)f[12] << 8 | f[13], f + 14, n - 14);
+  return RNC_OK;
+}
 static rnc_result receive_stream(rnc_host *h, host_interface *f,
                                  uint64_t unix_seconds) {
   uint8_t raw[RNC_MAX_FRAME], command;
@@ -2507,6 +2810,8 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
           ? RNC_HOST_KISS_FRAMING
           : RNC_HOST_HDLC;
   if (f->status.kind == RNC_HOST_RNODE_MULTI && multi_blocked(h, f))
+    return RNC_OK;
+  if (f->status.kind == RNC_HOST_WEAVE && weave_blocked(h, f))
     return RNC_OK;
   if (f->pending) {
     r = rnc_node_input(h->node, f->status.interface_id, &f->pending_packet,
@@ -2555,6 +2860,16 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
     r = rnc_host_frame_feed(&f->framer, mode, f->input[f->input_offset++],
                             &command, raw, sizeof(raw), &n);
     if (r == RNC_OK) {
+      if (f->status.kind == RNC_HOST_WEAVE) {
+        r = weave_frame(h, f, raw, n, unix_seconds);
+        if (r == RNC_AGAIN)
+          return RNC_OK;
+        if (r != RNC_OK)
+          return r;
+        if (f->fd < 0)
+          return RNC_OK;
+        continue;
+      }
       if (f->status.kind == RNC_HOST_RNODE_MULTI) {
         r = multi_frame(h, f, command, raw, n, unix_seconds);
         if (r == RNC_AGAIN)
@@ -2636,7 +2951,10 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
       f->first_tx_set = 0; /* restarts with the next ordinary transmission */
     }
   }
-  if (!f->queue_count || !f->status.online || f->connecting)
+  /* the line to a Weave switch carries the handshake before it is "online" */
+  if (!f->queue_count || f->connecting ||
+      !(f->status.kind == RNC_HOST_WEAVE && !f->weave_peer ? f->fd >= 0
+                                                          : f->status.online))
     return RNC_OK;
   for (i = 0; i < f->queue_count; ++i)
     if (f->queue[i].offset) {
@@ -2664,7 +2982,8 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
       return RNC_OK;
     f->ready = 1;
   }
-  if ((f->status.kind == RNC_HOST_AUTO || f->multi_sub) && f->status.parent_id) {
+  if ((f->status.kind == RNC_HOST_AUTO || f->multi_sub || f->weave_peer) &&
+      f->status.parent_id) {
     socket_owner = find_interface(h, f->status.parent_id);
     if (!socket_owner)
       return RNC_STATE;
@@ -2674,8 +2993,8 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
     return RNC_OK;
   /* radios of a device share its line: one frame is written out whole before
    * another radio's begins */
-  if (f->multi_sub && socket_owner->tx_owner &&
-      socket_owner->tx_owner != f->status.interface_id)
+  if ((f->multi_sub || f->status.kind == RNC_HOST_WEAVE) &&
+      socket_owner->tx_owner && socket_owner->tx_owner != f->status.interface_id)
     return RNC_OK;
   if (f->status.kind == RNC_HOST_UDP || f->status.kind == RNC_HOST_AUTO) {
     if (!f->peer_size) {
@@ -2715,7 +3034,7 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
     sent = (ssize_t)q->size;
   }
   q->offset += (size_t)sent;
-  if (f->multi_sub)
+  if (f->multi_sub || f->status.kind == RNC_HOST_WEAVE)
     socket_owner->tx_owner = q->offset == q->size ? 0 : f->status.interface_id;
   if (q->offset == q->size) {
     uint64_t duration =
@@ -2791,6 +3110,22 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         (void)rnc_host_remove(h, f->status.interface_id);
       continue;
     }
+    if (f->weave_peer) {
+      if (f->pending) {
+        r = rnc_node_input(h->node, f->status.interface_id, &f->pending_packet,
+                           unix_seconds, now);
+        if (r != RNC_AGAIN) {
+          f->pending = 0;
+          if (r == RNC_OK)
+            ++f->status.rx_packets;
+          else
+            ++f->status.dropped_packets;
+        }
+      }
+      if (now - f->last_heard >= WEAVE_PEER_TIMEOUT_MS)
+        (void)rnc_host_remove(h, f->status.interface_id);
+      continue;
+    }
     if (f->multi_sub) {
       host_interface *dev = find_interface(h, f->status.parent_id);
       if (f->pending) {
@@ -2832,6 +3167,18 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
           continue;
       }
     }
+    if (f->status.kind == RNC_HOST_WEAVE && f->fd >= 0 &&
+        f->weave_step != WEAVE_CONNECTED) {
+      /* the switch has two seconds to complete the handshake */
+      if (!f->weave_deadline)
+        f->weave_deadline = now + WEAVE_HANDSHAKE_MS;
+      else if (now >= f->weave_deadline) {
+        rnc_logf(RNC_LOG_WARNING, "host",
+                 "%s: the Weave handshake timed out", f->status.name);
+        disconnect_interface(h, f, ETIMEDOUT);
+        continue;
+      }
+    }
     if (f->status.kind == RNC_HOST_I2P)
       i2p_maintain(h, f);
     if (f->fd < 0 && !f->accepted && !f->gave_up && now >= f->retry_at &&
@@ -2855,7 +3202,10 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         }
       } else if (DEVICE_KIND(f->status.kind)) {
         f->fd = device_open(f);
-        if (f->fd >= 0 && f->status.kind == RNC_HOST_RNODE_MULTI) {
+        if (f->fd >= 0 && f->status.kind == RNC_HOST_WEAVE) {
+          ++f->status.reconnects;
+          (void)weave_begin(f);
+        } else if (f->fd >= 0 && f->status.kind == RNC_HOST_RNODE_MULTI) {
           ++f->status.reconnects;
           f->status.online = 1;
           (void)begin_multi(f);
@@ -3051,7 +3401,8 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
       (void)rnc_host_remove(h, f->status.interface_id);
       continue;
     }
-    if (f->input_offset < f->input_size || f->pending) {
+    if ((f->input_offset < f->input_size || f->pending) && !f->weave_peer &&
+        !f->multi_sub) {
       if (f->status.kind != RNC_HOST_UDP && f->status.kind != RNC_HOST_AUTO) {
         r = receive_stream(h, f, unix_seconds);
         if (r != RNC_OK)

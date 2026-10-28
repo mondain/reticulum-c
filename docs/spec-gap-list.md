@@ -17,7 +17,7 @@ Largest gaps, in priority order:
 1. Endpoint packet delivery proofs and `PacketReceipt` (PROVE_NONE/APP/ALL, implicit/explicit proofs, timeouts). Blocks the Echo and rnprobe patterns.
 2. Interface policy: interface modes, configurable `announce_cap`, per-destination announce rate limiting, new-destination rate limiting, path request burst control, ingress control.
 3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
-4. Missing interface types: Weave (I2P and RNode Multi are done). Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
+4. Missing interface types: none of the reference's network interface types is missing now (I2P, RNode Multi and Weave are done; the first two ran on the emulators' ground truth, none on hardware). Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
 5. RNode correctness (bitrate from SF/BW/CR, airtime limits, callsign beacon, detection and the firmware check are done).
 6. Management plane: blackhole management, remote management destination, probe responder, network identities and interface discovery are done (see sections 3 and 4).
 7. Persistent known-destination store (`Identity.recall`) and tunnels are done. The transport packet cache is deliberately not built: see section 3.
@@ -164,6 +164,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | RNode LoRa | IMPL | WiFi RNode over TCP: `port = tcp://host` (port 7633, or `rnc_host_config.port`); the same KISS protocol, detection and radio setup once the socket opens, a detection ping after 3.5 s of silence, reconnect after a drop |
 | RNode Multi | IMPL | `RNodeMultiInterface`: one serial device, radios found by the device itself (`CMD_INTERFACES`) and selected with `CMD_SEL_INT` before each command and frame, `[[[radio]]]` sections (`vport`, frequency, bandwidth, txpower, spreadingfactor, codingrate, flow_control, airtime limits, outgoing, interface_enabled), per radio RSSI/SNR/quality, firmware 1.74 or newer, 5 s reconnect. Command streams match the unmodified reference against the same emulated device; not tested on real hardware |
 | RNode Multi | MISS | The shared station-ID timer (each radio keeps its own), IFAC on the radios (the reference gives them none either), display/framebuffer, TCP/BLE transport |
+| Weave | IMPL | `WeaveInterface`: a Weave switch on a serial line (3 Mbaud, HDLC, WDCL framing): discovery broadcast, Ed25519 signed handshake with a per-run switch identity, every endpoint the switch reports (alive events and packets) is a peer interface (MTU 1024, 250 kb/s or `configured_bitrate`), 20 s peer timeout, packets seen from two endpoints within 0.75 s delivered once, 2 s handshake deadline and 5 s reconnect. The unmodified reference's `WeaveInterface` and this host complete the handshake with, and exchange packets through, the same emulated switch; not tested on real hardware |
+| Weave | MISS | Remote display, device log/statistics rendering, `ET_PROTO_WEAVE_EP_VIA` routing hints (parsed and ignored), USB switch discovery (`weaveconf`), Weave announcements |
 | Serial | IMPL | HDLC over termios, speed |
 | Serial | IMPL | databits, parity, stopbits (daemon `databits` / `parity` / `stopbits`) |
 | Serial | MISS | hardware flow control, port locking |
@@ -173,7 +175,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | AX.25 KISS | IMPL | `AX25KISSInterface`: UI frames (APZRNS to callsign-SSID), TNC preamble/txtail/persistence/slottime, flow control with 5s unlock |
 | Discoverable interfaces (8.14) | IMPL | `discoverable`, `discovery_name`, `announce_interval`, `discovery_stamp_value`, `discovery_encrypt`, `reachable_on` (or an executable), `publish_ifac`, `latitude` / `longitude` / `height` or `location_cmd`, `discovery_lxmf_address`, `discovery_frequency` / `bandwidth` / `modulation`; announced for Backbone, TCP server, RNode, KISS and kiss-framed TCP client interfaces |
 | Discoverable interfaces (8.14) | IMPL | Listening (`discover_interfaces`, `required_discovery_value`, `interface_discovery_sources`) and auto-connect of Backbone announcements (`autoconnect_discovered_interfaces`, `autoconnect_unverified_implementations`, `autoconnect_interface_mode`, `bootstrap_only`) |
-| Discoverable interfaces (8.14) | MISS | I2P and Weave announcements (those interface types do not exist here); `autoconnect_interface_gravity` and `autoconnect_announces_to_internal` are accepted but have no effect |
+| Discoverable interfaces (8.14) | MISS | I2P and Weave announcements; `autoconnect_interface_gravity` and `autoconnect_announces_to_internal` are accepted but have no effect |
 | Custom interfaces (8.1) | PART | No plugin API, but hosts can call `rnc_node_add_interface` directly |
 
 ### Common options and policy (8.15-8.20)
@@ -248,7 +250,7 @@ The repository contains only `examples/text_peer.c` and `examples/node_daemon.c`
 
 1. RNode detection and firmware check: done (with bitrate, airtime limits, beacon).
 2. Backbone, TCP hardening, KISS TNC parameters, serial parameters, UDP broadcast.
-3. Pipe, AX.25 KISS, I2P and RNode Multi (done); Auto allow/ignore lists.
+3. Pipe, AX.25 KISS, I2P, RNode Multi and Weave (done); Auto allow/ignore lists.
 
 **Phase C: management plane**
 

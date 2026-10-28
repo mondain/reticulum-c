@@ -21,7 +21,8 @@ typedef enum rnc_host_kind {
   RNC_HOST_PIPE, /* address = command line; HDLC over the child's stdio */
   RNC_HOST_AX25, /* address = serial path; AX.25 UI frames inside KISS */
   RNC_HOST_I2P,  /* address/port = SAM bridge of a local I2P router */
-  RNC_HOST_RNODE_MULTI /* address = serial path; several radios on one device */
+  RNC_HOST_RNODE_MULTI, /* address = serial path; several radios on one device */
+  RNC_HOST_WEAVE /* address = serial path of a Weave switch; peers are children */
 } rnc_host_kind;
 #define RNC_HOST_SUBRADIOS 11u
 /* One radio of an RNODE_MULTI device. vport is its position in the device's

@@ -192,6 +192,7 @@ static int set_type(interface_config *f, const char *value) {
                {"AX25KISSInterface", RNC_HOST_AX25},
                {"I2PInterface", RNC_HOST_I2P},
                {"RNodeMultiInterface", RNC_HOST_RNODE_MULTI},
+               {"WeaveInterface", RNC_HOST_WEAVE},
                {"BackboneInterface", RNC_HOST_TCP_LISTEN},
                {"BackboneClientInterface", RNC_HOST_TCP_CONNECT}};
   size_t i;
@@ -638,7 +639,7 @@ static int interface_key(interface_config *f, const char *key,
     f->host.announce_rate_penalty = (uint32_t)n;
     return 1;
   }
-  if (!strcmp(key, "bitrate")) {
+  if (!strcmp(key, "bitrate") || !strcmp(key, "configured_bitrate")) {
     if (!n)
       return 0;
     f->host.bitrate = (uint32_t)n;
@@ -809,7 +810,8 @@ static int finish_config(config *c) {
     if ((f->host.kind == RNC_HOST_TCP_CONNECT &&
          (!f->host.address || !f->host.port)) ||
         (((f->host.kind >= RNC_HOST_SERIAL && f->host.kind <= RNC_HOST_AX25) ||
-          f->host.kind == RNC_HOST_RNODE_MULTI) &&
+          f->host.kind == RNC_HOST_RNODE_MULTI ||
+          f->host.kind == RNC_HOST_WEAVE) &&
          !f->host.address))
       return 0;
     if (f->host.kind == RNC_HOST_RNODE_MULTI) {
@@ -831,7 +833,8 @@ static int finish_config(config *c) {
         (f->host.mtu < RNC_MTU || f->host.mtu > RNC_MAX_MTU ||
          (f->host.kind >= RNC_HOST_SERIAL && f->host.kind <= RNC_HOST_AX25 &&
           f->host.mtu > RNC_MTU) ||
-         (f->host.kind == RNC_HOST_AUTO && f->host.mtu > 1196)))
+         (f->host.kind == RNC_HOST_AUTO && f->host.mtu > 1196) ||
+         (f->host.kind == RNC_HOST_WEAVE && f->host.mtu != 1024)))
       return 0;
     if (f->host.kind == RNC_HOST_RNODE &&
         (!f->host.frequency || !f->host.bandwidth ||

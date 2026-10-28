@@ -776,3 +776,38 @@ unmodified reference's `RNodeMultiInterface` and this host drive the same
 emulator and must send every radio the same commands with the same values.
 Not tested on real hardware.
 
+## Weave (`feature/weave`)
+
+`WeaveInterface` (host kind `RNC_HOST_WEAVE`, daemon `type = WeaveInterface`,
+`port = <serial device>`, optional `configured_bitrate`) speaks WDCL to a Weave
+switch: HDLC frames at 3 Mbaud, each starting with the four byte id of the switch
+it is for. The host makes up a signing identity for the run (its id is the last
+four bytes of the public key), broadcasts a discovery frame carrying that id,
+checks the switch's reply (key and signature of the id) and answers with its own
+key and a signature of the switch's id. The switch confirms with a connection
+event; the host has two seconds for all of this, otherwise the line is closed and
+tried again after five (the reference does the same).
+
+Every endpoint the switch reports, by an alive event or by sending a packet, is a
+peer: an interface of its own, a child of the switch interface named
+`<interface>[<endpoint>]`, with MTU 1024 and the configured bitrate (250 kb/s
+by default). A packet for a peer goes out as a command naming that endpoint. A
+peer not heard from for 20 seconds is removed (the reference checks every 22
+seconds, so its peers live up to 42). The same packet delivered by two
+endpoints within 0.75 seconds is passed on once. Frames that are too short, are
+for another switch, or carry an event of the wrong size are ignored. The node's
+interface limit (eight) bounds the number of peers.
+
+Differences from the reference: peers are only created once the connection
+event has arrived, a log or packet frame shorter than its header is ignored
+(the reference raises and closes the port), and the interface does not render
+the switch's log, display or CPU/memory statistics.
+
+Evidence: host tests with a pty switch emulator that checks the signatures
+(handshake, silent and mis-signed switches, endpoints appearing and timing out,
+receive with the duplicate window, transmit to each peer, malformed frames),
+daemon tests, and a differential test in which the unmodified reference's
+`WeaveInterface` completes the same handshake with the emulator, takes a packet
+from an endpoint and sends its own announce to it. The tests fail when the
+duplicate window, the signature check, the peer timeout or the endpoint in the
+command is removed. Not tested on real hardware.
