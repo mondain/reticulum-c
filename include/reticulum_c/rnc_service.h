@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 #define RNC_SERVICE_PENDING 8u
-#define RNC_SERVICE_HANDLERS 16u
+#define RNC_SERVICE_HANDLERS 24u
 #define RNC_SERVICE_EVENTS 8u
 #define RNC_SERVICE_ALLOWLIST 8u
 typedef struct rnc_service rnc_service;
@@ -25,7 +25,7 @@ typedef enum rnc_service_event_type {
 typedef struct rnc_service_event {
     rnc_service_event_type type;
     rnc_result reason;
-    uint8_t request_id[16], path_hash[16], identity_hash[16];
+    uint8_t request_id[16], path_hash[16], identity_hash[16], identity_public_key[64];
     int identified;
     double requested_at;
     size_t data_size;
@@ -75,6 +75,11 @@ rnc_result rnc_service_set_max_request_size(rnc_service *service, size_t max_siz
 /* Only responds once to an admitted, unexpired request. */
 rnc_result rnc_service_respond(rnc_service *service, const uint8_t request_id[16],
                                const void *encoded_value, size_t value_size, uint64_t now_ms);
+/* Gives an admitted incoming request this long from now_ms to be answered
+ * instead of the default 30 seconds (a handler whose work takes minutes).
+ * RNC_STATE if the request is unknown or already answered or expired. */
+rnc_result rnc_service_extend_request(rnc_service *service, const uint8_t request_id[16],
+                                      uint64_t lifetime_ms, uint64_t now_ms);
 /* Answers with a file instead of a MessagePack value: `data` (raw bytes, at
  * most max_value) and one complete encoded MessagePack `metadata` value travel
  * as a single Resource bound to the request, with no [id, value] envelope. This

@@ -885,3 +885,122 @@ executable guard is removed; and the round trip creates a repository, pushes int
 it, sets its write permission to `none` and back, and edits the group file, with
 the reference `rngit create` and `rngit perms` against the C node and the C tool
 against the reference node.
+
+### rngit: forks, mirrors, releases, work documents, signing (`feature/rngit-complete`)
+
+SDK additions the protocol needed, each with tests that fail without it:
+a handler can read the caller's public key (`rnc_responder_request_identity`),
+can keep the node serviced while it works (the responder can be ticked from
+inside a handler; no second handler starts and a link that closes meanwhile is
+released afterwards), and can answer later (`rnc_responder_defer` and
+`rnc_responder_reply`, with `rnc_service_extend_request` lengthening the 30 second
+request window). Up to sixteen request paths can be registered per destination.
+
+`/git/fork`, `/git/mirror` and `/git/sync` fetch from another repository with
+git itself (`rns`, `http`, `https` and `ssh` sources), so an `rns://` source goes
+through `git-remote-rns`: the node puts a link to the helper beside it on the
+`PATH` and points it at its own node and client identity. The work runs in a
+child process and the reply is deferred, so the node stays responsive, and a
+repository can fork from another repository on the same node (answered by the
+node while the child waits). A fork keeps its own HEAD, a mirror follows the
+source's; `[rngit] mirror_interval` (hours, 24 by default, 0 to disable) syncs
+mirrors from the main loop. Eight such jobs may run at once.
+
+`/mgmt/release` serves the reference's release store (`NAME.releases/TAG` with
+`META`, notes, `THANKS`, `artifacts/`): list, view (`latest` is a tag), fetch (a
+file response with the artifact name as metadata), and create in three steps
+(init, artifacts, finalize) plus delete and set-latest, with the same
+permissions. Differences: a tag or artifact name must be one plain path
+component (the reference would remove the parent of the releases directory for
+the tag `..` and read outside the artifact directory), and an artifact is held
+in memory (at most 15 MiB, and not empty).
+
+`/mgmt/work` serves work documents (issues and proposals) in the reference's
+on-disk format (`NAME.work/{active,completed,proposed}/ID/root`, numbered
+comments, `ID.allowed`): list, view, create, propose, edit, comment, delete,
+complete, activate and per-document permissions, with the same permission rules
+(a document's own list, then the repository's, then the group's), author
+signatures checked against the caller's identity (create and propose over the
+stripped text, edit over the text as sent) and the 256 KiB limit. Difference:
+deleting a document without a permission file works (the reference fails there,
+which in practice means only proposals can be deleted).
+
+`reticulum-c-git-admin` gained `fork`, `mirror`, `sync`, `release`
+(`list`, `view`, `create`, `fetch`, `verify`, `delete`, `latest`) and `work`
+(`list`, `view`, `create`, `propose`, `edit`, `update`, `complete`, `activate`,
+`delete`, `perms`) commands; text that the reference takes from `$EDITOR` comes
+from `-m`, `-F` or standard input. Release manifests are RSG envelopes
+(signature plus MessagePack: hash, signer and public key, embedded notes and a
+signed envelope per artifact) written and verified like the reference's; a local
+`.rsm` file can be verified offline.
+
+`reticulum-c-git-cs` is the counterpart of `rngcs`: a git `gpg.ssh.program`
+that signs and verifies commits and tags with a Reticulum identity (SSHSIG
+carrying an RSG envelope). Use it with `gpg.format=ssh`,
+`gpg.ssh.program=reticulum-c-git-cs` and `user.signingkey=<identity file>`; the
+author or tagger email must be the 32 character identity hash, and the allowed
+signers file is not consulted. Its signatures are byte-identical to the
+reference tool's for the same identity and payload, and each tool verifies the
+other's.
+
+Evidence: handler tests for releases and work documents (permissions, signatures,
+traversal attempts, state changes) that fail when the guards are removed;
+`git_manage.sh` runs fork, mirror, sync, a release (create, list, fetch,
+verify offline, tamper detection, wrong signer, delete) and a work document
+(create, list, view with signature check, edit, comment, complete, activate,
+delete) three ways: the C admin tool against the C node, the unmodified reference
+`rngit` subcommands against the C node, and the C admin tool against the
+unmodified reference node (releases and work documents there). Not tested with
+real radio links.
+
+### rngit: statistics and the page server
+
+`[rngit] record_stats = yes` records per-day view, fetch, push, download and
+release-download counters in the reference's stats file (loaded at start,
+persisted every 180 seconds and at exit; a corrupt file is moved to
+`stats.unreadable`). `stats_ignore_identities` skips identities; the
+reference reads `stats_push_ignore_identities` but never uses it, and so does
+this node. The stats page honours the `s` permission, the 90 day window and the
+activity score. The reference shares one set of zeroed counters between all
+repositories until the file is reloaded; this node keeps them per repository.
+
+`[pages] serve_nomadnet = yes` adds a second destination, `nomadnetwork.node`,
+announced with `node_name` as application data, serving the reference's pages
+with the same paths, fields and permission checks: front, group, repository,
+tree, blob, commits, commit, refs, stats, releases, release, work and work
+document pages, plus artifact, download, media and work-document downloads. Files
+`CONFIG/templates/NAME.mu` replace the built-in templates (`{PAGE_CONTENT}`,
+`{NODE_NAME}`, `{VERSION}`, `{NAVIGATION}`, `{GEN_TIME}`); `unicode_icons` and
+`media_conversion` work as in the reference, and images and video are converted
+to WebP with magick, convert, gm, ffmpeg or avconv (or `RNGIT_MEDIA_BACKEND`),
+the original being served when no backend exists. Markdown in READMEs, release
+notes and work documents is converted to micron, and commit signatures made
+with `reticulum-c-git-cs` are shown as the reference shows them.
+
+Differences from the reference: syntax highlighting is a compact built-in
+tokeniser (C and C++, Python, JavaScript and TypeScript, shell, JSON, YAML,
+TOML and INI, Markdown, Rust, Go, Java, HTML and XML, CSS), not pygments, so
+token classes are simpler and unknown languages are shown plain;
+`[pages] highlight_syntax = no` (or `RNGIT_HIGHLIGHT=plain`) turns it off.
+Display width uses a built-in wide and combining character table
+(`RNGIT_NO_WCWIDTH=1` counts code points like the reference without wcwidth).
+Files and blobs larger than `max_bundle` are not served, where the reference
+streams any size; diffs are capped at 512 KiB, a commit's file list at 400
+files, trees at 20000 entries and a page at 3 MiB; refs with a leading dash or
+newline and paths with `.` or `..` components are refused. A release without
+notes is shown without a preview (the reference raises and sends nothing), and
+a bad work-document download is left unanswered like the reference's. Quirks
+kept on purpose: the thanks counter shows 0 on the call that creates its file,
+work-comment format is always markdown, and the work-document download treats
+the scope `proposed` as `active`.
+
+Evidence: handler tests for the page server and statistics (permissions,
+traversal, each page type, stats recording and persistence, the highlighter),
+whose mutants fail them, and a differential test that starts the unmodified
+reference node and the C node over the same repositories (a signed and a
+foreign-signed commit, a 130 commit history, releases, signed and tampered work
+documents, binary, CRLF and UTF-8 files, a PNG converted to WebP) and compares
+119 identified and 7 unidentified answers after masking generation time,
+relative times, version, destination hash and the stats numbers: no
+differences. The SDK gained `rnc_responder_request_link_id` and room for 24
+request paths per destination.

@@ -457,9 +457,119 @@ static void file(void) {
     CHECK(out[k] == (uint8_t)(k * 13u + 1u));
   teardown(&n);
 }
+/* A handler may keep the node serviced while it works (rngit runs git for
+ * minutes): the responder is ticked from inside it, which must not start a
+ * second handler, and the handler can read the caller's public key. */
+static int nest_depth, nest_max, nest_calls;
+static uint8_t seen_key[64];
+static rnc_responder *nest_responder;
+static net *nest_net;
+static rnc_result nest_handler(void *context, const char *path,
+                               const uint8_t *request, size_t size,
+                               const uint8_t *identity, uint8_t *response,
+                               size_t capacity, size_t *written) {
+  rnc_identity who;
+  (void)context; (void)path; (void)identity;
+  nest_calls++;
+  nest_depth++;
+  if (nest_depth > nest_max)
+    nest_max = nest_depth;
+  CHECK(rnc_responder_request_identity(nest_responder, &who) == RNC_OK);
+  memcpy(seen_key, who.public_key, 64);
+  pump(nest_net, 60);
+  nest_depth--;
+  CHECK(size <= capacity);
+  memcpy(response, request, size);
+  *written = size;
+  return RNC_OK;
+}
+static void nested(void) {
+  net n;
+  const uint8_t value[] = {0x92, 0x01, 0x02};
+  uint8_t out[64];
+  rnc_requester_result r;
+  unsigned i, done = 0;
+  rnc_identity probe;
+  setup(&n, 1);
+  nest_responder = n.responder;
+  nest_net = &n;
+  CHECK(rnc_responder_register(n.responder, n.destination, "/nest",
+                               RNC_SERVICE_ALLOW_ALL, NULL, 0, nest_handler,
+                               &n) == RNC_OK);
+  CHECK(rnc_responder_request_identity(n.responder, &probe) == RNC_STATE);
+  CHECK(rnc_requester_start(n.requester, n.destination, &n.client_id, "/nest",
+                            value, sizeof(value), 1, 20000, UNIX, n.now) == RNC_OK);
+  CHECK(rnc_requester_start(n.requester, n.destination, &n.client_id, "/nest",
+                            value, sizeof(value), 2, 20000, UNIX, n.now) == RNC_OK);
+  for (i = 0; i < 3000 && done < 2; i++) {
+    pump(&n, 1);
+    while (rnc_requester_poll(n.requester, &r, out, sizeof(out)) == RNC_OK) {
+      CHECK(r.status == RNC_REQUESTER_DONE && r.size == sizeof(value));
+      done++;
+    }
+  }
+  CHECK(done == 2 && nest_calls == 2 && nest_max == 1);
+  CHECK(!memcmp(seen_key, n.client_id.public_key, 64));
+  teardown(&n);
+}
+/* A handler may defer its answer: it takes a ticket, returns without a
+ * response and the answer goes out later, long after the 30 s window the
+ * service keeps for a request. */
+static rnc_responder_ticket deferred_ticket;
+static int deferred_calls;
+static rnc_result defer_handler(void *context, const char *path,
+                                const uint8_t *request, size_t size,
+                                const uint8_t *identity, uint8_t *response,
+                                size_t capacity, size_t *written) {
+  net *n = context;
+  (void)path; (void)request; (void)size; (void)identity; (void)response;
+  (void)capacity; (void)written;
+  deferred_calls++;
+  CHECK(rnc_responder_defer(n->responder, &deferred_ticket, 3600000u) == RNC_OK);
+  return RNC_AGAIN;
+}
+static void deferred(void) {
+  net n;
+  const uint8_t value[] = {0x92, 0x05, 0x06}, answer[] = {0xa3, 'l', 'a', 't'};
+  uint8_t out[64];
+  rnc_requester_result r;
+  unsigned i;
+  setup(&n, 1);
+  CHECK(rnc_responder_register(n.responder, n.destination, "/later",
+                               RNC_SERVICE_ALLOW_ALL, NULL, 0, defer_handler,
+                               &n) == RNC_OK);
+  CHECK(rnc_responder_defer(n.responder, &deferred_ticket, 1000) == RNC_STATE);
+  CHECK(rnc_requester_start(n.requester, n.destination, NULL, "/later", value,
+                            sizeof(value), 3, 7200000, UNIX, n.now) == RNC_OK);
+  for (i = 0; i < 300 && !deferred_calls; i++)
+    pump(&n, 1);
+  CHECK(deferred_calls == 1);
+  /* nothing arrives while the handler's work goes on, for over a minute */
+  for (i = 0; i < 7000; i++) {
+    pump(&n, 1);
+    CHECK(rnc_requester_poll(n.requester, &r, out, sizeof(out)) == RNC_AGAIN);
+  }
+  CHECK(rnc_responder_reply(n.responder, &deferred_ticket, answer,
+                            sizeof(answer), n.now) == RNC_OK);
+  for (i = 0; i < 500; i++) {
+    pump(&n, 1);
+    if (rnc_requester_poll(n.requester, &r, out, sizeof(out)) == RNC_OK)
+      break;
+  }
+  CHECK(i < 500 && r.status == RNC_REQUESTER_DONE && r.size == sizeof(answer) &&
+        !memcmp(out, answer, sizeof(answer)));
+  /* a ticket answers once */
+  CHECK(rnc_responder_reply(n.responder, &deferred_ticket, answer,
+                            sizeof(answer), n.now) == RNC_STATE);
+  teardown(&n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
-  if (!strcmp(argv[1], "file"))
+  if (!strcmp(argv[1], "deferred"))
+    deferred();
+  else if (!strcmp(argv[1], "nested"))
+    nested();
+  else if (!strcmp(argv[1], "file"))
     file();
   else if (!strcmp(argv[1], "echo"))
     echo();

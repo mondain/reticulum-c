@@ -7,7 +7,7 @@ extern "C" {
 #endif
 #define RNC_RESPONDER_LINKS 8u
 #define RNC_RESPONDER_DESTINATIONS 4u
-#define RNC_RESPONDER_HANDLERS 8u
+#define RNC_RESPONDER_HANDLERS 24u
 
 /* Link-terminating destinations for a node: accepts link requests addressed to
  * registered destinations, runs one request/response service per link and calls
@@ -68,6 +68,37 @@ rnc_result rnc_responder_register_file(
     rnc_responder *responder, const uint8_t destination[16], const char *path,
     rnc_service_policy policy, const uint8_t (*allowed)[16],
     size_t allowed_count, rnc_responder_file_handler handler, void *context);
+/* The identity (public key only) the caller identified itself with, for the
+ * request a handler is running for; RNC_STATE outside a handler or when the
+ * caller did not identify. */
+rnc_result rnc_responder_request_identity(const rnc_responder *responder,
+                                          rnc_identity *identity);
+/* The id of the link the request a handler is running for arrived on (to tell
+ * links apart, as the reference's link_id argument does); RNC_STATE outside a
+ * handler. */
+rnc_result rnc_responder_request_link_id(const rnc_responder *responder,
+                                         uint8_t link_id[16]);
+/* A handler may keep the node serviced while it works (a long subprocess, say)
+ * by feeding events to rnc_responder_input and calling rnc_responder_tick from
+ * inside the handler: link keepalives and other links' packets keep being
+ * processed, but no second handler starts and a link that closes meanwhile is
+ * released only after the handler returns. */
+/* Answering later. Inside a handler, rnc_responder_defer takes a ticket for the
+ * request being handled and gives it `lifetime_ms` (instead of 30 seconds) to
+ * be answered; the handler then returns RNC_AGAIN (no response now) and goes on
+ * with its work elsewhere, without blocking the node. rnc_responder_reply sends
+ * the answer, a complete MessagePack value, whenever it is ready. RNC_STATE
+ * when the ticket was used, the link has gone or the request expired. */
+typedef struct rnc_responder_ticket {
+  uint8_t link_id[16], request_id[16];
+  int valid;
+} rnc_responder_ticket;
+rnc_result rnc_responder_defer(rnc_responder *responder,
+                               rnc_responder_ticket *ticket,
+                               uint64_t lifetime_ms);
+rnc_result rnc_responder_reply(rnc_responder *responder,
+                               rnc_responder_ticket *ticket, const void *value,
+                               size_t value_size, uint64_t now_ms);
 /* Destination.set_max_request_size for every link to the destination, present
  * and future (RNC_SERVICE_NO_LIMIT removes the limit). */
 rnc_result rnc_responder_set_max_request_size(rnc_responder *responder,

@@ -17,10 +17,12 @@
  *   [access]       group = r:all, w:HASH, ...
  *
  * plus group.allowed (next to the group directory) and NAME.allowed (next to a
- * repository) permission files, executable ones included. Repository creation,
- * forks and mirrors, releases, work documents, statistics and the page server
- * of the reference are not implemented. A request is answered synchronously, so
- * a git operation that outlives the 30 second request window is lost. */
+ * repository) permission files, executable ones included. It serves list, fetch,
+ * push and delete, repository creation, forks, mirrors and sync (run in child
+ * processes, answered later), permission editing, releases, work documents,
+ * statistics and, with `[pages] serve_nomadnet = yes`, the nomadnet page server
+ * of the reference. A request that runs git is answered synchronously while the
+ * node stays serviced, except forks, mirrors and syncs. */
 #include "rngit_common.h"
 #include <stdarg.h>
 #include <dirent.h>
@@ -43,6 +45,7 @@ typedef struct perm_set {
 typedef struct repo {
   char name[NAME_MAX_LEN];
   char path[PATH_MAX];
+  char fork_src[512], mirror_src[512]; /* upstream of a fork or a mirror */
   perm_set perms[P_COUNT];
 } repo;
 typedef struct group {
@@ -67,10 +70,21 @@ typedef struct git_node {
   uint8_t blocked[MAX_IDS][16];
   size_t blocked_count;
   unsigned announce_minutes;
+  unsigned mirror_hours; /* mirror sync interval, 0 = never */
   size_t max_bundle;
+  char node_name[256];
+  int stats_enabled; /* [rngit] record_stats */
+  uint8_t stats_ignored[MAX_IDS][16], stats_push_ignored[MAX_IDS][16];
+  size_t stats_ignored_count, stats_push_ignored_count;
+  int serve_nomadnet, use_nerdfonts, media_conversion, highlight_syntax; /* [pages] */
   rngit_node net;
 } git_node;
 static git_node G;
+
+/* statistics hooks (rngit_stats.h), called where the reference calls
+ * fetch_succeeded and push_succeeded */
+static void stats_fetch_succeeded(const char *group, const char *repo, const uint8_t *identity);
+static void stats_push_succeeded(const char *group, const char *repo, const uint8_t *identity);
 
 static void log_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void log_line(const char *fmt, ...) {
@@ -261,6 +275,7 @@ static int is_bare_git(const char *path) {
   snprintf(cfg, sizeof(cfg), "%s/config", path);
   return !stat(head, &st) && !stat(cfg, &st);
 }
+static void repo_kind_load(repo *r);
 static void load_group(const char *name, const char *path) {
   group *g;
   DIR *d;
@@ -302,6 +317,7 @@ static void load_group(const char *name, const char *path) {
     strcpy(r->path, full);
     snprintf(full, sizeof(full), "%s.allowed", r->path);
     load_allowed(full, r->perms);
+    repo_kind_load(r);
   }
   closedir(d);
 }
@@ -313,8 +329,36 @@ static char *expand_home(const char *p, char *out, size_t cap) {
     snprintf(out, cap, "%s", p);
   return out;
 }
+/* ConfigObj as_bool: yes/true/on/1 and no/false/off/0 */
+static int cfg_bool(const char *v, int dflt) {
+  char b[16];
+  size_t i;
+  for (i = 0; v[i] && i < sizeof(b) - 1; ++i)
+    b[i] = (char)(v[i] >= 'A' && v[i] <= 'Z' ? v[i] + 32 : v[i]);
+  b[i] = 0;
+  if (!strcmp(b, "yes") || !strcmp(b, "true") || !strcmp(b, "on") || !strcmp(b, "1"))
+    return 1;
+  if (!strcmp(b, "no") || !strcmp(b, "false") || !strcmp(b, "off") || !strcmp(b, "0"))
+    return 0;
+  return dflt;
+}
+static void ignore_entry_into(const char *s, uint8_t (*list)[16], size_t *count) {
+  uint8_t id[16];
+  if (strlen(s) == 32 && rngit_hex_decode(s, id, 16)) {
+    if (*count < MAX_IDS)
+      memcpy(list[(*count)++], id, 16);
+  } else if (resolve_alias(s, id) && *count < MAX_IDS)
+    memcpy(list[(*count)++], id, 16);
+  else if (*s)
+    log_line("Invalid identity hash for stats ignore: %s", s);
+}
+static void stats_ignore_entry(const char *s) { ignore_entry_into(s, G.stats_ignored, &G.stats_ignored_count); }
+static void stats_push_ignore_entry(const char *s) {
+  ignore_entry_into(s, G.stats_push_ignored, &G.stats_push_ignored_count);
+}
 static int load_config(const char *dir) {
   char path[PATH_MAX + 16], line[2048], section[64] = "", *t;
+  char stats_ignore_text[2048] = "", stats_push_text[2048] = "";
   FILE *f;
   struct { char name[NAME_MAX_LEN]; char path[PATH_MAX]; } pending[MAX_GROUPS];
   size_t pending_count = 0, i;
@@ -369,18 +413,39 @@ static int load_config(const char *dir) {
       } else if (!strcmp(section, "rngit")) {
         if (!strcmp(key, "announce_interval"))
           G.announce_minutes = (unsigned)strtoul(value, NULL, 10);
+        else if (!strcmp(key, "mirror_interval"))
+          G.mirror_hours = (unsigned)strtoul(value, NULL, 10);
         else if (!strcmp(key, "blocked_identities"))
           snprintf(blocked_text, sizeof(blocked_text), "%s", value);
+        else if (!strcmp(key, "node_name"))
+          snprintf(G.node_name, sizeof(G.node_name), "%s", value);
+        else if (!strcmp(key, "record_stats"))
+          G.stats_enabled = cfg_bool(value, 0);
+        else if (!strcmp(key, "stats_ignore_identities"))
+          snprintf(stats_ignore_text, sizeof(stats_ignore_text), "%s", value);
+        else if (!strcmp(key, "stats_push_ignore_identities"))
+          snprintf(stats_push_text, sizeof(stats_push_text), "%s", value);
         else if (!strcmp(key, "max_bundle")) {
           unsigned long mib = strtoul(value, NULL, 10);
           if (mib >= 1 && mib <= 15)
             G.max_bundle = (size_t)mib << 20;
         }
+      } else if (!strcmp(section, "pages")) {
+        if (!strcmp(key, "serve_nomadnet"))
+          G.serve_nomadnet = cfg_bool(value, 0);
+        else if (!strcmp(key, "unicode_icons"))
+          G.use_nerdfonts = !cfg_bool(value, 0);
+        else if (!strcmp(key, "media_conversion"))
+          G.media_conversion = cfg_bool(value, 1);
+        else if (!strcmp(key, "highlight_syntax"))
+          G.highlight_syntax = cfg_bool(value, 1);
       }
     }
   }
   fclose(f);
   split_list(blocked_text, blocked_entry);
+  split_list(stats_ignore_text, stats_ignore_entry);
+  split_list(stats_push_text, stats_push_ignore_entry);
   for (i = 0; i < pending_count; ++i) {
     size_t k;
     struct stat st;
@@ -708,6 +773,7 @@ static rnc_result handle_fetch(void *context, const char *path, const uint8_t *r
     }
     fclose(f);
     file->data_size = got;
+    stats_fetch_succeeded(g->name, r->name, identity);
     file->metadata[0] = 0x81;
     file->metadata[1] = GIT_IDX_RESULT_CODE;
     file->metadata[2] = GIT_RES_OK;
@@ -783,8 +849,10 @@ static rnc_result handle_push(void *context, const char *path, const uint8_t *re
         if (pr.status != 0) {
           log_line("Fetch of pushed bundle failed for %s/%s: %s", g->name, r->name, pr.err);
           reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Could not verify bundle");
-        } else
+        } else {
+          stats_push_succeeded(g->name, r->name, identity);
           reply(out, cap, written, GIT_RES_OK, "");
+        }
       }
     }
     remove_tree(tmp);
@@ -842,6 +910,7 @@ static rnc_result handle_push(void *context, const char *path, const uint8_t *re
         }
       }
     }
+    stats_push_succeeded(g->name, r->name, identity);
     reply(out, cap, written, GIT_RES_OK, "");
   } else
     reply(out, cap, written, GIT_RES_INVALID_REQ, "Invalid request data");
@@ -882,8 +951,10 @@ static rnc_result handle_delete(void *context, const char *path, const uint8_t *
     if (pr.status != 0) {
       log_line("Error while deleting ref %s for %s/%s: %s", ref, g->name, r->name, pr.err);
       reply(out, cap, written, GIT_RES_REMOTE_FAIL, "Could not delete ref");
-    } else
+    } else {
+      stats_push_succeeded(g->name, r->name, identity);
       reply(out, cap, written, GIT_RES_OK, "");
+    }
   }
 done:
   free(pool);
@@ -1042,6 +1113,7 @@ static rnc_result handle_create(void *context, const char *path, const uint8_t *
     snprintf(r->name, sizeof(r->name), "%s", name);
     snprintf(r->path, sizeof(r->path), "%s", full);
     reload_repo(r);
+    repo_kind_load(r);
     log_line("Created repository %s/%s", g->name, name);
     reply(out, cap, written, GIT_RES_OK, "");
   }
@@ -1234,7 +1306,55 @@ done:
   return RNC_OK;
 }
 
+#include "rngit_clone.h"
+#include "rngit_release.h"
+#include "rngit_work.h"
+#include "rngit_stats.h"
+#include "rngit_pages.h"
+#include "rngit_pageviews.h"
+#include "rngit_pageserve.h"
+
 /* ---- main ---------------------------------------------------------------- */
+static void idle_pump(void) {
+  (void)rngit_pump(&G.net);
+}
+/* git runs `git-remote-rns` for rns:// sources: make sure it resolves to the
+ * helper beside this binary, attached to the same node, using this node's
+ * client identity. */
+static void prepare_git_environment(const char *argv0, const char *connect) {
+  char self[PATH_MAX], dir[PATH_MAX], link_dir[PATH_MAX + 32], link_path[PATH_MAX + 64], helper[PATH_MAX + 32];
+  const char *path = getenv("PATH");
+  ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+  char *slash;
+  if (n < 0) {
+    snprintf(self, sizeof(self), "%s", argv0);
+    n = (ssize_t)strlen(self);
+  } else
+    self[n] = 0;
+  snprintf(dir, sizeof(dir), "%s", self);
+  slash = strrchr(dir, '/');
+  if (slash)
+    *slash = 0;
+  else
+    snprintf(dir, sizeof(dir), ".");
+  snprintf(helper, sizeof(helper), "%s/reticulum-c-git-remote", dir);
+  if (!getenv("RNGIT_CONNECT"))
+    setenv("RNGIT_CONNECT", connect, 1);
+  if (!getenv("RNGIT_CONFIG"))
+    setenv("RNGIT_CONFIG", G.config_dir, 1);
+  if (!is_file(helper))
+    return;
+  snprintf(link_dir, sizeof(link_dir), "%s/bin", G.config_dir);
+  snprintf(link_path, sizeof(link_path), "%s/git-remote-rns", link_dir);
+  if (!is_dir(link_dir))
+    (void)mkdir(link_dir, 0755);
+  unlink(link_path);
+  if (!symlink(helper, link_path)) {
+    char newpath[PATH_MAX * 3];
+    snprintf(newpath, sizeof(newpath), "%s:%s", link_dir, path ? path : "/usr/bin:/bin");
+    setenv("PATH", newpath, 1);
+  }
+}
 static void usage(void) {
   fputs("usage: reticulum-c-git --connect HOST:PORT [--config DIR] [--identity FILE] [--print-identity]\n",
         stderr);
@@ -1244,9 +1364,11 @@ int main(int argc, char **argv) {
   char default_config[PATH_MAX], identity_path[PATH_MAX + 32];
   int i, print_identity = 0;
   uint8_t destination[16];
-  uint64_t last_announce = 0;
+  uint64_t last_announce = 0, last_mirror_check = 0;
   int announced = 0;
   G.max_bundle = (size_t)DEFAULT_MAX_BUNDLE_MIB << 20;
+  G.mirror_hours = 24;
+  pages_defaults();
   for (i = 1; i < argc; ++i) {
 #define VALUE (i + 1 < argc ? argv[++i] : (usage(), exit(2), (char *)NULL))
     if (!strcmp(argv[i], "--connect"))
@@ -1296,6 +1418,7 @@ int main(int argc, char **argv) {
   }
   if (!load_config(config))
     return 255;
+  stats_load();
   if (!rngit_open_node(&G.net, connect, identity, "rngit link"))
     return 1;
   if (rnc_node_add_destination(G.net.node, &G.net.id, GIT_APP_NAME, NULL, 0, destination) != RNC_OK)
@@ -1314,27 +1437,59 @@ int main(int argc, char **argv) {
       rnc_responder_register(G.net.responder, destination, GIT_PATH_CREATE, RNC_SERVICE_ALLOW_ALL,
                              NULL, 0, handle_create, NULL) != RNC_OK ||
       rnc_responder_register(G.net.responder, destination, GIT_PATH_PERMS, RNC_SERVICE_ALLOW_ALL,
-                             NULL, 0, handle_perms, NULL) != RNC_OK) {
+                             NULL, 0, handle_perms, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_FORK, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_fork, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_MIRROR, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_mirror, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_SYNC, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_sync, NULL) != RNC_OK ||
+      rnc_responder_register_file(G.net.responder, destination, GIT_PATH_RELEASE,
+                                  RNC_SERVICE_ALLOW_ALL, NULL, 0, handle_release, NULL) != RNC_OK ||
+      rnc_responder_register(G.net.responder, destination, GIT_PATH_WORK, RNC_SERVICE_ALLOW_ALL,
+                             NULL, 0, handle_work, NULL) != RNC_OK) {
     fprintf(stderr, "Could not set up the repository destination\n");
     return 1;
   }
+  memcpy(pg_repo_dest, destination, 16);
+  if (G.serve_nomadnet && !pages_setup()) {
+    fprintf(stderr, "Could not set up the page server destination\n");
+    return 1;
+  }
+  prepare_git_environment(argv[0], connect);
+  rngit_idle_hook = idle_pump;
   fputs("Reticulum Git Node listening on <", stdout);
   for (i = 0; i < 16; ++i) printf("%02x", destination[i]);
   puts(">");
+  if (G.serve_nomadnet) {
+    fputs("Git Nomad Network Node listening on <", stdout);
+    for (i = 0; i < 16; ++i) printf("%02x", pg_node_dest[i]);
+    puts(">");
+  }
   fflush(stdout);
   while (!rngit_stopping) {
     uint64_t now = rngit_monotonic_ms();
     if (!rngit_pump(&G.net))
       break;
+    jobs_poll();
+    stats_job(now);
+    if (now - last_mirror_check > 60000u) {
+      last_mirror_check = now;
+      sync_due_mirrors();
+    }
     if (!announced || (G.announce_minutes && now - last_announce > (uint64_t)G.announce_minutes * 60000u)) {
       rnc_host_status s;
       if (rnc_host_get_status(G.net.host, 1, &s) == RNC_OK && s.online) {
         (void)rnc_node_announce(G.net.node, destination, (uint64_t)time(NULL), now);
+        if (G.serve_nomadnet)
+          (void)rnc_node_announce(G.net.node, pg_node_dest, (uint64_t)time(NULL), now);
         announced = 1;
         last_announce = now;
       }
     }
   }
+  (void)stats_persist();
   rngit_close_node(&G.net);
+  st_free_all();
   return 0;
 }

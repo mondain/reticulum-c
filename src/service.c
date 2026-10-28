@@ -339,6 +339,17 @@ rnc_result rnc_service_respond(rnc_service *s, const uint8_t id[16], const void 
     }
     return result;
 }
+rnc_result rnc_service_extend_request(rnc_service *s, const uint8_t id[16], uint64_t lifetime,
+                                      uint64_t now) {
+    int index;
+    if (!s || !id || !lifetime || now < s->now)
+        return RNC_INVALID;
+    index = slot(s->incoming, id);
+    if (index < 0 || now >= s->incoming[index].deadline)
+        return RNC_STATE;
+    s->incoming[index].deadline = now > UINT64_MAX - lifetime ? UINT64_MAX : now + lifetime;
+    return RNC_OK;
+}
 rnc_result rnc_service_respond_file(rnc_service *s, const uint8_t id[16], const void *data,
                                     size_t n, const void *metadata, size_t mn, uint64_t now) {
     int index;
@@ -394,8 +405,10 @@ static rnc_result accept_request(rnc_service *s, const uint8_t id[16], const uin
     if (!h)
         return RNC_OK;
     e.identified = rnc_link_remote_identity(s->link, &remote) == RNC_OK;
-    if (e.identified)
+    if (e.identified) {
         memcpy(e.identity_hash, remote.hash, 16);
+        memcpy(e.identity_public_key, remote.public_key, 64);
+    }
     if (h->policy == RNC_SERVICE_ALLOW_ALL)
         allowed = 1;
     else if (h->policy == RNC_SERVICE_ALLOW_IDENTIFIED)

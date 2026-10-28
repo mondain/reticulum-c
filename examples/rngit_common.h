@@ -34,6 +34,11 @@
 #define GIT_PATH_DELETE "/git/delete"
 #define GIT_PATH_CREATE "/git/create"
 #define GIT_PATH_PERMS "/mgmt/perms"
+#define GIT_PATH_FORK "/git/fork"
+#define GIT_PATH_MIRROR "/git/mirror"
+#define GIT_PATH_SYNC "/git/sync"
+#define GIT_PATH_RELEASE "/mgmt/release"
+#define GIT_PATH_WORK "/mgmt/work"
 #define GIT_RES_OK 0x00
 #define GIT_RES_DISALLOWED 0x01
 #define GIT_RES_INVALID_REQ 0x02
@@ -44,6 +49,11 @@
 #define GIT_IDX_GROUP 2
 
 static volatile sig_atomic_t rngit_stopping;
+/* Called about every 20 ms while a subprocess runs, so a node can stay
+ * serviced during a long git operation. */
+static void (*rngit_idle_hook)(void);
+/* When nonzero, the next rngit_run kills its child after this many ms. */
+static unsigned rngit_run_timeout_ms;
 static inline void rngit_on_signal(int sig) {
   (void)sig;
   rngit_stopping = 1;
@@ -122,6 +132,16 @@ static inline void mp_uint(mp_out *o, uint64_t v) {
     mp_put(o, b, 9);
   }
 }
+static inline void mp_nil(mp_out *o) { mp_byte(o, 0xc0); }
+static inline void mp_double(mp_out *o, double v) {
+  uint8_t b[9] = {0xcb};
+  uint64_t bits;
+  int i;
+  memcpy(&bits, &v, 8);
+  for (i = 0; i < 8; ++i)
+    b[1 + i] = (uint8_t)(bits >> (56 - 8 * i));
+  mp_put(o, b, 9);
+}
 static inline void mp_bool(mp_out *o, int v) { mp_byte(o, v ? 0xc3 : 0xc2); }
 static inline void mp_str(mp_out *o, const char *s, size_t n) {
   if (n < 32)
@@ -129,9 +149,12 @@ static inline void mp_str(mp_out *o, const char *s, size_t n) {
   else if (n < 256) {
     uint8_t b[2] = {0xd9, (uint8_t)n};
     mp_put(o, b, 2);
-  } else {
+  } else if (n < 65536) {
     uint8_t b[3] = {0xda, (uint8_t)(n >> 8), (uint8_t)n};
     mp_put(o, b, 3);
+  } else {
+    uint8_t b[5] = {0xdb, (uint8_t)(n >> 24), (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n};
+    mp_put(o, b, 5);
   }
   mp_put(o, s, n);
 }
@@ -188,6 +211,46 @@ static inline const val *map_get_int(const val *m, uint64_t key) {
 }
 static inline int val_is_text(const val *v) {
   return v && (v->type == V_STR || v->type == V_BIN);
+}
+
+/* Copies a parsed value back out (document rewriting keeps what it does not
+ * touch). */
+static inline void mp_val(mp_out *o, const val *v) {
+  size_t i;
+  switch (v->type) {
+  case V_NIL: mp_nil(o); break;
+  case V_BOOL: mp_bool(o, (int)v->u); break;
+  case V_UINT: mp_uint(o, v->u); break;
+  case V_INT:
+    if (v->i >= -32)
+      mp_byte(o, (uint8_t)(int8_t)v->i);
+    else {
+      uint8_t b[9] = {0xd3};
+      int k;
+      for (k = 0; k < 8; ++k)
+        b[1 + k] = (uint8_t)((uint64_t)v->i >> (56 - 8 * k));
+      mp_put(o, b, 9);
+    }
+    break;
+  case V_REAL: mp_double(o, v->d); break;
+  case V_STR: mp_str(o, (const char *)v->p, v->n); break;
+  case V_BIN: mp_bin(o, v->p, v->n); break;
+  case V_ARR:
+    mp_array(o, v->n);
+    for (i = 0; i < v->n; ++i)
+      mp_val(o, &v->kids[i]);
+    break;
+  case V_MAP:
+    if (v->n < 16)
+      mp_byte(o, (uint8_t)(0x80 | v->n));
+    else {
+      uint8_t b[3] = {0xde, (uint8_t)(v->n >> 8), (uint8_t)v->n};
+      mp_put(o, b, 3);
+    }
+    for (i = 0; i < 2 * v->n; ++i)
+      mp_val(o, &v->kids[i]);
+    break;
+  }
 }
 
 /* ---- ref and SHA sanitising (util.py san_ref / san_sha) ------------------ */
@@ -275,14 +338,30 @@ static inline proc_result rngit_run(const char *cwd, char *const *argv,
   }
   close(po[1]);
   close(pe[1]);
+  {
+    struct timespec t0;
+    unsigned limit = rngit_run_timeout_ms;
+    int killed = 0;
+    rngit_run_timeout_ms = 0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
   while (open_out || open_err) {
     struct pollfd p[2];
     char tmp[4096];
     int i, n = 0;
     if (open_out) { p[n].fd = po[0]; p[n].events = POLLIN; ++n; }
     if (open_err) { p[n].fd = pe[0]; p[n].events = POLLIN; ++n; }
-    if (poll(p, (nfds_t)n, -1) < 0 && errno != EINTR)
+    if (poll(p, (nfds_t)n, (rngit_idle_hook || limit) ? 20 : -1) < 0 && errno != EINTR)
       break;
+    if (rngit_idle_hook)
+      rngit_idle_hook();
+    if (limit && !killed) {
+      struct timespec t1;
+      clock_gettime(CLOCK_MONOTONIC, &t1);
+      if ((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 > (long)limit) {
+        kill(pid, SIGKILL);
+        killed = 1;
+      }
+    }
     for (i = 0; i < n; ++i) {
       ssize_t got;
       if (!(p[i].revents & (POLLIN | POLLHUP | POLLERR)))
@@ -306,6 +385,7 @@ static inline proc_result rngit_run(const char *cwd, char *const *argv,
         r.err[en] = 0;
       }
     }
+  }
   }
   close(po[0]);
   close(pe[0]);

@@ -29,6 +29,7 @@ typedef struct responder_slot {
   rnc_service *service;
   uint8_t id[16];
   size_t destination;
+  int release_pending;
 } responder_slot;
 struct rnc_responder {
   rnc_node *node;
@@ -38,6 +39,10 @@ struct rnc_responder {
   uint8_t *request, *response, *file_data, *file_meta;
   responder_destination destinations[RNC_RESPONDER_DESTINATIONS];
   responder_slot slots[RNC_RESPONDER_LINKS];
+  int busy;
+  uint64_t now;
+  responder_slot *current;
+  rnc_service_event current_event;
 };
 rnc_responder *rnc_responder_new(rnc_node *node, size_t max_value,
                                  rnc_random_fn random, void *random_context) {
@@ -277,6 +282,8 @@ rnc_result rnc_responder_input(rnc_responder *r, const rnc_node_event *event,
   (void)unix_seconds;
   if (!r || !event)
     return RNC_INVALID;
+  if (now_ms > r->now)
+    r->now = now_ms;
   if (event->type != RNC_NODE_LOCAL)
     return RNC_AGAIN;
   p = &event->packet;
@@ -307,6 +314,9 @@ static void run_requests(rnc_responder *r, responder_slot *s, uint64_t now) {
         rnc_responder_file file = {r->file_data, r->file_data ? r->max_value : 0, 0,
                                    r->file_meta, r->file_meta ? RNC_RESPONDER_METADATA_MAX : 0, 0};
         const uint8_t *who = event.identified ? event.identity_hash : NULL;
+        r->busy = 1;
+        r->current = s;
+        r->current_event = event;
         if (d->handlers[i].file_function)
           result = d->handlers[i].file_function(
               d->handlers[i].context, d->handlers[i].path, r->request, got, who,
@@ -315,6 +325,14 @@ static void run_requests(rnc_responder *r, responder_slot *s, uint64_t now) {
           result = d->handlers[i].function(
               d->handlers[i].context, d->handlers[i].path, r->request, got, who,
               r->response, r->max_value, &written);
+        r->busy = 0;
+        r->current = NULL;
+        if (r->now > now) /* a handler that kept the node running moved time on */
+          now = r->now;
+        if (s->release_pending) {
+          slot_release(r, s);
+          return;
+        }
         if (result == RNC_OK && file.data_size && file.metadata_size &&
             file.data_size <= r->max_value &&
             file.metadata_size <= RNC_RESPONDER_METADATA_MAX)
@@ -322,9 +340,10 @@ static void run_requests(rnc_responder *r, responder_slot *s, uint64_t now) {
                                          file.data, file.data_size,
                                          file.metadata, file.metadata_size,
                                          now);
-        else if (result == RNC_OK && written)
+        else if (result == RNC_OK && written) {
           (void)rnc_service_respond(s->service, event.request_id, r->response,
                                     written, now);
+        }
         break;
       }
   }
@@ -334,6 +353,8 @@ rnc_result rnc_responder_tick(rnc_responder *r, uint64_t unix_seconds,
   size_t i;
   if (!r)
     return RNC_INVALID;
+  if (now_ms > r->now)
+    r->now = now_ms;
   for (i = 0; i < RNC_RESPONDER_LINKS; i++) {
     responder_slot *s = &r->slots[i];
     rnc_link_event le;
@@ -355,14 +376,72 @@ rnc_result rnc_responder_tick(rnc_responder *r, uint64_t unix_seconds,
     if (!closed) {
       (void)rnc_service_pump(s->service, now_ms);
       (void)rnc_service_tick(s->service, now_ms);
-      run_requests(r, s, now_ms);
+      if (!r->busy)
+        run_requests(r, s, now_ms);
+      if (r->now > now_ms) /* a handler kept the node running meanwhile */
+        now_ms = r->now;
       /* answers queue link packets; send them without waiting a tick */
       while (rnc_link_poll(s->link, &le) == RNC_OK)
         if (le.type == RNC_LINK_SEND)
           (void)rnc_node_send(r->node, &le.packet, unix_seconds, now_ms);
     }
-    if (closed)
-      slot_release(r, s);
+    if (closed) {
+      if (r->busy && r->current == s)
+        s->release_pending = 1;
+      else
+        slot_release(r, s);
+    }
   }
   return RNC_OK;
+}
+rnc_result rnc_responder_defer(rnc_responder *r, rnc_responder_ticket *t,
+                               uint64_t lifetime_ms) {
+  if (!r || !t || !lifetime_ms)
+    return RNC_INVALID;
+  if (!r->busy || !r->current)
+    return RNC_STATE;
+  if (rnc_service_extend_request(r->current->service, r->current_event.request_id,
+                                 lifetime_ms, r->now) != RNC_OK)
+    return RNC_STATE;
+  memcpy(t->link_id, r->current->id, 16);
+  memcpy(t->request_id, r->current_event.request_id, 16);
+  t->valid = 1;
+  return RNC_OK;
+}
+rnc_result rnc_responder_reply(rnc_responder *r, rnc_responder_ticket *t,
+                               const void *value, size_t n, uint64_t now_ms) {
+  size_t i;
+  rnc_result result;
+  if (!r || !t || !value || !n)
+    return RNC_INVALID;
+  if (!t->valid)
+    return RNC_STATE;
+  if (now_ms > r->now)
+    r->now = now_ms;
+  for (i = 0; i < RNC_RESPONDER_LINKS; i++)
+    if (r->slots[i].used && !memcmp(r->slots[i].id, t->link_id, 16)) {
+      result = rnc_service_respond(r->slots[i].service, t->request_id, value, n,
+                                   r->now);
+      if (result == RNC_OK)
+        t->valid = 0;
+      return result;
+    }
+  return RNC_STATE;
+}
+rnc_result rnc_responder_request_link_id(const rnc_responder *r,
+                                         uint8_t link_id[16]) {
+  if (!r || !link_id)
+    return RNC_INVALID;
+  if (!r->busy || !r->current)
+    return RNC_STATE;
+  memcpy(link_id, r->current->id, 16);
+  return RNC_OK;
+}
+rnc_result rnc_responder_request_identity(const rnc_responder *r,
+                                          rnc_identity *identity) {
+  if (!r || !identity)
+    return RNC_INVALID;
+  if (!r->busy || !r->current_event.identified)
+    return RNC_STATE;
+  return rnc_identity_from_public(identity, r->current_event.identity_public_key);
 }
