@@ -1390,6 +1390,7 @@ int main(int argc, char **argv) {
     uint64_t now = rngit_monotonic_ms();
     if (!rngit_pump(&G.net))
       break;
+    jobs_poll();
     if (now - last_mirror_check > 60000u) {
       last_mirror_check = now;
       sync_due_mirrors();

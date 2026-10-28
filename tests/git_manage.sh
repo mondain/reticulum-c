@@ -13,15 +13,14 @@ set -e
 export RNGIT_CONNECT="127.0.0.1:$PORT" RNGIT_CONFIG="$D/cli"
 cd "$D"
 
-ref() {   # ref SUBCOMMAND ARGS...: the reference rngit client
+ref() {   # ref SUBCOMMAND ARGS...: the reference rngit client (stdin stays free for prompts)
   local sub=$1; shift
-  EDITOR="$D/editor.sh" PYTHONPATH=$REFDIR "$PYTHON" - "$sub" "$@" <<PY
+  EDITOR="$D/editor.sh" PYTHONPATH=$REFDIR "$PYTHON" -c "
 import sys
 from RNS.Utilities.rngit import server
 sub, rest = sys.argv[1], sys.argv[2:]
 sys.argv = ['rngit', sub, '--config', '$D/cli', '--rnsconfig', '$D/rns', '-i', '$D/cli/client_identity'] + rest
-server.main()
-PY
+server.main()" "$sub" "$@"
 }
 if [ "$MODE" = ref_client ]; then
   cat > "$D/rns/config" <<CFG
@@ -162,14 +161,14 @@ else
   "$ADMIN" work "$URL/dev/made.git" view -d 1 > wv2.log 2>&1 || fail "work view again"
 fi
 grep -q "Now it fails twice" wv2.log && grep -q "Me too" wv2.log || { cat wv2.log >&2; fail "edited document and comment"; }
-# proposals and permissions need a second identity: skipped here (handler tests cover them)
-if [ "$MODE" != ref_server ]; then
-  # deleting: the reference refuses when the document has no permission file; the C node does not
-  :
-fi
+# deleting: the C node removes any document its owner deletes; the reference
+# fails when the document has no permission file (only proposals have one)
 if [ "$MODE" = ref_client ]; then
-  printf 'y\n' | ref work "$URL/dev/made.git" delete -d 1 > wx.log 2>&1 || true
-else
-  "$ADMIN" work "$URL/dev/made.git" delete -d 1 > wx.log 2>&1 || true
+  printf 'y\n' | ref work "$URL/dev/made.git" delete -d 1 > wx.log 2>&1 || { cat wx.log >&2; fail "work delete"; }
+elif [ "$MODE" = c_client ]; then
+  "$ADMIN" work "$URL/dev/made.git" delete -d 1 > wx.log 2>&1 || { cat wx.log >&2; fail "work delete"; }
+fi
+if [ "$MODE" != ref_server ]; then
+  [ ! -d "$D/repos/dev/made.git.work/active/1" ] || fail "document still on the node"
 fi
 echo PASS

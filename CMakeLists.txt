@@ -269,6 +269,9 @@ if(UNIX AND RNC_BUILD_HOST)
                 add_test(NAME reticulum_git_roundtrip COMMAND ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_roundtrip.sh c_client
                     $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git> $<TARGET_FILE:reticulum-c-git-remote>)
                 set_tests_properties(reticulum_git_roundtrip PROPERTIES LABELS network TIMEOUT 240)
+                add_test(NAME reticulum_git_manage COMMAND ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_manage.sh c_client
+                    $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git> $<TARGET_FILE:reticulum-c-git-remote>)
+                set_tests_properties(reticulum_git_manage PROPERTIES LABELS network TIMEOUT 300)
                 if(RNC_INTEROP_TESTS)
                     foreach(mode ref_client ref_server)
                         add_test(NAME reticulum_git_${mode} COMMAND ${CMAKE_COMMAND} -E env
@@ -277,6 +280,12 @@ if(UNIX AND RNC_BUILD_HOST)
                             $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git> $<TARGET_FILE:reticulum-c-git-remote>
                             ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
                         set_tests_properties(reticulum_git_${mode} PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 300)
+                        add_test(NAME reticulum_git_manage_${mode} COMMAND ${CMAKE_COMMAND} -E env
+                            "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                            ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_manage.sh ${mode}
+                            $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git> $<TARGET_FILE:reticulum-c-git-remote>
+                            ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
+                        set_tests_properties(reticulum_git_manage_${mode} PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 400)
                     endforeach()
                 endif()
             endif()
