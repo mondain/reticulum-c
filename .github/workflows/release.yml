@@ -1,9 +1,10 @@
 name: Release
 # Pushing a tag such as v0.2.1 builds self-contained Linux archives for the CPUs
 # Reticulum nodes commonly run on (PCs and servers, 64-bit and 32-bit Raspberry
-# Pis and similar boards) and publishes them as a GitHub release. Run by hand
-# (workflow_dispatch) it only builds, for a trial, and keeps the archives as
-# workflow artifacts.
+# Pis and similar boards), the example firmware for ESP32, ESP32-S3 and nRF52840
+# boards, an ESP-IDF component and a PlatformIO library, and publishes them as a
+# GitHub release. Run by hand (workflow_dispatch) it only builds, for a trial, and
+# keeps the archives as workflow artifacts.
 on:
   push:
     tags: ['v*']
@@ -15,7 +16,27 @@ on:
 permissions:
   contents: read
 jobs:
+  # Runs before everything else: the tag must name the version in CMakeLists.txt and every
+  # file that repeats it must agree (library.json, idf_component.yml, ...). A manual trial
+  # run has no tag, so only the files are compared.
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Tag and version files
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            .github/scripts/check-version.sh "$REF_NAME"
+          else
+            .github/scripts/check-version.sh
+          fi
   build:
+    needs: version
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: true
@@ -30,16 +51,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Version
-        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ '${{ github.ref_type }}' = tag ]; then version="$GITHUB_REF_NAME"
-          else version='${{ inputs.version }}'; fi
+          if [ "$REF_TYPE" = tag ]; then version="$REF_NAME"; else version="$INPUT_VERSION"; fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          if [ '${{ github.ref_type }}' = tag ]; then
-            project=$(sed -n 's/^project(reticulum_c VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
-            tagged=${version#v}; tagged=${tagged%%-*}
-            [ "$project" = "$tagged" ] || { echo "::error::tag $version does not match the project version $project in CMakeLists.txt"; exit 1; }
-          fi
       - name: Emulation for the other CPUs
         if: matrix.target != 'x86_64'
         run: sudo apt-get update && sudo apt-get install -y qemu-user-static
@@ -54,8 +72,98 @@ jobs:
           path: out/*.tar.gz
           if-no-files-found: error
           retention-days: 14
+  # Example firmware, the same builds the CI workflow runs (mcu job): ESP-IDF images for
+  # esp32 and esp32s3, in the pinned Docker image, and the PlatformIO environments.
+  firmware-esp-idf:
+    needs: version
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        chip: [esp32, esp32s3]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - run: mcu/build-esp-idf.sh --docker ${{ matrix.chip }} out/${{ matrix.chip }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fw-esp-idf-${{ matrix.chip }}
+          path: |
+            out/${{ matrix.chip }}
+            !out/${{ matrix.chip }}/build
+          if-no-files-found: error
+          retention-days: 14
+  firmware-platformio:
+    needs: version
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {group: esp32, envs: 'heltec_wifi_lora_32_V3 heltec_wifi_lora_32_V2 ttgo_t_beam lilygo_t3_s3'}
+          - {group: nrf52, envs: 'wiscore_rak4631 heltec_t114 lilygo_t_echo'}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.platformio
+          key: platformio-${{ matrix.group }}-${{ hashFiles('mcu/build-platformio.sh', 'mcu/platformio/platformio.ini', 'mcu/platformio/boards/*.json') }}
+          restore-keys: platformio-${{ matrix.group }}-
+      - name: Build
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv
+          mcu/build-platformio.sh ${{ matrix.envs }} out
+      - run: cat out/size-report.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fw-platformio-${{ matrix.group }}
+          path: out
+          if-no-files-found: error
+          retention-days: 14
+  # Per-board firmware archives, the ESP-IDF component and the PlatformIO library. Runs
+  # for a manual trial too (the archives stay as workflow artifacts).
+  package-mcu:
+    needs: [version, firmware-esp-idf, firmware-platformio]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: fw-*
+          path: fw
+      - name: Package
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then version="$REF_NAME"; else version="$INPUT_VERSION"; fi
+          for d in fw/fw-esp-idf-*; do
+            .github/scripts/package-mcu.sh board "$version" "esp-idf-${d##*fw-esp-idf-}" "$d" dist
+          done
+          for d in fw/fw-platformio-*/*/; do
+            d=${d%/}
+            [ -f "$d/flash.txt" ] || continue
+            board=$(basename "$d" | tr 'A-Z' 'a-z')
+            .github/scripts/package-mcu.sh board "$version" "$board" "$d" dist
+          done
+          .github/scripts/package-mcu.sh sources "$version" dist
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive-mcu
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
   release:
-    needs: build
+    needs: [version, build, firmware-esp-idf, firmware-platformio, package-mcu]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
@@ -67,12 +175,14 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Checksums
-        run: cd dist && sha256sum ./*.tar.gz > SHA256SUMS && cat SHA256SUMS
+        run: cd dist && sha256sum ./*.tar.gz ./*.zip > SHA256SUMS && cat SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat > notes.md <<'NOTES'
+          ## Linux builds
+
           Self-contained Linux builds (musl, fully static: OpenSSL and bzip2 are linked in, nothing to install on the device).
 
           | Archive | Runs on |
@@ -82,12 +192,27 @@ jobs:
           | `linux-armv7-musl` | Raspberry Pi 2/3/Zero 2 with a 32-bit OS and similar |
           | `linux-armv6-musl` | Raspberry Pi Zero and 1 (also runs on the armv7 boards) |
 
-          Each archive holds `bin/` (the node daemon and tools), `include/` and `lib/` (static libraries, OpenSSL and bzip2 for static linking, a CMake package), `BUILDINFO` and the documentation. Check the download with `sha256sum -c SHA256SUMS`. To link the SDK from CMake: `-DCMAKE_PREFIX_PATH=<unpacked directory> -DOPENSSL_USE_STATIC_LIBS=ON`.
+          Each archive holds `bin/` (the node daemon and tools), `include/` and `lib/` (static libraries, OpenSSL and bzip2 for static linking, a CMake package), `BUILDINFO` and the documentation. To link the SDK from CMake: `-DCMAKE_PREFIX_PATH=<unpacked directory> -DOPENSSL_USE_STATIC_LIBS=ON`. The Linux library needs a POSIX host with OpenSSL; use these builds on the computer a radio is attached to.
 
-          The library needs a POSIX host with OpenSSL, so microcontroller boards (ESP32, nRF52: Heltec, T-Beam, RAK4631, T-Echo) are not covered; use these builds on the computer a radio is attached to.
+          ## Microcontroller firmware (example node, serial interface only)
+
+          `reticulum-c-<version>-mcu-<board>.zip` holds the firmware images, `flash.txt` with the exact flashing commands for that board, `BUILDINFO` (version, commit, toolchain versions), the manual and a README. The firmware is a Reticulum leaf node with one HDLC serial interface (the Reticulum SerialInterface framing): a host running reticulum-c-node or rnsd with the board as a SerialInterface routes between the board and the network. It announces `reticulum_c.mcu.example` and answers `/echo` and `/info`. It uses the portable crypto backend and the small mcu capacity profile (no OpenSSL).
+
+          | Archive | Board | Build |
+          | --- | --- | --- |
+          | `mcu-esp-idf-esp32` | ESP32 boards: Heltec WiFi LoRa 32 V2, LilyGo T-Beam, TTGO LoRa32 and similar | ESP-IDF 5.4.4 |
+          | `mcu-esp-idf-esp32s3` | ESP32-S3 boards: Heltec WiFi LoRa 32 V3, T-Beam Supreme, T3-S3, T-Deck and similar | ESP-IDF 5.4.4 |
+          | `mcu-heltec_wifi_lora_32_v3`, `mcu-heltec_wifi_lora_32_v2`, `mcu-ttgo_t_beam`, `mcu-lilygo_t3_s3` | the named ESP32 / ESP32-S3 boards | Arduino (PlatformIO) |
+          | `mcu-wiscore_rak4631`, `mcu-heltec_t114`, `mcu-lilygo_t_echo` | RAKwireless RAK4631, Heltec Mesh Node T114, LilyGo T-Echo (nRF52840; UF2 and DFU files) | Arduino (PlatformIO) |
+
+          `esp-idf-component.tar.gz` is the protocol core and the example application as ESP-IDF components (use it with `EXTRA_COMPONENT_DIRS`). `platformio-library.tar.gz` is the same as a PlatformIO library (`library.json`; `lib_deps = file:///path`). Both are source archives.
+
+          **Limits.** There is no LoRa radio driver yet: the boards talk to a host over serial or USB only, and have no Bluetooth or Wi-Fi interface. The firmware has not been tested on hardware: it builds in CI and the same application logic passes the host tests against reticulum-c-node and the reference Reticulum. The nRF52 board definitions for the RAK4631, T114 and T-Echo are derived from the Adafruit nRF52840 Feather and assume the Adafruit bootloader. It is a leaf node (no forwarding).
+
+          Check every download with `sha256sum -c SHA256SUMS`.
           NOTES
           flags=()
           case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease);; esac
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
             --notes-file notes.md --generate-notes "${flags[@]}"

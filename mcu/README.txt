@@ -9,6 +9,9 @@ microcontroller and an example firmware you can flash today:
   mcu/tests/        tests: clock policy, and the application against reticulum-c-node
   mcu/esp-idf/      ESP-IDF components and the example project
   mcu/build-esp-idf.sh   one command that builds a flashable image
+  mcu/platformio/   the same firmware for the Arduino framework on ESP32 and nRF52840
+                    boards (Heltec V3/V2, T-Beam, T3-S3, RAK4631, Heltec T114, LilyGo
+                    T-Echo): see mcu/platformio/README.txt; build with mcu/build-platformio.sh
 
 STATUS: the firmware builds for esp32 and esp32s3 and the same application logic
 passes the host tests against reticulum-c-node and the reference Reticulum. It has
