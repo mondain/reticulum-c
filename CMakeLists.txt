@@ -617,3 +617,31 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
         endif()
     endif()
 endif()
+
+# MCU example firmware (mcu/): the portable application and its host build need the
+# mcu profile; the test that runs it against reticulum-c-node builds the firmware in
+# its own build directory, so it is registered from the default build.
+if(RNC_PROFILE STREQUAL "mcu")
+    add_subdirectory(mcu)
+endif()
+if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE STREQUAL ""
+        AND TARGET reticulum-c-node)
+    find_program(RNC_BASH_MCU bash)
+    if(RNC_BASH_MCU)
+        add_executable(echo_client mcu/tests/echo_client.c)
+        target_link_libraries(echo_client PRIVATE reticulum_c_host OpenSSL::Crypto)
+        target_compile_options(echo_client PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        add_test(NAME reticulum_mcu_host COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_host.sh
+            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>)
+        set_tests_properties(reticulum_mcu_host PROPERTIES LABELS "mcu;network;pty" TIMEOUT 600)
+        if(RNC_INTEROP_TESTS)
+            add_test(NAME reticulum_mcu_host_reference COMMAND ${RNC_BASH_MCU}
+                ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_host.sh ${CMAKE_SOURCE_DIR}
+                $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>
+                ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
+            set_tests_properties(reticulum_mcu_host_reference PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                LABELS "mcu;reticulum_interop;network;pty" TIMEOUT 600)
+        endif()
+    endif()
+endif()
