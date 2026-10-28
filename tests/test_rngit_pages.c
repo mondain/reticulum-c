@@ -248,6 +248,7 @@ static void highlighter(void) {
   HAS(t, "`FT8b949e# c`f");
   free(t);
   t = hl("[sec]\nname = \"v\"\n", "c.toml", NULL);
+  free(t);
   t = hl("#include <stdio.h>\n/* c */\nstatic int f(void) { return 0; }\n", "h.c", NULL);
   HAS(t, "`FTff7b72#include`f");
   HAS(t, "`FT8b949e<stdio.h>`f");
