@@ -1,5 +1,5 @@
 #include "service_msgpack.h"
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <reticulum_c/rnc_link.h>
 #include <reticulum_c/rnc_requester.h>
 #include <reticulum_c/rnc_responder.h>
@@ -68,11 +68,11 @@ static void job_release_link(rnc_requester *r, requester_job *j) {
 static void job_clear(rnc_requester *r, requester_job *j) {
   job_release_link(r, j);
   if (j->value)
-    OPENSSL_cleanse(j->value, j->value_size);
+    rnc_cleanse(j->value, j->value_size);
   free(j->value);
   free(j->response);
   free(j->metadata);
-  OPENSSL_cleanse(j, sizeof(*j));
+  rnc_cleanse(j, sizeof(*j));
 }
 void rnc_requester_free(rnc_requester *r) {
   size_t i;
@@ -81,9 +81,9 @@ void rnc_requester_free(rnc_requester *r) {
   for (i = 0; i < RNC_REQUESTER_JOBS; i++)
     if (r->jobs[i].used)
       job_clear(r, &r->jobs[i]);
-  OPENSSL_cleanse(r->scratch, r->max_value);
+  rnc_cleanse(r->scratch, r->max_value);
   free(r->scratch);
-  OPENSSL_cleanse(r, sizeof(*r));
+  rnc_cleanse(r, sizeof(*r));
   free(r);
 }
 rnc_result rnc_requester_start(rnc_requester *r, const uint8_t destination[16],
@@ -153,7 +153,7 @@ fail:
   if (j->link)
     rnc_link_free(j->link);
   free(j->value);
-  OPENSSL_cleanse(j, sizeof(*j));
+  rnc_cleanse(j, sizeof(*j));
   return result;
 }
 rnc_result rnc_requester_input(rnc_requester *r, const rnc_node_event *event,

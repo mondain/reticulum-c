@@ -1,5 +1,5 @@
 #include "internal.h"
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include "service_msgpack.h"
 #include <reticulum_c/rnc_ipc.h>
 #include <reticulum_c/rnc_node.h>
@@ -384,7 +384,7 @@ rnc_node *rnc_node_new(const rnc_identity *identity, int transport,
 }
 void rnc_node_free(rnc_node *n) {
   if (n) {
-    OPENSSL_cleanse(n, sizeof(*n));
+    rnc_cleanse(n, sizeof(*n));
     free(n);
   }
 }
@@ -545,7 +545,7 @@ rnc_result rnc_node_add_destination_ex(rnc_node *n,
   d.size = size;
   n->destinations[i] = d;
   memcpy(address, d.address, 16);
-  OPENSSL_cleanse(&d, sizeof(d));
+  rnc_cleanse(&d, sizeof(d));
   return RNC_OK;
 }
 rnc_result rnc_node_add_destination(rnc_node *n, const rnc_identity *identity,
@@ -568,7 +568,7 @@ rnc_result rnc_node_set_ratchet(rnc_node *n, const uint8_t address[16],
   if (key)
     memcpy(d->ratchet, key, 32);
   else
-    OPENSSL_cleanse(d->ratchet, 32);
+    rnc_cleanse(d->ratchet, 32);
   return RNC_OK;
 }
 static rnc_result destination_announce(rnc_node *n, node_destination *d,
@@ -661,7 +661,7 @@ rnc_result rnc_node_unbind_link(rnc_node *n, const uint8_t id[16]) {
   l = link_find(n, id);
   if (!l)
     return RNC_STATE;
-  OPENSSL_cleanse(l, sizeof(*l));
+  rnc_cleanse(l, sizeof(*l));
   return RNC_OK;
 }
 static uint64_t announce_time(const rnc_announce *a) {
@@ -932,7 +932,7 @@ rnc_result rnc_node_known_import(rnc_node *n, const void *input, size_t size) {
     return RNC_PROTOCOL;
   if (rnc_hash(in, size - 32, digest) != RNC_OK)
     return RNC_CRYPTO;
-  if (CRYPTO_memcmp(digest, in + size - 32, 32))
+  if (rnc_ct_memcmp(digest, in + size - 32, 32))
     return RNC_AUTH;
   count = ((size_t)in[5] << 8) | in[6];
   if (count > RNC_NODE_KNOWN)
@@ -2760,7 +2760,7 @@ rnc_result rnc_node_tunnels_import(rnc_node *n, const rnc_identity *owner,
     n->tunnels[i] = loaded[i];
   r = RNC_OK;
 done:
-  OPENSSL_cleanse(loaded, RNC_NODE_TUNNELS * sizeof(*loaded));
+  rnc_cleanse(loaded, RNC_NODE_TUNNELS * sizeof(*loaded));
   free(loaded);
   return r;
 }

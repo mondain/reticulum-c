@@ -1,8 +1,7 @@
 #include "internal.h"
 #include <float.h>
 #include <math.h>
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
+#include "crypto_backend.h"
 #include <stdlib.h>
 #include <string.h>
 _Static_assert(sizeof(double) == 8 && DBL_MANT_DIG == 53,
@@ -43,7 +42,7 @@ static void signalling(uint8_t output[3], size_t mtu) {
 }
 void rnc_link_free(rnc_link *link) {
     if (link) {
-        OPENSSL_cleanse(link, sizeof(*link));
+        rnc_cleanse(link, sizeof(*link));
         free(link);
     }
 }
@@ -73,7 +72,7 @@ rnc_result rnc_link_poll(rnc_link *link, rnc_link_event *event) {
     if (!link->count)
         return RNC_AGAIN;
     *event = link->events[link->head];
-    OPENSSL_cleanse(&link->events[link->head], sizeof(*event));
+    rnc_cleanse(&link->events[link->head], sizeof(*event));
     link->head = (link->head + 1u) % RNC_LINK_EVENTS;
     --link->count;
     return RNC_OK;
@@ -193,58 +192,19 @@ rnc_result rnc_link_send_resource_packet(rnc_link *link, uint8_t packet_type, ui
     rnc_emit_packet(link, &packet);
     return RNC_OK;
 }
-static int token_mac(const uint8_t key[32], const uint8_t *data, size_t size, uint8_t tag[32]) {
-    size_t written = 0;
-    return EVP_Q_mac(NULL, "HMAC", NULL, "SHA256", NULL, key, 32, data, size, tag, 32, &written) !=
-               NULL &&
-           written == 32;
-}
 rnc_result rnc_link_encrypt(rnc_link *link, const void *data, size_t size, uint8_t *output,
                             size_t capacity, size_t *written) {
-    uint8_t *token = NULL;
-    size_t needed;
-    EVP_CIPHER_CTX *cipher = NULL;
-    int n = 0, final = 0;
-    rnc_result result;
     if (written)
         *written = 0;
     if (!link || (!data && size) || !output || !written || size > RNC_LINK_TOKEN_MAX)
         return RNC_INVALID;
     if (!rnc_link_is_active(link))
         return RNC_STATE;
-    needed = 48u + (size / 16u + 1u) * 16u;
-    if (capacity < needed)
-        return RNC_NO_SPACE;
-    token = OPENSSL_malloc(needed);
-    if (!token)
-        return RNC_NO_SPACE;
-    result = link->random(link->random_context, token, 16);
-    if (result != RNC_OK)
-        goto done;
-    result = RNC_CRYPTO;
-    cipher = EVP_CIPHER_CTX_new();
-    if (!cipher ||
-        EVP_EncryptInit_ex(cipher, EVP_aes_256_cbc(), NULL, link->key + 32, token) != 1 ||
-        EVP_EncryptUpdate(cipher, token + 16, &n, data, (int)size) != 1 ||
-        EVP_EncryptFinal_ex(cipher, token + 16 + n, &final) != 1 ||
-        (size_t)(n + final) != needed - 48u ||
-        !token_mac(link->key, token, needed - 32u, token + needed - 32u))
-        goto done;
-    memcpy(output, token, needed);
-    *written = needed;
-    result = RNC_OK;
-done:
-    EVP_CIPHER_CTX_free(cipher);
-    OPENSSL_clear_free(token, needed);
-    return result;
+    return rnc_token_encrypt(link->key, data, size, link->random, link->random_context, output,
+                             capacity, written);
 }
 rnc_result rnc_link_decrypt(rnc_link *link, const uint8_t *data, size_t size, uint8_t *output,
                             size_t capacity, size_t *written) {
-    uint8_t tag[32], *plain = NULL;
-    size_t encrypted;
-    EVP_CIPHER_CTX *cipher = NULL;
-    int n = 0, final = 0;
-    rnc_result result = RNC_AUTH;
     if (written)
         *written = 0;
     if (!link || !data || !output || !written)
@@ -253,34 +213,7 @@ rnc_result rnc_link_decrypt(rnc_link *link, const uint8_t *data, size_t size, ui
         return RNC_STATE;
     if (size < 64 || size > RNC_LINK_TOKEN_MAX + 64u || (size - 48u) % 16u)
         return RNC_AUTH;
-    if (!token_mac(link->key, data, size - 32u, tag) || CRYPTO_memcmp(tag, data + size - 32u, 32))
-        goto done;
-    encrypted = size - 48u;
-    plain = OPENSSL_malloc(encrypted);
-    if (!plain) {
-        result = RNC_NO_SPACE;
-        goto done;
-    }
-    cipher = EVP_CIPHER_CTX_new();
-    if (!cipher || EVP_DecryptInit_ex(cipher, EVP_aes_256_cbc(), NULL, link->key + 32, data) != 1) {
-        result = RNC_CRYPTO;
-        goto done;
-    }
-    if (EVP_DecryptUpdate(cipher, plain, &n, data + 16, (int)encrypted) != 1 ||
-        EVP_DecryptFinal_ex(cipher, plain + n, &final) != 1)
-        goto done;
-    if (capacity < (size_t)(n + final)) {
-        result = RNC_NO_SPACE;
-        goto done;
-    }
-    memcpy(output, plain, (size_t)(n + final));
-    *written = (size_t)(n + final);
-    result = RNC_OK;
-done:
-    EVP_CIPHER_CTX_free(cipher);
-    OPENSSL_clear_free(plain, plain ? size - 48u : 0);
-    OPENSSL_cleanse(tag, sizeof(tag));
-    return result;
+    return rnc_token_decrypt(link->key, data, size, (size_t)-1, output, capacity, written);
 }
 static void begin(rnc_link *link, int state, int initiator, uint64_t now) {
     link->state = state;
@@ -386,8 +319,8 @@ rnc_result rnc_link_accept(rnc_link *link, const rnc_identity *local, const uint
     link->est_cost += 19u + request->data_size + 19u + proof.data_size;
     rnc_emit_packet(link, &proof);
 done:
-    OPENSSL_cleanse(private_key, sizeof(private_key));
-    OPENSSL_cleanse(key, sizeof(key));
+    rnc_cleanse(private_key, sizeof(private_key));
+    rnc_cleanse(key, sizeof(key));
     rnc_identity_clear(&ephemeral);
     return result;
 }
@@ -475,16 +408,16 @@ static rnc_result accept_proof(rnc_link *link, const rnc_packet *packet, uint64_
                  (unsigned long long)link->rtt_ms);
     }
 done:
-    OPENSSL_cleanse(key, sizeof(key));
+    rnc_cleanse(key, sizeof(key));
     return result;
 }
 void rnc_link_end(rnc_link *link, rnc_result reason, const rnc_packet *last_packet) {
-    OPENSSL_cleanse(link->events, sizeof(link->events));
+    rnc_cleanse(link->events, sizeof(link->events));
     link->head = link->count = 0;
     rnc_identity_clear(&link->ephemeral);
-    OPENSSL_cleanse(link->key, sizeof(link->key));
-    OPENSSL_cleanse(link->tx, sizeof(link->tx));
-    OPENSSL_cleanse(link->rx, sizeof(link->rx));
+    rnc_cleanse(link->key, sizeof(link->key));
+    rnc_cleanse(link->tx, sizeof(link->tx));
+    rnc_cleanse(link->rx, sizeof(link->rx));
     link->state = RNC_LINK_DEAD;
     link->remote_set = 0;
     if (last_packet)
@@ -562,7 +495,7 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
         if (result != RNC_OK)
             return result;
         if (size > link->mdu) {
-            OPENSSL_cleanse(plain, sizeof(plain));
+            rnc_cleanse(plain, sizeof(plain));
             return RNC_PROTOCOL;
         }
         if (packet->context == 254 && !link->initiator && link->state == RNC_LINK_WAIT_RTT) {
@@ -607,7 +540,7 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
                 }
             }
         } else if (packet->context == 252) {
-            if (size != 16 || CRYPTO_memcmp(plain, link->address, 16))
+            if (size != 16 || rnc_ct_memcmp(plain, link->address, 16))
                 result = RNC_AUTH;
             else {
                 link->teardown = link->initiator ? RNC_TEARDOWN_DESTINATION_CLOSED
@@ -628,7 +561,7 @@ rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now
             result = RNC_UNSUPPORTED;
     } else
         result = RNC_PROTOCOL;
-    OPENSSL_cleanse(plain, sizeof(plain));
+    rnc_cleanse(plain, sizeof(plain));
     if (result == RNC_OK) {
         link->now = link->activity = now;
         link->stale = 0;
@@ -657,7 +590,7 @@ rnc_result rnc_link_identify(rnc_link *link, const rnc_identity *identity, uint6
         rnc_emit_packet(link, &packet);
         link->now = now;
     }
-    OPENSSL_cleanse(plain, sizeof(plain));
+    rnc_cleanse(plain, sizeof(plain));
     return result;
 }
 uint64_t rnc_link_keepalive_ms(const rnc_link *link) {

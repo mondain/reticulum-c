@@ -1,4 +1,4 @@
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <reticulum_c/rnc_buffer.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,7 +105,7 @@ rnc_result rnc_stream_decode(const uint8_t *data, size_t size, uint16_t *id, int
     *id = (uint16_t)(header & 0x3fffu);
     *eof = (header & 0x8000u) != 0;
 done:
-    OPENSSL_cleanse(decoded, sizeof(decoded));
+    rnc_cleanse(decoded, sizeof(decoded));
     return result;
 }
 rnc_stream *rnc_stream_new(uint16_t id, size_t capacity) {
@@ -121,7 +121,7 @@ rnc_stream *rnc_stream_new(uint16_t id, size_t capacity) {
 }
 void rnc_stream_free(rnc_stream *stream) {
     if (stream) {
-        OPENSSL_cleanse(stream, sizeof(*stream) + stream->capacity);
+        rnc_cleanse(stream, sizeof(*stream) + stream->capacity);
         free(stream);
     }
 }
@@ -145,7 +145,7 @@ rnc_result rnc_stream_write(rnc_stream *stream, rnc_link *link, const void *data
         if (eof && used == size)
             stream->sent_eof = 1;
     }
-    OPENSSL_cleanse(message, sizeof(message));
+    rnc_cleanse(message, sizeof(message));
     return result;
 }
 rnc_result rnc_stream_input(rnc_stream *stream, const rnc_link_event *event) {
@@ -181,7 +181,7 @@ rnc_result rnc_stream_input(rnc_stream *stream, const rnc_link_event *event) {
     stream->size += length;
     stream->received_eof = eof;
 done:
-    OPENSSL_cleanse(decoded, sizeof(decoded));
+    rnc_cleanse(decoded, sizeof(decoded));
     return result;
 }
 rnc_result rnc_stream_read(rnc_stream *stream, uint8_t *output, size_t capacity, size_t *written,
@@ -201,8 +201,8 @@ rnc_result rnc_stream_read(rnc_stream *stream, uint8_t *output, size_t capacity,
     if (n) {
         memcpy(output, stream->data + stream->head, first);
         memcpy(output + first, stream->data, n - first);
-        OPENSSL_cleanse(stream->data + stream->head, first);
-        OPENSSL_cleanse(stream->data, n - first);
+        rnc_cleanse(stream->data + stream->head, first);
+        rnc_cleanse(stream->data, n - first);
     }
     stream->head = (stream->head + n) % stream->capacity;
     stream->size -= n;

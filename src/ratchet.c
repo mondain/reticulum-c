@@ -1,12 +1,9 @@
 #include <reticulum_c/rnc_security.h>
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
+#include "crypto_backend.h"
 #include <string.h>
 
 static int public_key(const uint8_t private_key[32],uint8_t output[32]) {
-    EVP_PKEY *key=EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519,NULL,private_key,32);
-    size_t n=32;int ok=key&&EVP_PKEY_get_raw_public_key(key,output,&n)==1&&n==32;
-    EVP_PKEY_free(key);return ok;
+    return rnc_x25519_public(private_key,output);
 }
 static int valid(const rnc_ratchets *store) {
     return store&&store->keys&&store->capacity>0&&store->capacity<=RNC_RATCHET_MAX_KEYS&&
@@ -21,9 +18,9 @@ rnc_result rnc_ratchet_generate(rnc_ratchet_key *key,uint64_t unix_seconds,
     status=random(context,result.private_key,32);if(status!=RNC_OK)goto done;
     if(!public_key(result.private_key,result.public_key)){status=RNC_CRYPTO;goto done;}
     result.created_at=unix_seconds;*key=result;
-done:OPENSSL_cleanse(&result,sizeof(result));return status;
+done:rnc_cleanse(&result,sizeof(result));return status;
 }
-void rnc_ratchet_clear(rnc_ratchet_key *key){if(key)OPENSSL_cleanse(key,sizeof(*key));}
+void rnc_ratchet_clear(rnc_ratchet_key *key){if(key)rnc_cleanse(key,sizeof(*key));}
 rnc_result rnc_ratchet_id(const uint8_t public_bytes[32],uint8_t id[10]) {
     uint8_t digest[32];rnc_result status;
     if(!public_bytes||!id)return RNC_INVALID;
@@ -35,10 +32,10 @@ rnc_result rnc_ratchets_init(rnc_ratchets *store,const rnc_identity *owner,
     if(!store||!owner||!storage||!capacity||capacity>RNC_RATCHET_MAX_KEYS||!interval_seconds)return RNC_INVALID;
     result.keys=storage;result.capacity=capacity;result.interval=interval_seconds;
     memcpy(result.owner_hash,owner->hash,16);
-    OPENSSL_cleanse(storage,capacity*sizeof(*storage));*store=result;return RNC_OK;
+    rnc_cleanse(storage,capacity*sizeof(*storage));*store=result;return RNC_OK;
 }
 void rnc_ratchets_clear(rnc_ratchets *store) {
-    if(store){if(valid(store))OPENSSL_cleanse(store->keys,store->capacity*sizeof(*store->keys));OPENSSL_cleanse(store,sizeof(*store));}
+    if(store){if(valid(store))rnc_cleanse(store->keys,store->capacity*sizeof(*store->keys));rnc_cleanse(store,sizeof(*store));}
 }
 rnc_result rnc_ratchets_rotate(rnc_ratchets *store,uint64_t unix_seconds,
     rnc_random_fn random,void *context) {
@@ -46,7 +43,7 @@ rnc_result rnc_ratchets_rotate(rnc_ratchets *store,uint64_t unix_seconds,
     if(!valid(store)||!random||unix_seconds<store->last_time)return RNC_INVALID;
     if(store->count&&unix_seconds-store->last_rotation<store->interval){store->last_time=unix_seconds;return RNC_OK;}
     status=rnc_ratchet_generate(&key,unix_seconds,random,context);if(status!=RNC_OK)return status;
-    for(i=0;i<store->count;i++)if(!CRYPTO_memcmp(key.public_key,store->keys[i].public_key,32)) {
+    for(i=0;i<store->count;i++)if(!rnc_ct_memcmp(key.public_key,store->keys[i].public_key,32)) {
         rnc_ratchet_clear(&key);return RNC_CRYPTO;
     }
     retain=store->count<store->capacity?store->count:store->capacity-1;
@@ -64,7 +61,7 @@ rnc_result rnc_ratchets_export(const rnc_ratchets *store,const rnc_identity *own
     uint8_t record[RNC_RATCHET_EXPORT_MAX];size_t n,i;rnc_result status;
     if(written)*written=0;
     if(!valid(store)||!owner||!owner->has_private||!output||!written||
-        CRYPTO_memcmp(store->owner_hash,owner->hash,16))return RNC_INVALID;
+        rnc_ct_memcmp(store->owner_hash,owner->hash,16))return RNC_INVALID;
     n=48u+40u*store->count;if(capacity<n+64u)return RNC_NO_SPACE;
     memset(record,0,48);memcpy(record,"RNCR",4);record[4]=1;
     record[6]=(uint8_t)(store->count>>8);record[7]=(uint8_t)store->count;
@@ -73,7 +70,7 @@ rnc_result rnc_ratchets_export(const rnc_ratchets *store,const rnc_identity *own
     for(i=0;i<store->count;i++){write64(record+48u+40u*i,store->keys[i].created_at);memcpy(record+56u+40u*i,store->keys[i].private_key,32);}
     status=rnc_identity_sign(owner,record,n,record+n);
     if(status==RNC_OK){memcpy(output,record,n+64u);*written=n+64u;}
-    OPENSSL_cleanse(record,sizeof(record));return status;
+    rnc_cleanse(record,sizeof(record));return status;
 }
 rnc_result rnc_ratchets_import(rnc_ratchets *store,const rnc_identity *owner,
     const uint8_t *record,size_t size) {
@@ -84,7 +81,7 @@ rnc_result rnc_ratchets_import(rnc_ratchets *store,const rnc_identity *owner,
     count=(size_t)record[6]*256u+record[7];n=48u+40u*count;
     if(count>RNC_RATCHET_MAX_KEYS||size!=n+64u)return RNC_PROTOCOL;
     if(count>store->capacity)return RNC_NO_SPACE;
-    if(CRYPTO_memcmp(owner->hash,store->owner_hash,16)||CRYPTO_memcmp(owner->hash,record+32,16))return RNC_AUTH;
+    if(rnc_ct_memcmp(owner->hash,store->owner_hash,16)||rnc_ct_memcmp(owner->hash,record+32,16))return RNC_AUTH;
     status=rnc_identity_verify(owner,record,n,record+n);if(status!=RNC_OK)return status;
     interval=read64(record+8);last=read64(record+16);seen=read64(record+24);
     if(!interval||seen<last||(!count&&last))return RNC_PROTOCOL;
@@ -95,9 +92,9 @@ rnc_result rnc_ratchets_import(rnc_ratchets *store,const rnc_identity *owner,
         if((i==0&&created!=last)||(i&&created>previous)){status=RNC_PROTOCOL;goto done;}
         previous=created;
         if(!public_key(record+56u+40u*i,public_keys[i])){status=RNC_CRYPTO;goto done;}
-        for(j=0;j<i;j++)if(!CRYPTO_memcmp(public_keys[j],public_keys[i],32)){status=RNC_PROTOCOL;goto done;}
+        for(j=0;j<i;j++)if(!rnc_ct_memcmp(public_keys[j],public_keys[i],32)){status=RNC_PROTOCOL;goto done;}
     }
-    OPENSSL_cleanse(store->keys,store->capacity*sizeof(*store->keys));
+    rnc_cleanse(store->keys,store->capacity*sizeof(*store->keys));
     for(i=0;i<count;i++) {
         store->keys[i].created_at=read64(record+48u+40u*i);
         memcpy(store->keys[i].private_key,record+56u+40u*i,32);
@@ -105,7 +102,7 @@ rnc_result rnc_ratchets_import(rnc_ratchets *store,const rnc_identity *owner,
     }
     store->count=count;store->interval=interval;
     store->last_rotation=last;store->last_time=seen;status=RNC_OK;
-done:OPENSSL_cleanse(public_keys,sizeof(public_keys));return status;
+done:rnc_cleanse(public_keys,sizeof(public_keys));return status;
 }
 /* ---- the reference's ratchet file ---------------------------------------- */
 #define REF_PACKED_MAX (3u + 34u * RNC_RATCHET_MAX_KEYS)
@@ -120,14 +117,14 @@ rnc_result rnc_ratchets_export_reference(const rnc_ratchets *store, const rnc_id
     rnc_result status;
     if (written) *written = 0;
     if (!valid(store) || !owner || !owner->has_private || !output || !written ||
-        CRYPTO_memcmp(store->owner_hash, owner->hash, 16)) return RNC_INVALID;
+        rnc_ct_memcmp(store->owner_hash, owner->hash, 16)) return RNC_INVALID;
     if (store->count < 16) packed[n++] = (uint8_t)(0x90u | store->count);
     else { packed[n++] = 0xdc; packed[n++] = (uint8_t)(store->count >> 8); packed[n++] = (uint8_t)store->count; }
     for (i = 0; i < store->count; i++) {
         packed[n++] = 0xc4; packed[n++] = 32;
         memcpy(packed + n, store->keys[i].private_key, 32); n += 32;
     }
-    if (capacity < 1u + 10u + 2u + 64u + 9u + 3u + n) { OPENSSL_cleanse(packed, sizeof(packed)); return RNC_NO_SPACE; }
+    if (capacity < 1u + 10u + 2u + 64u + 9u + 3u + n) { rnc_cleanse(packed, sizeof(packed)); return RNC_NO_SPACE; }
     status = rnc_identity_sign(owner, packed, n, signature);
     if (status == RNC_OK) {
         output[o++] = 0x82;
@@ -137,7 +134,7 @@ rnc_result rnc_ratchets_export_reference(const rnc_ratchets *store, const rnc_id
         o += ref_bin_header(output + o, n); memcpy(output + o, packed, n); o += n;
         *written = o;
     }
-    OPENSSL_cleanse(packed, sizeof(packed));
+    rnc_cleanse(packed, sizeof(packed));
     return status;
 }
 /* a bin value at *p; returns its data and length, 0 on a malformed one */
@@ -174,7 +171,7 @@ rnc_result rnc_ratchets_import_reference(rnc_ratchets *store, const rnc_identity
         } else return RNC_PROTOCOL;
     }
     if (at != size || !signature || !packed) return RNC_PROTOCOL;
-    if (CRYPTO_memcmp(owner->hash, store->owner_hash, 16)) return RNC_AUTH;
+    if (rnc_ct_memcmp(owner->hash, store->owner_hash, 16)) return RNC_AUTH;
     if (rnc_identity_verify(owner, packed, packed_n, signature) != RNC_OK) return RNC_AUTH;
     /* the packed list: fixarray or array16, then 32 byte bins */
     at = 0;
@@ -191,9 +188,9 @@ rnc_result rnc_ratchets_import_reference(rnc_ratchets *store, const rnc_identity
     for (i = 0; i < count; i++) {
         if (!public_key(packed + at + 34u * i + 2u, public_keys[i])) { status = RNC_CRYPTO; goto done; }
         for (j = 0; j < i; j++)
-            if (!CRYPTO_memcmp(public_keys[j], public_keys[i], 32)) { status = RNC_PROTOCOL; goto done; }
+            if (!rnc_ct_memcmp(public_keys[j], public_keys[i], 32)) { status = RNC_PROTOCOL; goto done; }
     }
-    OPENSSL_cleanse(store->keys, store->capacity * sizeof(*store->keys));
+    rnc_cleanse(store->keys, store->capacity * sizeof(*store->keys));
     for (i = 0; i < count; i++) {
         store->keys[i].created_at = 0;
         memcpy(store->keys[i].private_key, packed + at + 34u * i + 2u, 32);
@@ -204,7 +201,7 @@ rnc_result rnc_ratchets_import_reference(rnc_ratchets *store, const rnc_identity
     store->last_time = unix_seconds;
     status = RNC_OK;
 done:
-    OPENSSL_cleanse(public_keys, sizeof(public_keys));
+    rnc_cleanse(public_keys, sizeof(public_keys));
     return status;
 }
 rnc_result rnc_ratchet_encrypt(const rnc_identity *destination,
@@ -223,7 +220,7 @@ rnc_result rnc_ratchets_decrypt(const rnc_ratchets *store,const rnc_identity *ow
     rnc_identity receiver;size_t i;rnc_result status=RNC_AUTH;uint8_t id[10];
     if(written)*written=0;
     if(!valid(store)||!owner||!owner->has_private||!token||!output||!written||
-        CRYPTO_memcmp(store->owner_hash,owner->hash,16))return RNC_INVALID;
+        rnc_ct_memcmp(store->owner_hash,owner->hash,16))return RNC_INVALID;
     receiver=*owner;
     for(i=0;i<store->count;i++) {
         status=rnc_ratchet_id(store->keys[i].public_key,id);
@@ -240,7 +237,7 @@ rnc_result rnc_ratchets_decrypt(const rnc_ratchets *store,const rnc_identity *ow
         status=rnc_identity_decrypt(owner,token,size,output,capacity,written);
         if(status==RNC_OK&&used_ratchet_id)memset(used_ratchet_id,0,10);
     }
-done:rnc_identity_clear(&receiver);OPENSSL_cleanse(id,sizeof(id));return status;
+done:rnc_identity_clear(&receiver);rnc_cleanse(id,sizeof(id));return status;
 }
 rnc_result rnc_announce_create_ratchet(const rnc_identity *identity,
     const char *dotted_name,const uint8_t ratchet_public[32],const void *app_data,
@@ -265,9 +262,9 @@ rnc_result rnc_peer_ratchet_remember(rnc_peer_ratchet *peer,
     status=rnc_announce_verify(packet,&announce);if(status!=RNC_OK)return status;
     if(!announce.has_ratchet)return RNC_UNSUPPORTED;
     for(i=5;i<10;i++)emitted=(emitted<<8)|announce.random_hash[i];
-    if(peer->valid&&(CRYPTO_memcmp(peer->destination,announce.destination,16)||emitted<peer->announced_at))return RNC_AUTH;
+    if(peer->valid&&(rnc_ct_memcmp(peer->destination,announce.destination,16)||emitted<peer->announced_at))return RNC_AUTH;
     /* Replaying or reannouncing the same key must not extend its lifetime. */
-    if(peer->valid&&!CRYPTO_memcmp(peer->public_key,announce.ratchet,32)) {
+    if(peer->valid&&!rnc_ct_memcmp(peer->public_key,announce.ratchet,32)) {
         peer->announced_at=emitted;return RNC_OK;
     }
     memcpy(result.destination,announce.destination,16);memcpy(result.public_key,announce.ratchet,32);
@@ -280,4 +277,4 @@ rnc_result rnc_peer_ratchet_public(const rnc_peer_ratchet *peer,
     if(unix_seconds-peer->received_at>=RNC_RATCHET_PEER_EXPIRY)return RNC_TIMEOUT;
     memcpy(public_bytes,peer->public_key,32);return RNC_OK;
 }
-void rnc_peer_ratchet_clear(rnc_peer_ratchet *peer){if(peer)OPENSSL_cleanse(peer,sizeof(*peer));}
+void rnc_peer_ratchet_clear(rnc_peer_ratchet *peer){if(peer)rnc_cleanse(peer,sizeof(*peer));}

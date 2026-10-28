@@ -1,20 +1,12 @@
 #include <reticulum_c/rnc_security.h>
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
-#include <openssl/kdf.h>
+#include "crypto_backend.h"
 #include <limits.h>
 #include <string.h>
 
 static rnc_result derive(const uint8_t *input,size_t input_size,const uint8_t *salt,
     size_t salt_size,uint8_t *output,size_t size) {
-    EVP_PKEY_CTX *ctx;size_t n=size;int ok;
     if(input_size>INT_MAX||salt_size>INT_MAX)return RNC_INVALID;
-    ctx=EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF,NULL);
-    ok=ctx&&EVP_PKEY_derive_init(ctx)==1&&EVP_PKEY_CTX_set_hkdf_md(ctx,EVP_sha256())==1&&
-        EVP_PKEY_CTX_set1_hkdf_salt(ctx,salt,(int)salt_size)==1&&
-        EVP_PKEY_CTX_set1_hkdf_key(ctx,input,(int)input_size)==1&&
-        EVP_PKEY_derive(ctx,output,&n)==1&&n==size;
-    EVP_PKEY_CTX_free(ctx);return ok?RNC_OK:RNC_CRYPTO;
+    return rnc_hkdf_sha256(salt,salt_size,input,input_size,NULL,0,output,size)?RNC_OK:RNC_CRYPTO;
 }
 static int valid(const rnc_ifac *ifac) {
     return ifac&&ifac->size>0&&ifac->size<=RNC_IFAC_MAX_SIZE&&ifac->identity.has_private;
@@ -32,10 +24,10 @@ rnc_result rnc_ifac_init(rnc_ifac *ifac,const void *name,size_t name_size,
     status=rnc_identity_from_private(&result.identity,result.key);if(status!=RNC_OK)goto done;
     result.size=tag_size;*ifac=result;
 done:
-    OPENSSL_cleanse(&result,sizeof(result));OPENSSL_cleanse(material,sizeof(material));
-    OPENSSL_cleanse(hash,sizeof(hash));return status;
+    rnc_cleanse(&result,sizeof(result));rnc_cleanse(material,sizeof(material));
+    rnc_cleanse(hash,sizeof(hash));return status;
 }
-void rnc_ifac_clear(rnc_ifac *ifac) {if(ifac)OPENSSL_cleanse(ifac,sizeof(*ifac));}
+void rnc_ifac_clear(rnc_ifac *ifac) {if(ifac)rnc_cleanse(ifac,sizeof(*ifac));}
 rnc_result rnc_ifac_apply(const rnc_ifac *ifac,const uint8_t *raw,size_t size,
     uint8_t *output,size_t capacity,size_t *written) {
     uint8_t signature[64],mask[RNC_IFAC_FRAME_MAX],frame[RNC_IFAC_FRAME_MAX];
@@ -52,8 +44,8 @@ rnc_result rnc_ifac_apply(const rnc_ifac *ifac,const uint8_t *raw,size_t size,
     for(i=2;i<size;i++)frame[i+ifac->size]=(uint8_t)(raw[i]^mask[i+ifac->size]);
     memcpy(output,frame,total);*written=total;
 done:
-    OPENSSL_cleanse(signature,sizeof(signature));OPENSSL_cleanse(mask,sizeof(mask));
-    OPENSSL_cleanse(frame,sizeof(frame));return status;
+    rnc_cleanse(signature,sizeof(signature));rnc_cleanse(mask,sizeof(mask));
+    rnc_cleanse(frame,sizeof(frame));return status;
 }
 rnc_result rnc_ifac_verify(const rnc_ifac *ifac,const uint8_t *frame,size_t size,
     uint8_t *output,size_t capacity,size_t *written) {
@@ -67,11 +59,11 @@ rnc_result rnc_ifac_verify(const rnc_ifac *ifac,const uint8_t *frame,size_t size
     raw[0]=(uint8_t)((frame[0]^mask[0])&0x7fu);raw[1]=(uint8_t)(frame[1]^mask[1]);
     for(i=2;i<n;i++)raw[i]=(uint8_t)(frame[i+ifac->size]^mask[i+ifac->size]);
     status=rnc_identity_sign(&ifac->identity,raw,n,signature);if(status!=RNC_OK)goto done;
-    if(CRYPTO_memcmp(signature+64-ifac->size,frame+2,ifac->size)){status=RNC_AUTH;goto done;}
+    if(rnc_ct_memcmp(signature+64-ifac->size,frame+2,ifac->size)){status=RNC_AUTH;goto done;}
     status=rnc_packet_decode(raw,n,&packet);if(status!=RNC_OK)goto done;
     if(capacity<n){status=RNC_NO_SPACE;goto done;}
     memcpy(output,raw,n);*written=n;
 done:
-    OPENSSL_cleanse(signature,sizeof(signature));OPENSSL_cleanse(mask,sizeof(mask));
-    OPENSSL_cleanse(raw,sizeof(raw));return status;
+    rnc_cleanse(signature,sizeof(signature));rnc_cleanse(mask,sizeof(mask));
+    rnc_cleanse(raw,sizeof(raw));return status;
 }

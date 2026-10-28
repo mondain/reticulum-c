@@ -1,6 +1,6 @@
 #include "service_msgpack.h"
 #include <ctype.h>
-#include <openssl/crypto.h>
+#include "crypto_backend.h"
 #include <reticulum_c/rnc_discovery.h>
 #include <reticulum_c/rnc_ipc.h>
 #include <stdio.h>
