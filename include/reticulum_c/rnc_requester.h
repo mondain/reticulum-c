@@ -22,6 +22,7 @@ typedef struct rnc_requester_result {
   rnc_requester_status status;
   uint8_t destination[16];
   size_t size; /* response bytes (DONE only) */
+  size_t metadata_size; /* metadata of a file response (see poll_file), else 0 */
 } rnc_requester_result;
 
 /* max_value bounds each request and response (0 = 1 MiB). */
@@ -58,6 +59,14 @@ rnc_result rnc_requester_progress(const rnc_requester *requester, uint32_t tag,
 rnc_result rnc_requester_poll(rnc_requester *requester,
                               rnc_requester_result *result, void *response,
                               size_t capacity);
+/* Like rnc_requester_poll, and copies the metadata of a file response (the
+ * reference's RequestReceipt.metadata) into `metadata`. NO_SPACE (nothing
+ * consumed) if either buffer is too small; result->size and ->metadata_size say
+ * what is needed. */
+rnc_result rnc_requester_poll_file(rnc_requester *requester,
+                                   rnc_requester_result *result, void *response,
+                                   size_t capacity, void *metadata,
+                                   size_t metadata_capacity);
 #ifdef __cplusplus
 }
 #endif

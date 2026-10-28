@@ -412,9 +412,56 @@ static void mtu_default(void) {
   CHECK(rnc_node_set_link_mtu_discovery(node, 2) == RNC_INVALID);
   rnc_node_free(node);
 }
+/* A file handler answers with raw data and metadata; the requester hands both
+ * back through poll_file. */
+static rnc_result file_handler(void *context, const char *path,
+                               const uint8_t *request, size_t size,
+                               const uint8_t *identity, uint8_t *response,
+                               size_t capacity, size_t *written,
+                               rnc_responder_file *file) {
+  static const uint8_t meta[] = {0x81, 0x01, 0x00};
+  size_t i;
+  (void)context; (void)path; (void)request; (void)size; (void)identity;
+  (void)response; (void)capacity; (void)written;
+  CHECK(file->data_capacity >= 3000 && file->metadata_capacity >= sizeof(meta));
+  for (i = 0; i < 3000; i++)
+    file->data[i] = (uint8_t)(i * 13u + 1u);
+  file->data_size = 3000;
+  memcpy(file->metadata, meta, sizeof(meta));
+  file->metadata_size = sizeof(meta);
+  return RNC_OK;
+}
+static void file(void) {
+  net n;
+  const uint8_t value[] = {0xc0};
+  uint8_t out[4096], meta[16];
+  rnc_requester_result r;
+  unsigned i;
+  size_t k;
+  setup(&n, 1);
+  CHECK(rnc_responder_register_file(n.responder, n.destination, "/bundle",
+                                    RNC_SERVICE_ALLOW_ALL, NULL, 0,
+                                    file_handler, &n) == RNC_OK);
+  CHECK(rnc_requester_start(n.requester, n.destination, NULL, "/bundle", value,
+                            sizeof(value), 5, 20000, UNIX, n.now) == RNC_OK);
+  for (i = 0;; i++) {
+    CHECK(i < 3000);
+    pump(&n, 1);
+    if (rnc_requester_poll_file(n.requester, &r, out, sizeof(out), meta,
+                                sizeof(meta)) == RNC_OK)
+      break;
+  }
+  CHECK(r.status == RNC_REQUESTER_DONE && r.size == 3000 && r.tag == 5);
+  CHECK(r.metadata_size == 3 && !memcmp(meta, "\x81\x01\x00", 3));
+  for (k = 0; k < 3000; k++)
+    CHECK(out[k] == (uint8_t)(k * 13u + 1u));
+  teardown(&n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
-  if (!strcmp(argv[1], "echo"))
+  if (!strcmp(argv[1], "file"))
+    file();
+  else if (!strcmp(argv[1], "echo"))
     echo();
   else if (!strcmp(argv[1], "no_route"))
     no_route();
