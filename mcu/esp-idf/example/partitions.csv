@@ -1,0 +1,8 @@
+# Name,    Type, SubType, Offset,   Size,     Flags
+# The identity and the clock mark live in "nvs"; the provisioning settings (mode,
+# Wi-Fi credentials, server) live in their own partition "rnccfg", so that writing
+# them (mcu/tools/wifi-config.sh) never erases the node's identity.
+nvs,       data, nvs,     0x9000,   0x6000,
+phy_init,  data, phy,     0xf000,   0x1000,
+factory,   app,  factory, 0x10000,  0x180000,
+rnccfg,    data, nvs,     0x190000, 0x4000,

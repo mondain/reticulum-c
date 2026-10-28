@@ -1,13 +1,15 @@
 # Reticulum MCU example: settings shared by all targets.
 # A 1 kHz tick lets the loop poll the serial port every millisecond.
 CONFIG_FREERTOS_HZ=1000
-# The partition table with a single 1 MB application (the firmware is well below).
-CONFIG_PARTITION_TABLE_SINGLE_APP=y
+# Partition table (partitions.csv): the application (1.5 MB), the identity NVS and the
+# separate provisioning NVS "rnccfg" for the Wi-Fi settings.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 # Size over speed: the protocol core is large and not time critical.
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # Nothing may write text to UART0 after boot: it carries the HDLC stream.
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
 CONFIG_LOG_DEFAULT_LEVEL_WARN=y
-# The default main task stack is small; the Reticulum work runs in its own task.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=3584
+# The main task runs the provisioning console; the Reticulum work runs in its own task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144

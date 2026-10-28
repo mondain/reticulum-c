@@ -1,10 +1,12 @@
 menu "Reticulum MCU example"
 
     choice RETICULUM_MCU_TRANSPORT
-        prompt "Serial transport"
+        prompt "Serial port"
         default RETICULUM_MCU_TRANSPORT_UART
         help
-            The byte stream the HDLC framing (Reticulum SerialInterface) runs on.
+            The serial port. In serial mode (the default) it carries the HDLC framing
+            (Reticulum SerialInterface). In Wi-Fi mode the HDLC stream runs on TCP and
+            this port carries the provisioning console and status text instead.
             With UART0 the console must not use UART0: sdkconfig.defaults moves it
             elsewhere or disables it, because log text would corrupt the stream.
 
@@ -56,5 +58,64 @@ menu "Reticulum MCU example"
         string "Board name reported by /info"
         default "esp32s3" if IDF_TARGET_ESP32S3
         default "esp32"
+
+    config RETICULUM_MCU_PROVISION_WINDOW_MS
+        int "Provisioning window after boot in milliseconds (0 = none)"
+        range 0 60000
+        default 2000
+        help
+            During this window after every boot the line "rnc-config" on the serial
+            port, or the BOOT button held for 300 ms, starts the provisioning console
+            (mcu/README.txt). In serial mode this much start-up time passes before the
+            node starts. The console also starts, without waiting, when Wi-Fi mode is
+            selected and the stored settings are unusable.
+
+    config RETICULUM_MCU_PROVISION_BOOT_GPIO
+        int "BOOT button GPIO for the provisioning window (-1 = no button)"
+        range -1 48
+        default 0
+        help
+            GPIO0 is the BOOT button of the ESP32 and ESP32-S3 boards. It is read only
+            after the chip started: holding it while resetting selects the ROM
+            download mode instead.
+
+    menu "Developer defaults for Wi-Fi (NOT FOR RELEASE)"
+
+        config RETICULUM_MCU_DEV_WIFI_DEFAULTS
+            bool "Compile Wi-Fi credentials into the firmware (developer builds only)"
+            default n
+            help
+                DO NOT enable this for firmware you publish or give to anyone: the
+                SSID, the password and the server address would be readable in the
+                image and in the ELF file, by anyone who gets a copy. Release images
+                are built without it and are provisioned at runtime
+                (mcu/tools/wifi-config.sh or the serial console).
+                When enabled, the values below apply only while the settings partition
+                holds no mode; anything provisioned at runtime wins.
+                mcu/build-esp-idf.sh marks such a build in build-info.txt, and the
+                release packaging refuses it.
+
+        config RETICULUM_MCU_DEV_WIFI_SSID
+            string "Wi-Fi SSID"
+            depends on RETICULUM_MCU_DEV_WIFI_DEFAULTS
+            default ""
+
+        config RETICULUM_MCU_DEV_WIFI_PASSWORD
+            string "Wi-Fi password (empty = open network)"
+            depends on RETICULUM_MCU_DEV_WIFI_DEFAULTS
+            default ""
+
+        config RETICULUM_MCU_DEV_SERVER_HOST
+            string "Server host (a TCPServerInterface)"
+            depends on RETICULUM_MCU_DEV_WIFI_DEFAULTS
+            default ""
+
+        config RETICULUM_MCU_DEV_SERVER_PORT
+            int "Server port"
+            depends on RETICULUM_MCU_DEV_WIFI_DEFAULTS
+            range 1 65535
+            default 4242
+
+    endmenu
 
 endmenu

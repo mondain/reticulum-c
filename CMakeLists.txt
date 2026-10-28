@@ -646,6 +646,11 @@ if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE
         add_test(NAME reticulum_mcu_unit COMMAND ${RNC_BASH_MCU}
             ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_unit.sh ${CMAKE_SOURCE_DIR})
         set_tests_properties(reticulum_mcu_unit PROPERTIES LABELS mcu TIMEOUT 600)
+        # the Wi-Fi provisioning tool: input validation and, where an NVS image generator
+        # (pip, ESP-IDF or the Docker image) exists, the image contents (skipped otherwise)
+        add_test(NAME reticulum_mcu_wifi_config COMMAND ${RNC_BASH_MCU}
+            ${CMAKE_SOURCE_DIR}/mcu/tests/test_wifi_config.sh ${CMAKE_SOURCE_DIR})
+        set_tests_properties(reticulum_mcu_wifi_config PROPERTIES LABELS mcu SKIP_RETURN_CODE 77 TIMEOUT 300)
         # the firmware logic over its Wi-Fi transport (TCP client, reconnect)
         add_test(NAME reticulum_mcu_tcp COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_tcp.sh
             ${CMAKE_SOURCE_DIR} $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>)
