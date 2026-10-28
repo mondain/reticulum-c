@@ -21,6 +21,9 @@
  * address (the tagger's for a tag). The allowed signers file, -n and the -O
  * options are accepted and ignored, as the reference does. */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "msgpack_tree.h"
 #include <limits.h>
 #include <openssl/rand.h>

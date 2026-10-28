@@ -5,6 +5,9 @@
  * Prints the port it listens on, then serves until killed. Every command line
  * received is appended to the log. */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
