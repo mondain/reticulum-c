@@ -339,7 +339,7 @@ described in mcu/radio/README.txt; the essentials:
   (SX1262). The T-Beam Supreme (AXP2101) and the T-Beam v1.2 are not supported.
 
   Memory (ESP-IDF, measured): the LoRa support adds about 14.7 KB of flash on esp32 (775264
-  -> 789968 bytes) and 14.7 KB on esp32s3 (765040 -> 779728) to an image without a board;
+  -> 789984 bytes) and 14.7 KB on esp32s3 (765040 -> 779744) to an image without a board;
   selecting a board adds its SPI and I2C drivers (esp32s3 with the Heltec V3: 813088 bytes).
   Static RAM grows by about 3.5 KB (.bss), the heap use by about 4 KB (the interface
   object, 3.3 KB, and the application's packet buffer, 0.5 KB, plus a pending 508 byte
