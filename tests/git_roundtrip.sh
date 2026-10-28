@@ -58,8 +58,9 @@ server.main()" > "$D/admin.log" 2>&1
 admin create "$URL/dev/made.git" || { cat "$D/admin.log" >&2; fail "create repository"; }
 [ -f "$D/repos/dev/made.git/HEAD" ] || fail "created repository missing"
 grep -q "^adm:$CLIENT_HASH" "$D/repos/dev/made.git.allowed" || fail "creator is not administrator"
-git -C "$D/w1" push -q "$URL/dev/made.git" main:refs/heads/master 2>/dev/null || fail "push into created repository"
-[ "$(git -C "$D/repos/dev/made.git" rev-parse master)" = "$(git -C "$D/w1" rev-parse main)" ] || fail "created repository head"
+created_branch=$(git -C "$D/repos/dev/made.git" symbolic-ref HEAD) || fail "created repository default branch"
+git -C "$D/w1" push -q "$URL/dev/made.git" "main:$created_branch" 2>/dev/null || fail "push into created repository"
+[ "$(git -C "$D/repos/dev/made.git" rev-parse "$created_branch")" = "$(git -C "$D/w1" rev-parse main)" ] || fail "created repository head"
 if admin create "$URL/dev/made.git"; then fail "creating an existing repository was allowed"; fi
 if admin create "$URL/pub/other.git"; then fail "create without create permission was allowed"; fi
 # repository permissions: write set to none blocks pushes (even the administrator's), then all allows them
@@ -67,9 +68,9 @@ echo "w:none" > "$D/perm_none.txt"; echo "w:all" > "$D/perm_all.txt"
 git clone -q "$URL/dev/made.git" "$D/w7" 2>/dev/null || fail "clone created repository"
 echo more > "$D/w7/m.txt"; git -C "$D/w7" add m.txt; git -C "$D/w7" commit -q -m more
 admin rperms "$URL/dev/made.git" "$D/perm_none.txt" || { cat "$D/admin.log" >&2; fail "set repository permissions"; }
-if git -C "$D/w7" push -q origin master:refs/heads/master 2>/dev/null; then fail "write to a repository set to none was allowed"; fi
+if git -C "$D/w7" push -q origin "$created_branch:$created_branch" 2>/dev/null; then fail "write to a repository set to none was allowed"; fi
 admin rperms "$URL/dev/made.git" "$D/perm_all.txt" || { cat "$D/admin.log" >&2; fail "reset repository permissions"; }
-git -C "$D/w7" push -q origin master:refs/heads/master 2>"$D/push7.log" || { cat "$D/push7.log" >&2; fail "write after permissions were set to all"; }
+git -C "$D/w7" push -q origin "$created_branch:$created_branch" 2>"$D/push7.log" || { cat "$D/push7.log" >&2; fail "write after permissions were set to all"; }
 # group permissions are written to the group's allowed file
 echo "w:all" > "$D/perm_group.txt"
 admin gperms "$URL/dev" "$D/perm_group.txt" || { cat "$D/admin.log" >&2; fail "set group permissions"; }

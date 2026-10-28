@@ -21,7 +21,7 @@ int rnc_stream_compression_available(void) {
 rnc_result rnc_stream_encode(uint16_t id, const void *data, size_t size, int eof, int compress,
                              uint8_t *output, size_t capacity, size_t *written, size_t *consumed) {
     uint8_t message[RNC_CHANNEL_MAX_MDU];
-    size_t take, packed;
+    size_t take, packed = 0;
     int compressed = 0;
     uint16_t header;
     if (written)
