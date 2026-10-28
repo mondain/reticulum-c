@@ -12,7 +12,7 @@
   } while (0)
 
 static char root[96];
-static uint8_t alice[16], bob[16], carol[16], mallory[16];
+static uint8_t alice[16], bob[16], carol[16], mallory[16], dave[16];
 static uint8_t out[1 << 16];
 static size_t out_size;
 
@@ -29,6 +29,7 @@ static void identities(void) {
   memset(bob, 0xb2, 16);
   memset(carol, 0xc3, 16);
   memset(mallory, 0xdd, 16);
+  memset(dave, 0xd4, 16);
 }
 static void hex(const uint8_t id[16], char out_hex[33]) {
   size_t i;
@@ -61,6 +62,18 @@ static void setup(void) {
   hex(alice, h);
   snprintf(line, sizeof(line), "w:%s", h);
   apply_statement(line, g->perms);
+  hex(bob, h);
+  snprintf(line, sizeof(line), "c:%s", h);
+  apply_statement(line, g->perms);
+  hex(dave, h);
+  snprintf(line, sizeof(line), "adm:%s", h);
+  apply_statement(line, g->perms);
+  {
+    char a[33], b[33];
+    hex(alice, a);
+    hex(bob, b);
+    snprintf(g->access, sizeof(g->access), "r:all, w:%s, c:%s, adm:%s", a, b, h);
+  }
   {
     const char *names[] = {"open.git", "closed.git", "none.git"};
     size_t i;
@@ -269,6 +282,149 @@ static void hostile_refs(void) {
     CHECK(status() == GIT_RES_INVALID_REQ);
   }
 }
+
+static void make(const char *name, const uint8_t *who) {
+  mp_out o = {malloc(256), 256, 0, 0};
+  char repository[128];
+  snprintf(repository, sizeof(repository), "g/%s", name);
+  mp_map(&o, 1); mp_uint(&o, 0); mp_cstr(&o, repository);
+  call(handle_create, &o, who);
+}
+static int exists(const char *name) {
+  char path[200];
+  struct stat st;
+  snprintf(path, sizeof(path), "%.100s/g/%s", root, name);
+  return !stat(path, &st);
+}
+static void file_text(const char *name, char *buf, size_t cap) {
+  char path[200];
+  FILE *f;
+  size_t n = 0;
+  snprintf(path, sizeof(path), "%.100s/g/%s", root, name);
+  f = fopen(path, "r");
+  buf[0] = 0;
+  if (f) {
+    n = fread(buf, 1, cap - 1, f);
+    fclose(f);
+  }
+  buf[n] = 0;
+}
+static void creating(void) {
+  char text[256], h[33];
+  make("fresh.git", carol); /* may read, may not create */
+  CHECK(status() == GIT_RES_DISALLOWED && !strcmp(message(), "Not allowed") && !exists("fresh.git"));
+  make("fresh.git", NULL);
+  CHECK(status() == GIT_RES_DISALLOWED && !strcmp(message(), "Not identified"));
+  make("fresh.git", bob);
+  CHECK(status() == GIT_RES_OK && exists("fresh.git/HEAD"));
+  hex(bob, h);
+  file_text("fresh.git.allowed", text, sizeof(text));
+  CHECK(!strncmp(text, "adm:", 4) && !strncmp(text + 4, h, 32));
+  /* the creator administers it: loaded and effective at once */
+  CHECK(G.groups[0].repo_count == 4);
+  CHECK(allowed(bob, &G.groups[0], &G.groups[0].repos[3], P_WRITE) == 0 ||
+        allowed(bob, &G.groups[0], &G.groups[0].repos[3], P_ADMIN));
+  make("fresh.git", bob);
+  CHECK(status() == GIT_RES_DISALLOWED && !strcmp(message(), "Repository already exists"));
+  make("fresh.git", mallory); /* cannot even read the group's create right */
+  CHECK(status() == GIT_RES_DISALLOWED || status() == GIT_RES_NOT_FOUND);
+  make("..", bob);
+  CHECK(status() != GIT_RES_OK);
+  make(".hidden.git", bob);
+  CHECK(status() == GIT_RES_INVALID_REQ && !exists(".hidden.git"));
+  {
+    mp_out o = {malloc(256), 256, 0, 0};
+    mp_map(&o, 1); mp_uint(&o, 0); mp_cstr(&o, "nogroup/x.git");
+    call(handle_create, &o, bob);
+    CHECK(status() == GIT_RES_NOT_FOUND);
+  }
+  /* a group administrator creates without a create entry of their own */
+  make("dave.git", dave);
+  CHECK(status() == GIT_RES_OK);
+}
+static void perm_request(mp_out *o, const char *op, const char *step, const char *target,
+                         const char *content) {
+  size_t pairs = 3 + (content != NULL);
+  *o = (mp_out){malloc(1 << 14), 1 << 14, 0, 0};
+  mp_map(o, pairs);
+  mp_uint(o, op[0] == 'g' ? 2 : 0);
+  mp_cstr(o, target);
+  mp_cstr(o, "operation"); mp_cstr(o, op);
+  mp_cstr(o, "step"); mp_cstr(o, step);
+  if (content) {
+    mp_cstr(o, "content");
+    mp_cstr(o, content);
+  }
+}
+static void permissions_management(void) {
+  mp_out o;
+  char text[512], h[33], content[200];
+  /* group permissions: administrators only; others see nothing or are refused */
+  perm_request(&o, "gperms", "get", "g", NULL);
+  call(handle_perms, &o, carol);
+  CHECK(status() == GIT_RES_DISALLOWED && !strcmp(message(), "Not allowed"));
+  perm_request(&o, "gperms", "get", "g", NULL);
+  call(handle_perms, &o, mallory); /* r:all lets mallory read, so the same refusal */
+  CHECK(status() == GIT_RES_DISALLOWED);
+  perm_request(&o, "gperms", "get", "nosuch", NULL);
+  call(handle_perms, &o, dave);
+  CHECK(status() == GIT_RES_NOT_FOUND);
+  perm_request(&o, "gperms", "get", "g", NULL);
+  call(handle_perms, &o, dave);
+  CHECK(status() == GIT_RES_OK); /* no g.allowed yet: empty content */
+  /* an invalid statement is refused with its line */
+  perm_request(&o, "gperms", "set", "g", "# comment\nbogus\n");
+  call(handle_perms, &o, dave);
+  CHECK(status() == GIT_RES_INVALID_REQ && strstr(message(), "\"bogus\" on line 2"));
+  /* a valid set is written and takes effect: carol can now write */
+  hex(carol, h);
+  snprintf(content, sizeof(content), "w:%s\n", h);
+  perm_request(&o, "gperms", "set", "g", content);
+  call(handle_perms, &o, carol);
+  CHECK(status() == GIT_RES_DISALLOWED);
+  CHECK(!allowed(carol, &G.groups[0], &G.groups[0].repos[0], P_WRITE));
+  perm_request(&o, "gperms", "set", "g", content);
+  call(handle_perms, &o, dave);
+  CHECK(status() == GIT_RES_OK);
+  file_text("../g.allowed", text, sizeof(text));
+  CHECK(!strcmp(text, content));
+  CHECK(allowed(carol, &G.groups[0], &G.groups[0].repos[0], P_WRITE));
+  /* the config's own [access] statements still apply after the reload */
+  CHECK(allowed(carol, &G.groups[0], &G.groups[0].repos[0], P_READ));
+  /* an executable resolver can only be changed node-side */
+  {
+    char cmd[300];
+    snprintf(cmd, sizeof(cmd), "chmod +x %.100s/g.allowed", root);
+    CHECK(!system(cmd));
+    perm_request(&o, "gperms", "set", "g", "r:all\n");
+    call(handle_perms, &o, dave);
+    CHECK(status() == GIT_RES_DISALLOWED && strstr(message(), "node-side"));
+    snprintf(cmd, sizeof(cmd), "chmod -x %.100s/g.allowed", root);
+    CHECK(!system(cmd));
+  }
+  /* repository permissions: dave created dave.git, so is its administrator */
+  perm_request(&o, "rperms", "get", "g/dave.git", NULL);
+  call(handle_perms, &o, carol);
+  CHECK(status() == GIT_RES_DISALLOWED);
+  perm_request(&o, "rperms", "get", "g/dave.git", NULL);
+  call(handle_perms, &o, dave);
+  CHECK(status() == GIT_RES_OK && strstr(message(), "adm:"));
+  perm_request(&o, "rperms", "set", "g/dave.git", "r:none\nbogus\n");
+  call(handle_perms, &o, dave);
+  CHECK(status() == GIT_RES_INVALID_REQ);
+  perm_request(&o, "rperms", "set", "g/dave.git", "r:none\n");
+  call(handle_perms, &o, dave);
+  CHECK(status() == GIT_RES_OK);
+  CHECK(!allowed(carol, &G.groups[0], &G.groups[0].repos[4], P_READ));
+  /* bob administers fresh.git but, as the reference requires, setting also
+   * needs administration of the group */
+  perm_request(&o, "rperms", "set", "g/fresh.git", "r:all\n");
+  call(handle_perms, &o, bob);
+  CHECK(status() == GIT_RES_DISALLOWED);
+  perm_request(&o, "nonsense", "get", "g", NULL);
+  call(handle_perms, &o, dave);
+  CHECK(status() == GIT_RES_INVALID_REQ);
+}
 int main(void) {
   setup();
   permissions();
@@ -276,6 +432,8 @@ int main(void) {
   list_for_push();
   writes_need_write();
   hostile_refs();
+  creating();
+  permissions_management();
   cleanup();
   return 0;
 }

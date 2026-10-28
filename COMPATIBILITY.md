@@ -859,3 +859,29 @@ reference server. Handler tests send the requests a git client never would
 (writes without permission, hostile ref names, an unidentified peer). The tests
 fail when the write check of the push handler, the `refs/` restriction of
 delete or the ref rules are removed. Not tested on real radio links.
+
+### rngit management: create and permissions (`feature/rngit-manage`)
+
+`/git/create` makes a bare repository in a group for an identity that holds the
+group's create permission (an administrator of the group passes every
+permission), writes `NAME.allowed` with `adm:<creator>` and loads it at once.
+`/mgmt/perms` reads and replaces the group's (`gperms`) or a repository's
+(`rperms`) permission file. Every statement is checked before the file is
+replaced atomically, an executable file can only be changed node-side, and the
+permissions are reloaded from the file plus the config's `[access]` line. The
+reference's quirks are kept on purpose: setting a repository's permissions needs
+administration of the group as well as of the repository, and an administrator
+whose own read is set to `none` is locked out of editing. A name that starts
+with a dot is refused (the reference only refuses names that exist already).
+
+`reticulum-c-git-admin --connect HOST:PORT create URL`, `gperms URL get|set
+FILE|-` and `rperms URL get|set FILE|-` take the place of `rngit create` and
+`rngit perms`; where the reference opens `$EDITOR`, `set` reads a file.
+
+Evidence: handler tests (create with and without the right, existing, dotted and
+unknown names, the group and repository permission paths with their refusals,
+invalid statements, executable files) fail when the create check or the
+executable guard is removed; and the round trip creates a repository, pushes into
+it, sets its write permission to `none` and back, and edits the group file, with
+the reference `rngit create` and `rngit perms` against the C node and the C tool
+against the reference node.
