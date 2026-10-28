@@ -65,7 +65,11 @@ Toolchain pins that change the firmware builds: the ESP-IDF Docker image
 (espressif/idf:v5.4.4, in mcu/build-esp-idf.sh), PlatformIO 6.1.19 (in
 mcu/build-platformio.sh, whose hash is also the CI cache key) and the platform
 versions in mcu/platformio/platformio.ini. The Linux archives use alpine:3.20.
-The firmware has not been run on hardware.
+The firmware has not been run on hardware. ESP-IDF archives are generic (no LoRa
+board selected, so no radio); only the PlatformIO archives carry a board's radio
+pin table. Radio and Wi-Fi settings are provisioned at run time, so no archive
+contains credentials or transmit defaults; package-mcu.sh refuses images built
+with compiled-in credentials.
 
 Trial builds
 ------------
