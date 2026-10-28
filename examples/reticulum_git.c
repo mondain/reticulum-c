@@ -17,10 +17,12 @@
  *   [access]       group = r:all, w:HASH, ...
  *
  * plus group.allowed (next to the group directory) and NAME.allowed (next to a
- * repository) permission files, executable ones included. Repository creation,
- * forks and mirrors, releases, work documents, statistics and the page server
- * of the reference are not implemented. A request is answered synchronously, so
- * a git operation that outlives the 30 second request window is lost. */
+ * repository) permission files, executable ones included. It serves list, fetch,
+ * push and delete, repository creation, forks, mirrors and sync (run in child
+ * processes, answered later), permission editing, releases, work documents,
+ * statistics and, with `[pages] serve_nomadnet = yes`, the nomadnet page server
+ * of the reference. A request that runs git is answered synchronously while the
+ * node stays serviced, except forks, mirrors and syncs. */
 #include "rngit_common.h"
 #include <stdarg.h>
 #include <dirent.h>
