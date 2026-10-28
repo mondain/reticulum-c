@@ -12,8 +12,10 @@ framework so it builds for common LoRa boards with one command:
     does not ship), scripts/ (collects the flashable files)
 
 STATUS: every environment below builds. The firmware has NOT been run on hardware.
-There is no LoRa radio driver: the board talks to a host over its serial/USB port, or
-(ESP32 and ESP32-S3 environments only) over Wi-Fi and TCP, see "Wi-Fi mode" below.
+The board talks to a host over its serial/USB port, or (ESP32 and ESP32-S3 environments
+only) over Wi-Fi and TCP, see "Wi-Fi mode" below, and, once configured, over a LoRa radio,
+see "LoRa radio" below. The LoRa support has only been tested against software models of the
+radio chips; nothing has been sent or received on air.
 
 Environments
 ------------
@@ -44,11 +46,11 @@ boards/wiscore_rak4631.json, boards/heltec_t114.json and boards/lilygo_t_echo.js
 written here, as copies of the platform's adafruit_feather_nrf52840.json (the nearest
 nRF52840 board with the same bootloader: Adafruit nRF52 bootloader with UF2 and serial
 DFU, S140 6.1.1 memory map, application at 0x26000, linker script nrf52840_s140_v6.ld)
-with only the name, vendor and USB product string changed. They also reuse the Feather's
-Arduino variant (pin map). That is enough for this firmware, which uses only the USB
-serial port, the timer, the RNG and the internal flash; it is NOT a pin map for the
-boards' radios, displays or buttons (a LoRa driver would need those). The three boards
-are known to ship the Adafruit bootloader; this was not tested on the boards.
+with the name, vendor, USB product string and the Arduino variant changed. The variant is
+variants/rnc_nrf52840 (written for this project): an identity pin map, so Arduino pin n is
+chip GPIO n (P1.k is 32 + k) and the radio pin numbers of mcu/radio/rnc_boards.c can be used
+as they are; it drives no LED or button. The boards are known to ship the Adafruit
+bootloader; this was not tested on the boards.
 
 Prerequisites
 -------------
@@ -82,6 +84,37 @@ OUTDIR/size-report.txt has the RAM and flash lines of every environment.
 
 Setting RNC_MCU_BUILD_EPOCH or SOURCE_DATE_EPOCH (seconds) fixes the build time that the
 clock policy uses (../README.txt, "Unix time policy"); the default is the current time.
+
+LoRa radio
+----------
+All seven environments contain the LoRa driver for their board (the board table is
+mcu/radio/rnc_boards.c; the environment name selects the entry): SX1262 on heltec_wifi_lora_32_V3,
+lilygo_t3_s3, wiscore_rak4631, heltec_t114, lilygo_t_echo; SX1276 on heltec_wifi_lora_32_V2 and
+ttgo_t_beam (v1.0/v1.1, its AXP192 radio rail is switched on over I2C). The radio is OFF, and the
+chip is not touched, until the mode and the frequency, bandwidth, spreading factor, coding rate
+and transmit power have been set at runtime; NO radio setting is compiled into any image, and
+the operator is responsible for a legal frequency, power and duty cycle (mcu/radio/README.txt).
+
+  lora.mode leaf      LoRa is the only interface (announces on LoRa, answers /echo and /info
+                      over LoRa, forwards nothing); Serial is free for status text and the
+                      Wi-Fi mode, if set, is not started
+  lora.mode gateway   the serial (or Wi-Fi) interface plus LoRa with Reticulum transport ON
+  lora.freq lora.bw lora.sf lora.cr lora.txp lora.airtime   the radio settings
+
+Provision with the console (send the line rnc-config on Serial within 2 seconds after reset;
+also on the nRF52 boards, where only the lora.* keys matter) or, on ESP32 without a console,
+mcu/tools/wifi-config.sh --arduino ... --lora-mode ... (see its header; that replaces the whole
+NVS partition including the identity). Storage: ESP32 Preferences namespace rnc_net; nRF52 the
+internal file system (/rnc_lora). Example console session (values are an illustration, use
+ones that are legal for you):
+  set lora.mode leaf / set lora.freq 868.1 / set lora.bw 125 / set lora.sf 8 / set lora.cr 5 /
+  set lora.txp 14 / save / reboot
+
+Sizes with the radio (measured, PlatformIO, before -> after): wiscore_rak4631 flash 203884 ->
+235904 bytes, RAM 13164 -> 16732; heltec_wifi_lora_32_V3 flash 759353 -> 795501, RAM 48552 ->
+52520 (the others in mcu/build-platformio.sh's size-report.txt). On nRF52 the heap that remains
+for malloc is 218788 bytes (222356 before), enough for the node's 86 KB, the 16 KB task stack
+and the radio's 3.5 KB.
 
 Flashing
 --------

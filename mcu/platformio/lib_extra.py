@@ -47,10 +47,11 @@ paths = [
     os.path.join(root, "src"),
     os.path.join(root, "src", "third_party", "monocypher"),
     os.path.join(root, "mcu", "app"),
+    os.path.join(root, "mcu", "radio"),
 ]
 # the library itself
 env.Append(CPPPATH=paths, CPPDEFINES=defines)
 # the project (the sketch includes rnc_mcu_app.h and the reticulum_c headers)
 global_env = DefaultEnvironment()  # noqa: F821
-global_env.Append(CPPPATH=[paths[0], paths[3]],
+global_env.Append(CPPPATH=[paths[0], paths[3], paths[4]],
                   CPPDEFINES=[("RNC_PROFILE_MCU", 1)] + defines)

@@ -13,7 +13,6 @@
 // flags RNC_MCU_DEV_WIFI_SSID / _PASSWORD / _HOST / _PORT (string literals) compile
 // defaults in; they apply only while no mode is stored.
 #pragma once
-#if defined(ARDUINO_ARCH_ESP32)
 #include <stddef.h>
 #include <stdint.h>
 
@@ -35,6 +34,7 @@ bool rnc_provision_requested(unsigned window_ms);
 // Runs the console until reboot; does not return.
 void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason);
 
+#if defined(ARDUINO_ARCH_ESP32)
 // The transport: call rnc_wifi_start once, then plug the three functions into the
 // platform table (all are called from the Reticulum task only).
 bool rnc_wifi_start(const rnc_mcu_cfg *cfg);

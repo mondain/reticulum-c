@@ -15,7 +15,8 @@
     ],
     "usb_product": "Heltec Mesh Node T114",
     "mcu": "nrf52840",
-    "variant": "feather_nrf52840_express",
+    "variant": "rnc_nrf52840",
+    "variants_dir": "variants",
     "bsp": {
       "name": "adafruit"
     },

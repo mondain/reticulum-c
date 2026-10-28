@@ -42,6 +42,38 @@ bool rnc_settings_load(rnc_mcu_cfg *cfg) {
     uint16_t port = prefs.getUShort("port", 0);
     if (port != 0)
       cfg->port = port;
+    // the radio: nothing is assumed; a transmit setting counts only if it was stored with its
+    // "set" bit, and it passes the same checks as at the console
+    {
+      char text[16];
+      String lmode = prefs.getString("lora_mode", "");
+      if (lmode.length() > 0)
+        (void)rnc_lora_cfg_set(&cfg->lora, "mode", lmode.c_str());
+      uint8_t set = prefs.getUChar("lora_set", 0);
+      if (set & RNC_LORA_SET_FREQ) {
+        snprintf(text, sizeof(text), "%lu", (unsigned long)prefs.getULong("lora_freq", 0));
+        (void)rnc_lora_cfg_set(&cfg->lora, "freq", text);
+      }
+      if (set & RNC_LORA_SET_BW) {
+        snprintf(text, sizeof(text), "%lu", (unsigned long)prefs.getULong("lora_bw", 0));
+        (void)rnc_lora_cfg_set(&cfg->lora, "bw", text);
+      }
+      if (set & RNC_LORA_SET_SF) {
+        snprintf(text, sizeof(text), "%u", (unsigned)prefs.getUChar("lora_sf", 0));
+        (void)rnc_lora_cfg_set(&cfg->lora, "sf", text);
+      }
+      if (set & RNC_LORA_SET_CR) {
+        snprintf(text, sizeof(text), "%u", (unsigned)prefs.getUChar("lora_cr", 0));
+        (void)rnc_lora_cfg_set(&cfg->lora, "cr", text);
+      }
+      if (set & RNC_LORA_SET_TXP) {
+        snprintf(text, sizeof(text), "%d", (int)prefs.getChar("lora_txp", 0));
+        (void)rnc_lora_cfg_set(&cfg->lora, "txp", text);
+      }
+      uint16_t air = prefs.getUShort("lora_air", 0);
+      if (air >= 1 && air <= 10000)
+        cfg->lora.airtime = air;
+    }
     prefs.end();
   }
 #if defined(RNC_MCU_DEV_WIFI_SSID)
@@ -73,6 +105,21 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
   ok = (prefs.putString("password", cfg->password) > 0 || !cfg->password[0]) && ok;
   ok = (prefs.putString("host", cfg->host) > 0 || !cfg->host[0]) && ok;
   ok = prefs.putUShort("port", cfg->port) == 2 && ok;
+  ok = prefs.putString("lora_mode", cfg->lora.mode == RNC_LORA_MODE_LEAF      ? "leaf"
+                                    : cfg->lora.mode == RNC_LORA_MODE_GATEWAY ? "gateway"
+                                                                               : "off") > 0 && ok;
+  ok = prefs.putUChar("lora_set", cfg->lora.set) == 1 && ok;
+  if (cfg->lora.set & RNC_LORA_SET_FREQ)
+    ok = prefs.putULong("lora_freq", cfg->lora.freq_hz) == 4 && ok;
+  if (cfg->lora.set & RNC_LORA_SET_BW)
+    ok = prefs.putULong("lora_bw", cfg->lora.bw_hz) == 4 && ok;
+  if (cfg->lora.set & RNC_LORA_SET_SF)
+    ok = prefs.putUChar("lora_sf", cfg->lora.sf) == 1 && ok;
+  if (cfg->lora.set & RNC_LORA_SET_CR)
+    ok = prefs.putUChar("lora_cr", cfg->lora.cr) == 1 && ok;
+  if (cfg->lora.set & RNC_LORA_SET_TXP)
+    ok = prefs.putChar("lora_txp", cfg->lora.txp_dbm) == 1 && ok;
+  ok = prefs.putUShort("lora_air", cfg->lora.airtime) == 2 && ok;
   prefs.end();
   return ok;
 }
@@ -123,7 +170,7 @@ static void print(const char *text) {
 
 void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
   rnc_mcu_console con;
-  char reply[256];
+  char reply[512];
   rnc_mcu_console_init(&con);
   print("\n\nreticulum-c provisioning console\n");
   print(reason);
