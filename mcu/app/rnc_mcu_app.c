@@ -76,7 +76,7 @@ int rnc_mcu_app_set_unix(rnc_mcu_app *app, uint64_t now_ms, uint64_t unix_second
   uint64_t u = rnc_mcu_app_unix(app, now_ms);
   if (unix_seconds <= u || unix_seconds > UINT64_C(0xffffffffff))
     return -1;
-  app->base += unix_seconds - u;
+  app->base = unix_seconds - now_ms / 1000u;
   app->last_unix = unix_seconds;
   return 0;
 }
@@ -114,7 +114,7 @@ static void clock_init(rnc_mcu_app *app, uint64_t now_ms) {
   }
   app->base = start - now_ms / 1000u;
   app->last_unix = start;
-  app->last_persist_unix = 0;
+  app->last_persist_unix = start;
 }
 
 /* ---- request handlers ----------------------------------------------------- */
