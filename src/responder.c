@@ -394,6 +394,40 @@ rnc_result rnc_responder_tick(rnc_responder *r, uint64_t unix_seconds,
   }
   return RNC_OK;
 }
+rnc_result rnc_responder_defer(rnc_responder *r, rnc_responder_ticket *t,
+                               uint64_t lifetime_ms) {
+  if (!r || !t || !lifetime_ms)
+    return RNC_INVALID;
+  if (!r->busy || !r->current)
+    return RNC_STATE;
+  if (rnc_service_extend_request(r->current->service, r->current_event.request_id,
+                                 lifetime_ms, r->now) != RNC_OK)
+    return RNC_STATE;
+  memcpy(t->link_id, r->current->id, 16);
+  memcpy(t->request_id, r->current_event.request_id, 16);
+  t->valid = 1;
+  return RNC_OK;
+}
+rnc_result rnc_responder_reply(rnc_responder *r, rnc_responder_ticket *t,
+                               const void *value, size_t n, uint64_t now_ms) {
+  size_t i;
+  rnc_result result;
+  if (!r || !t || !value || !n)
+    return RNC_INVALID;
+  if (!t->valid)
+    return RNC_STATE;
+  if (now_ms > r->now)
+    r->now = now_ms;
+  for (i = 0; i < RNC_RESPONDER_LINKS; i++)
+    if (r->slots[i].used && !memcmp(r->slots[i].id, t->link_id, 16)) {
+      result = rnc_service_respond(r->slots[i].service, t->request_id, value, n,
+                                   r->now);
+      if (result == RNC_OK)
+        t->valid = 0;
+      return result;
+    }
+  return RNC_STATE;
+}
 rnc_result rnc_responder_request_identity(const rnc_responder *r,
                                           rnc_identity *identity) {
   if (!r || !identity)

@@ -339,6 +339,17 @@ rnc_result rnc_service_respond(rnc_service *s, const uint8_t id[16], const void 
     }
     return result;
 }
+rnc_result rnc_service_extend_request(rnc_service *s, const uint8_t id[16], uint64_t lifetime,
+                                      uint64_t now) {
+    int index;
+    if (!s || !id || !lifetime || now < s->now)
+        return RNC_INVALID;
+    index = slot(s->incoming, id);
+    if (index < 0 || now >= s->incoming[index].deadline)
+        return RNC_STATE;
+    s->incoming[index].deadline = now > UINT64_MAX - lifetime ? UINT64_MAX : now + lifetime;
+    return RNC_OK;
+}
 rnc_result rnc_service_respond_file(rnc_service *s, const uint8_t id[16], const void *data,
                                     size_t n, const void *metadata, size_t mn, uint64_t now) {
     int index;

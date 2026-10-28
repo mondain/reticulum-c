@@ -78,6 +78,22 @@ rnc_result rnc_responder_request_identity(const rnc_responder *responder,
  * inside the handler: link keepalives and other links' packets keep being
  * processed, but no second handler starts and a link that closes meanwhile is
  * released only after the handler returns. */
+/* Answering later. Inside a handler, rnc_responder_defer takes a ticket for the
+ * request being handled and gives it `lifetime_ms` (instead of 30 seconds) to
+ * be answered; the handler then returns RNC_AGAIN (no response now) and goes on
+ * with its work elsewhere, without blocking the node. rnc_responder_reply sends
+ * the answer, a complete MessagePack value, whenever it is ready. RNC_STATE
+ * when the ticket was used, the link has gone or the request expired. */
+typedef struct rnc_responder_ticket {
+  uint8_t link_id[16], request_id[16];
+  int valid;
+} rnc_responder_ticket;
+rnc_result rnc_responder_defer(rnc_responder *responder,
+                               rnc_responder_ticket *ticket,
+                               uint64_t lifetime_ms);
+rnc_result rnc_responder_reply(rnc_responder *responder,
+                               rnc_responder_ticket *ticket, const void *value,
+                               size_t value_size, uint64_t now_ms);
 /* Destination.set_max_request_size for every link to the destination, present
  * and future (RNC_SERVICE_NO_LIMIT removes the limit). */
 rnc_result rnc_responder_set_max_request_size(rnc_responder *responder,

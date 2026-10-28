@@ -75,6 +75,11 @@ rnc_result rnc_service_set_max_request_size(rnc_service *service, size_t max_siz
 /* Only responds once to an admitted, unexpired request. */
 rnc_result rnc_service_respond(rnc_service *service, const uint8_t request_id[16],
                                const void *encoded_value, size_t value_size, uint64_t now_ms);
+/* Gives an admitted incoming request this long from now_ms to be answered
+ * instead of the default 30 seconds (a handler whose work takes minutes).
+ * RNC_STATE if the request is unknown or already answered or expired. */
+rnc_result rnc_service_extend_request(rnc_service *service, const uint8_t request_id[16],
+                                      uint64_t lifetime_ms, uint64_t now_ms);
 /* Answers with a file instead of a MessagePack value: `data` (raw bytes, at
  * most max_value) and one complete encoded MessagePack `metadata` value travel
  * as a single Resource bound to the request, with no [id, value] envelope. This
