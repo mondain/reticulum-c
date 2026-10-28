@@ -3,7 +3,10 @@
  * "reticulum_c.mcu.example" destination, then requests /echo and /info and
  * checks the replies.
  *
- *   echo_client --connect HOST:PORT [--timeout SECONDS]
+ *   echo_client --connect HOST:PORT [--timeout SECONDS] [--min-hops N]
+ *
+ * --min-hops only accepts an announce that has travelled at least N hops (to pick a board
+ * behind a gateway rather than the gateway itself).
  *
  * Exit status 0 when both replies are right. Built in the default (OpenSSL)
  * build; it needs nothing from the MCU build except the wire protocol. */
@@ -49,6 +52,7 @@ static int contains(const uint8_t *hay, size_t n, const char *needle) {
 int main(int argc, char **argv) {
   const char *connect_to = NULL;
   double timeout = 60.0;
+  unsigned min_hops = 0;
   char address[256];
   const char *colon;
   rnc_identity id;
@@ -70,8 +74,10 @@ int main(int argc, char **argv) {
       connect_to = argv[++i];
     else if (!strcmp(argv[i], "--timeout") && i + 1 < argc)
       timeout = atof(argv[++i]);
+    else if (!strcmp(argv[i], "--min-hops") && i + 1 < argc)
+      min_hops = (unsigned)atoi(argv[++i]);
     else
-      FAIL("usage: echo_client --connect HOST:PORT [--timeout SECONDS]");
+      FAIL("usage: echo_client --connect HOST:PORT [--timeout SECONDS] [--min-hops N]");
   }
   if (!connect_to || !(colon = strrchr(connect_to, ':')) ||
       (size_t)(colon - connect_to) >= sizeof(address))
@@ -107,8 +113,11 @@ int main(int argc, char **argv) {
         continue;
       if (event.node.type == RNC_NODE_ANNOUNCE &&
           rnc_announce_matches_aspect(&event.node.route.announce, APP_NAME)) {
+        if (event.node.route.hops < min_hops)
+          continue;
         if (!have_dest)
-          printf("announce from the MCU destination received\n");
+          printf("announce from the MCU destination received (%u hops)\n",
+                 (unsigned)event.node.route.hops);
         memcpy(destination, event.node.route.destination, 16);
         have_dest = 1;
       } else if (event.node.type == RNC_NODE_LOCAL)

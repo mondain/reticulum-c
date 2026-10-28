@@ -8,13 +8,16 @@
  *
  *   rnc_mcu_backoff   reconnect delays: exponential with a little jitter, capped
  *   rnc_mcu_txq       bounded output byte queue; a frame is queued whole or refused
- *   rnc_mcu_cfg       the provisioning settings (mode, ssid, password, host, port)
+ *   rnc_mcu_cfg       the provisioning settings (mode, ssid, password, host, port) and
+ *                     the LoRa radio settings (lora.mode, lora.freq, lora.bw, lora.sf,
+ *                     lora.cr, lora.txp, lora.airtime: rnc_lora_cfg.h)
  *   rnc_mcu_console   the line console that edits them: help, get, set, clear, save,
  *                     reboot
  *
  * SECURITY: the settings include a Wi-Fi password. The console never prints it.
  * Where the settings are stored (NVS, Preferences) is up to the port.
  */
+#include "rnc_lora_cfg.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -109,12 +112,14 @@ typedef struct rnc_mcu_cfg {
   char password[65];  /* empty (open network) or 8..63 characters */
   char host[64];      /* the node's name or address */
   uint16_t port;
+  rnc_lora_cfg lora;  /* the radio: off until explicitly configured (rnc_lora_cfg.h) */
 } rnc_mcu_cfg;
 
 static inline void rnc_mcu_cfg_init(rnc_mcu_cfg *c) {
   memset(c, 0, sizeof(*c));
   memcpy(c->mode, RNC_MCU_MODE_SERIAL, sizeof(RNC_MCU_MODE_SERIAL));
   c->port = RNC_MCU_DEFAULT_PORT;
+  rnc_lora_cfg_init(&c->lora);
 }
 static inline int rnc_mcu_cfg_wifi_mode(const rnc_mcu_cfg *c) {
   return !strcmp(c->mode, RNC_MCU_MODE_WIFI);
@@ -127,6 +132,11 @@ static inline int rnc_mcu_cfg_wifi_ready(const rnc_mcu_cfg *c) {
 
 static inline int rnc_mcu_cfg_set(rnc_mcu_cfg *c, const char *key, const char *value) {
   size_t n = strlen(value);
+  if (!strncmp(key, "lora.", 5)) {
+    if (rnc_lora_cfg_set(&c->lora, key + 5, value) != 0)
+      return -1;
+    return 0;
+  }
   if (!strcmp(key, "mode")) {
     if (strcmp(value, RNC_MCU_MODE_SERIAL) && strcmp(value, RNC_MCU_MODE_WIFI))
       return -1;
@@ -185,12 +195,19 @@ static inline void rnc_mcu_console_init(rnc_mcu_console *c) { memset(c, 0, sizeo
 
 static inline void rnc_mcu_console_get(const rnc_mcu_cfg *cfg, const char *key, char *out,
                                        size_t size) {
-  char tmp[160];
+  char tmp[160], lora[256];
   tmp[0] = 0;
+  if (key && !strncmp(key, "lora.", 5)) {
+    rnc_lora_cfg_get(&cfg->lora, key + 5, out, size);
+    return;
+  }
   if (!key || !*key) {
+    rnc_lora_cfg_get(&cfg->lora, NULL, lora, sizeof(lora));
     (void)snprintf(tmp, sizeof(tmp), "mode=%s\nssid=%s\npassword=%s\nhost=%s\nport=%u", cfg->mode,
                    cfg->ssid, cfg->password[0] ? "(set)" : "(empty)", cfg->host,
                    (unsigned)cfg->port);
+    (void)snprintf(out, size, "%s\n%s", tmp, lora);
+    return;
   } else if (!strcmp(key, "mode")) {
     (void)snprintf(tmp, sizeof(tmp), "mode=%s", cfg->mode);
   } else if (!strcmp(key, "ssid")) {
@@ -228,6 +245,8 @@ static inline unsigned rnc_mcu_console_line(rnc_mcu_console *c, rnc_mcu_cfg *cfg
     (void)snprintf(reply, reply_size,
                    "commands: get [key] | set key value | clear | save | reboot\n"
                    "keys: mode (serial|wifi) ssid password host port\n"
+                   "LoRa: lora.mode (off|leaf|gateway) lora.freq lora.bw lora.sf lora.cr lora.txp\n"
+                   "lora.airtime; the radio stays off until mode, freq, bw, sf, cr and txp are set\n"
                    "set mode wifi, fill in the rest, then save and reboot");
   } else if (!strcmp(cmd, "get")) {
     rnc_mcu_console_get(cfg, arg, reply, reply_size);

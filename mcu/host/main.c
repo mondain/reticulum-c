@@ -5,6 +5,9 @@
  *
  *   reticulum-c-mcu-host [--pty | --stdio | --tcp HOST:PORT] [--state DIR]
  *                        [--announce-ms N] [--board NAME]
+ *                        [--lora leaf|gateway [--lora-freq F] [--lora-bw B] [--lora-sf N]
+ *                         [--lora-cr N] [--lora-txp DBM] [--lora-airtime PCT]
+ *                         [--lora-peers N] [--lora-loss PERMILLE] [--lora-chip sx1262|sx1276]]
  *
  * --pty    (default) creates a pseudo terminal and prints "pty=/dev/pts/N" on
  *          stdout; point a SerialInterface at that path.
@@ -15,6 +18,13 @@
  *          cannot be made or is lost; the application resets its decoder and
  *          announces again after every reconnect. Logs "tcp: connection failed",
  *          "tcp: connection lost", "transport up" and "transport down".
+ * --lora   gives the harness board a SIMULATED LoRa radio (a model of an SX1262 or SX1276 on
+ *          a simulated channel, see lora_host.h) in leaf mode (LoRa is the only interface) or
+ *          gateway mode (the serial/pty/TCP interface plus LoRa, transport on). The settings
+ *          are the firmware's (lora.freq ...): the radio is refused unless frequency,
+ *          bandwidth, spreading factor, coding rate and power are all given. --lora-peers
+ *          simulated leaf boards (default 1) share the channel; their destinations are
+ *          logged ("peer1 destination <hex>").
  * --state  directory for the persisted identity and clock mark (default ".").
  * The process ends on SIGINT or SIGTERM. */
 #define _POSIX_C_SOURCE 200809L
@@ -22,6 +32,7 @@
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
+#include "lora_host.h"
 #include "rnc_mcu_app.h"
 #include "rnc_mcu_net.h"
 #include <errno.h>
@@ -287,8 +298,15 @@ int main(int argc, char **argv) {
   char *colon;
   const char *board = "host";
   struct sigaction sa;
+  lora_host_options lopt;
+  lora_host *lora = NULL;
+  int lora_requested = 0;
   memset(&h, 0, sizeof(h));
   memset(&config, 0, sizeof(config));
+  memset(&lopt, 0, sizeof(lopt));
+  rnc_lora_cfg_init(&lopt.cfg);
+  lopt.chip = 1262;
+  lopt.peers = 1;
   snprintf(h.state, sizeof(h.state), ".");
   for (i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--pty"))
@@ -311,8 +329,33 @@ int main(int argc, char **argv) {
       config.announce_interval_ms = (uint32_t)strtoul(argv[++i], NULL, 10);
     else if (!strcmp(argv[i], "--board") && i + 1 < argc)
       board = argv[++i];
-    else {
-      fprintf(stderr, "usage: %s [--pty | --stdio | --tcp HOST:PORT] [--state DIR] [--announce-ms N] [--board NAME]\n",
+    else if (!strcmp(argv[i], "--lora") && i + 1 < argc) {
+      lora_requested = 1;
+      if (rnc_lora_cfg_set(&lopt.cfg, "mode", argv[++i]) != 0) {
+        fprintf(stderr, "--lora needs leaf or gateway\n");
+        return 2;
+      }
+    } else if (!strncmp(argv[i], "--lora-", 7) && i + 1 < argc &&
+               (!strcmp(argv[i] + 7, "freq") || !strcmp(argv[i] + 7, "bw") ||
+                !strcmp(argv[i] + 7, "sf") || !strcmp(argv[i] + 7, "cr") ||
+                !strcmp(argv[i] + 7, "txp") || !strcmp(argv[i] + 7, "airtime"))) {
+      const char *key = argv[i] + 7;
+      if (rnc_lora_cfg_set(&lopt.cfg, key, argv[i + 1]) != 0) {
+        fprintf(stderr, "refused value for %s\n", argv[i]);
+        return 2;
+      }
+      i++;
+    } else if (!strcmp(argv[i], "--lora-peers") && i + 1 < argc)
+      lopt.peers = (unsigned)strtoul(argv[++i], NULL, 10);
+    else if (!strcmp(argv[i], "--lora-loss") && i + 1 < argc)
+      lopt.loss_permille = (unsigned)strtoul(argv[++i], NULL, 10);
+    else if (!strcmp(argv[i], "--lora-chip") && i + 1 < argc) {
+      i++;
+      lopt.chip = !strcmp(argv[i], "sx1276") ? 1276 : 1262;
+    } else {
+      fprintf(stderr, "usage: %s [--pty | --stdio | --tcp HOST:PORT] [--state DIR] [--announce-ms N] [--board NAME]\n"
+                      "          [--lora leaf|gateway --lora-freq F --lora-bw B --lora-sf N --lora-cr N --lora-txp DBM\n"
+                      "           [--lora-airtime PCT] [--lora-peers N] [--lora-loss PERMILLE] [--lora-chip sx1262|sx1276]]\n",
               argv[0]);
       return 2;
     }
@@ -354,6 +397,16 @@ int main(int argc, char **argv) {
   platform.board = board;
   if (h.tcp)
     platform.link_up = host_link_up;
+  if (lora_requested) {
+    int status = 0;
+    lora = lora_host_new(&lopt, &status);
+    if (lora) {
+      config.lora = lora_host_interface(lora);
+      config.lora_mode = lopt.cfg.mode;
+    } else {
+      fprintf(stderr, "mcu: continuing without the radio\n");
+    }
+  }
   /* no unix_seconds hook: the host runs the same build-epoch-plus-uptime policy as a
    * board, which is what the test needs to prove */
   app = rnc_mcu_app_new(&platform, &config);
@@ -370,7 +423,10 @@ int main(int argc, char **argv) {
     fprintf(stderr, ">\n");
   }
   while (!stopping) {
-    unsigned wait = rnc_mcu_app_step(app, host_now_ms(&h));
+    unsigned wait;
+    if (lora)
+      lora_host_step(lora, host_now_ms(&h) * 1000u);
+    wait = rnc_mcu_app_step(app, host_now_ms(&h));
     struct pollfd p = {h.in_fd, POLLIN, 0};
     if (h.tcp) {
       tcp_pump(&h, host_now_ms(&h)); /* send what the step queued */
@@ -383,6 +439,17 @@ int main(int argc, char **argv) {
       nanosleep(&ts, NULL);
     }
   }
+  {
+    rnc_mcu_stats st;
+    rnc_mcu_app_get_stats(app, &st);
+    fprintf(stderr,
+            "mcu: stats: announces %u rx %u rx_bad %u tx_dropped %u lora_rx %u lora_rx_bad %u lora_tx %u "
+            "lora_tx_dropped %u\n",
+            (unsigned)st.announces, (unsigned)st.rx_packets, (unsigned)st.rx_bad,
+            (unsigned)st.tx_dropped, (unsigned)st.lora_rx_packets, (unsigned)st.lora_rx_bad,
+            (unsigned)st.lora_tx_packets, (unsigned)st.lora_tx_dropped);
+  }
   rnc_mcu_app_free(app);
+  lora_host_free(lora);
   return 0;
 }

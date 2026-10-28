@@ -59,9 +59,24 @@ extern "C" {
 #define RNC_MCU_ANNOUNCE_MS 600000u /* 10 minutes */
 #endif
 
+struct rnc_lora_if;
+
 typedef struct rnc_mcu_config {
   uint32_t announce_interval_ms; /* 0 = RNC_MCU_ANNOUNCE_MS */
   uint32_t bitrate;              /* bits per second of the transport, 0 = 115200 */
+  /* The LoRa interface (mcu/radio), optional. The caller creates and starts it
+   * (rnc_lora_if_init / rnc_lora_if_start) and keeps it alive for the life of the app;
+   * the application only exchanges packets with it and steps it. Only used when
+   * `lora_mode` is leaf or gateway (rnc_lora_cfg.h: RNC_LORA_MODE_*, 0 = off).
+   *   leaf     the node's only interface is LoRa; the serial/Wi-Fi hooks are not used;
+   *            no transport (no forwarding), announces and answers /echo and /info
+   *   gateway  the serial or Wi-Fi interface plus LoRa, with Reticulum transport ON:
+   *            the board forwards between them, so a host node reaches the LoRa network
+   *            through it (the mcu profile's small tables bound how much it can carry)
+   * With no LoRa interface (the default) the behaviour is the single-interface leaf of
+   * the earlier versions. */
+  struct rnc_lora_if *lora;
+  unsigned lora_mode;
 } rnc_mcu_config;
 
 typedef struct rnc_mcu_app rnc_mcu_app;
@@ -90,9 +105,16 @@ typedef struct rnc_mcu_stats {
   uint32_t rx_packets;   /* frames that decoded as Reticulum packets */
   uint32_t rx_bad;       /* HDLC frames that did not decode as a packet */
   uint32_t tx_dropped;   /* outgoing packets discarded because the link was down */
+  uint32_t lora_rx_packets;  /* packets received over LoRa */
+  uint32_t lora_rx_bad;      /* LoRa packets that did not decode */
+  uint32_t lora_tx_packets;  /* packets handed to the LoRa interface */
+  uint32_t lora_tx_dropped;  /* packets the LoRa interface refused (queue full, radio down) */
 } rnc_mcu_stats;
 void rnc_mcu_app_get_stats(const rnc_mcu_app *app, rnc_mcu_stats *stats);
 
+/* The node, for tests and diagnostics (routes, hop counts). Do not free it. */
+struct rnc_node;
+struct rnc_node *rnc_mcu_app_node(rnc_mcu_app *app);
 /* The 16 byte destination hash; 0 on success. */
 int rnc_mcu_app_destination(const rnc_mcu_app *app, uint8_t hash[16]);
 /* Current unix seconds according to the policy above. */
