@@ -354,6 +354,8 @@ rnc_mcu_app *rnc_mcu_app_new(const rnc_mcu_platform *platform, const rnc_mcu_con
       rnc_responder_register(app->responder, app->destination, "/info", RNC_SERVICE_ALLOW_ALL, NULL,
                              0, handle_info, app) != RNC_OK)
     goto fail;
+  /* two link slots: a peer that vanished (a teardown lost over radio) must not lock the others out */
+  (void)rnc_responder_set_evict_oldest(app->responder, 1);
   app->announces = 0;
   app->next_announce_ms = 0;
   app->link = app->primary ? -1 : 1;

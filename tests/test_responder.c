@@ -229,6 +229,43 @@ static void drop_links_frees_slots(void) {
   CHECK(rnc_responder_drop_links(NULL) == RNC_INVALID);
   teardown(&n);
 }
+/* A link request from a fresh client link, delivered to the server node and responder. */
+static rnc_result extra_link(net *n) {
+  rnc_route route;
+  rnc_link *l = rnc_link_new(rng, NULL);
+  rnc_link_event le;
+  rnc_node_event e;
+  rnc_result r = RNC_AGAIN;
+  CHECK(l && rnc_node_lookup(n->client, n->destination, n->now, &route) == RNC_OK);
+  CHECK(rnc_link_open(l, &route.announce, n->now) == RNC_OK);
+  while (rnc_link_poll(l, &le) == RNC_OK)
+    if (le.type == RNC_LINK_SEND)
+      CHECK(rnc_node_input(n->server, 1, &le.packet, UNIX, n->now) == RNC_OK);
+  rnc_link_free(l);
+  while (rnc_node_poll(n->server, &e) == RNC_OK)
+    if (e.type == RNC_NODE_LOCAL)
+      r = rnc_responder_input(n->responder, &e, UNIX, n->now);
+  n->now += 10;
+  return r;
+}
+/* A full table refuses new links, unless it was told to reclaim the oldest one: a small board
+ * whose peers vanish (a lost teardown over radio) would otherwise refuse everyone for good. */
+static void full_table(void) {
+  net n;
+  size_t i;
+  setup(&n);
+  for (i = 1; i < RNC_RESPONDER_LINKS; i++)
+    CHECK(extra_link(&n) == RNC_OK);
+  CHECK(rnc_responder_link_count(n.responder) == RNC_RESPONDER_LINKS);
+  CHECK(extra_link(&n) == RNC_NO_SPACE);
+  CHECK(rnc_responder_set_evict_oldest(n.responder, 1) == RNC_OK);
+  for (i = 0; i < 3; i++) {
+    CHECK(extra_link(&n) == RNC_OK);
+    CHECK(rnc_responder_link_count(n.responder) == RNC_RESPONDER_LINKS);
+  }
+  CHECK(rnc_responder_set_evict_oldest(NULL, 1) == RNC_INVALID);
+  teardown(&n);
+}
 static void arguments(void) {
   net n;
   uint8_t other[16] = {9};
@@ -298,6 +335,8 @@ int main(int argc, char **argv) {
     close_frees_slot();
   else if (!strcmp(argv[1], "drop_links"))
     drop_links_frees_slots();
+  else if (!strcmp(argv[1], "full_table"))
+    full_table();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
   else if (!strcmp(argv[1], "max_request"))

@@ -30,6 +30,7 @@ typedef struct responder_slot {
   uint8_t id[16];
   size_t destination;
   int release_pending;
+  uint32_t serial; /* acceptance order, for reclaiming the oldest link */
 } responder_slot;
 struct rnc_responder {
   rnc_node *node;
@@ -40,6 +41,8 @@ struct rnc_responder {
   responder_destination destinations[RNC_RESPONDER_DESTINATIONS];
   responder_slot slots[RNC_RESPONDER_LINKS];
   int busy;
+  int evict_oldest;
+  uint32_t serial;
   uint64_t now;
   responder_slot *current;
   rnc_service_event current_event;
@@ -222,6 +225,12 @@ size_t rnc_responder_link_count(const rnc_responder *r) {
     n += r->slots[i].used;
   return n;
 }
+rnc_result rnc_responder_set_evict_oldest(rnc_responder *r, int enable) {
+  if (!r)
+    return RNC_INVALID;
+  r->evict_oldest = enable != 0;
+  return RNC_OK;
+}
 rnc_result rnc_responder_drop_links(rnc_responder *r) {
   size_t i;
   if (!r)
@@ -247,6 +256,17 @@ static rnc_result accept_link(rnc_responder *r, responder_destination *d,
       s = &r->slots[i];
       break;
     }
+  if (!s && r->evict_oldest) {
+    for (i = 0; i < RNC_RESPONDER_LINKS; i++) {
+      responder_slot *c = &r->slots[i];
+      if (c->used && !(r->busy && r->current == c) && !c->release_pending &&
+          (!s || (int32_t)(c->serial - s->serial) < 0))
+        s = c;
+    }
+    if (s) {
+      slot_release(r, s);
+    }
+  }
   if (!s)
     return RNC_NO_SPACE;
   memset(s, 0, sizeof(*s));
@@ -286,6 +306,7 @@ static rnc_result accept_link(rnc_responder *r, responder_destination *d,
   }
   (void)rnc_service_set_max_request_size(s->service, d->max_request);
   s->used = 1;
+  s->serial = ++r->serial;
   s->destination = (size_t)(d - r->destinations);
   return RNC_OK;
 }
