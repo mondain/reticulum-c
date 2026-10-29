@@ -43,9 +43,9 @@ jobs:
       matrix:
         include:
           - {target: x86_64, platform: linux/amd64, skip: reticulum_interop}
-          - {target: aarch64, platform: linux/arm64, skip: 'network|pty|reticulum_interop'}
-          - {target: armv7, platform: linux/arm/v7, skip: 'network|pty|reticulum_interop'}
-          - {target: armv6, platform: linux/arm/v6, skip: 'network|pty|reticulum_interop'}
+          - {target: aarch64, platform: linux/arm64, skip: 'network|pty|reticulum_interop|mutation'}
+          - {target: armv7, platform: linux/arm/v7, skip: 'network|pty|reticulum_interop|mutation'}
+          - {target: armv6, platform: linux/arm/v6, skip: 'network|pty|reticulum_interop|mutation'}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:

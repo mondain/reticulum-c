@@ -120,6 +120,14 @@ rnc_result rnc_responder_input(rnc_responder *responder,
 rnc_result rnc_responder_tick(rnc_responder *responder, uint64_t unix_seconds,
                               uint64_t now_ms);
 size_t rnc_responder_link_count(const rnc_responder *responder);
+/* Releases every link at once, without notifying the peers. For links that rode an interface
+ * that went away: they cannot carry another packet, and a small table of link slots would
+ * otherwise stay occupied until the links time out. */
+rnc_result rnc_responder_drop_links(rnc_responder *responder);
+/* With enable set, a link request that finds every slot taken releases the oldest link and is
+ * accepted, instead of being refused (RNC_NO_SPACE). For boards with a handful of slots whose
+ * peers disappear without a teardown. Off by default. */
+rnc_result rnc_responder_set_evict_oldest(rnc_responder *responder, int enable);
 #ifdef __cplusplus
 }
 #endif

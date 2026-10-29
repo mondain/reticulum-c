@@ -29,6 +29,8 @@ struct lora_host {
   int chip;
   int rng_fd;
   uint32_t seed;
+  uint64_t start_us;
+  unsigned peer_delay_ms;
   unsigned npeers;
   peer peers[MAX_PEERS];
 };
@@ -96,12 +98,14 @@ lora_host *lora_host_new(const lora_host_options *o, int *status) {
   h->chip = o->chip == 1276 ? 1276 : 1262;
   h->seed = 0x1234567u;
   sim_medium_init(&h->med, 77);
+  h->peer_delay_ms = o->peer_delay_ms;
   {
     /* the channel's clock is the wall clock from the start, so that the peers' application
      * clocks (uptime based) agree with the harness board's */
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     h->med.now_us = (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+    h->start_us = h->med.now_us;
   }
   /* the harness board: a modelled chip behind the same gate as the firmware's */
   memset(&board, 0, sizeof(board));
@@ -191,7 +195,8 @@ void lora_host_step(lora_host *h, uint64_t real_now_us) {
     h->med.now_us = real_now_us;
   sim_medium_advance(&h->med);
   for (i = 0; i < h->npeers; i++)
-    if (h->peers[i].app)
+    if (h->peers[i].app &&
+        h->med.now_us >= h->start_us + (uint64_t)h->peer_delay_ms * 1000u * (i + 1u))
       (void)rnc_mcu_app_step(h->peers[i].app, h->med.now_us / 1000u);
 }
 
@@ -199,6 +204,13 @@ void lora_host_free(lora_host *h) {
   unsigned i;
   if (!h)
     return;
+  fprintf(stderr,
+          "mcu: lora: channel: sent %u delivered %u lost: collision %u random %u unheard %u "
+          "not-listening %u phy-mismatch %u\n",
+          (unsigned)h->med.frames_sent, (unsigned)h->med.frames_delivered,
+          (unsigned)h->med.lost_collision, (unsigned)h->med.lost_random,
+          (unsigned)h->med.lost_unheard, (unsigned)h->med.lost_not_listening,
+          (unsigned)h->med.lost_phy_mismatch);
   for (i = 0; i < h->npeers; i++)
     rnc_mcu_app_free(h->peers[i].app);
   if (h->rng_fd >= 0)

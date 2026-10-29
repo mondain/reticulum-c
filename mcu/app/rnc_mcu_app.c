@@ -354,6 +354,8 @@ rnc_mcu_app *rnc_mcu_app_new(const rnc_mcu_platform *platform, const rnc_mcu_con
       rnc_responder_register(app->responder, app->destination, "/info", RNC_SERVICE_ALLOW_ALL, NULL,
                              0, handle_info, app) != RNC_OK)
     goto fail;
+  /* two link slots: a peer that vanished (a teardown lost over radio) must not lock the others out */
+  (void)rnc_responder_set_evict_oldest(app->responder, 1);
   app->announces = 0;
   app->next_announce_ms = 0;
   app->link = app->primary ? -1 : 1;
@@ -402,8 +404,14 @@ static void update_link(rnc_mcu_app *app, uint64_t now_ms) {
     }
     say(app, "transport up");
   } else {
-    if (app->link == 1)
+    if (app->link == 1) {
       app->stats.link_downs++;
+      /* the links that rode the lost connection are dead; their slots are few (the mcu profile
+       * has two) and would stay taken until the links time out, so a client that reconnects
+       * could be refused. With a radio some links may still be alive, so they are kept. */
+      if (!app->lora && app->responder)
+        (void)rnc_responder_drop_links(app->responder);
+    }
     say(app, "transport down");
   }
   app->link = up;
