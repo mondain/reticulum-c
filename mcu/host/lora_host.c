@@ -199,6 +199,13 @@ void lora_host_free(lora_host *h) {
   unsigned i;
   if (!h)
     return;
+  fprintf(stderr,
+          "mcu: lora: channel: sent %u delivered %u lost: collision %u random %u unheard %u "
+          "not-listening %u phy-mismatch %u\n",
+          (unsigned)h->med.frames_sent, (unsigned)h->med.frames_delivered,
+          (unsigned)h->med.lost_collision, (unsigned)h->med.lost_random,
+          (unsigned)h->med.lost_unheard, (unsigned)h->med.lost_not_listening,
+          (unsigned)h->med.lost_phy_mismatch);
   for (i = 0; i < h->npeers; i++)
     rnc_mcu_app_free(h->peers[i].app);
   if (h->rng_fd >= 0)
