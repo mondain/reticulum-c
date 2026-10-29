@@ -7,7 +7,7 @@
  *                        [--announce-ms N] [--board NAME]
  *                        [--lora leaf|gateway [--lora-freq F] [--lora-bw B] [--lora-sf N]
  *                         [--lora-cr N] [--lora-txp DBM] [--lora-airtime PCT]
- *                         [--lora-peers N] [--lora-loss PERMILLE] [--lora-chip sx1262|sx1276]]
+ *                         [--lora-peers N] [--lora-peer-delay MS] [--lora-loss PERMILLE] [--lora-chip sx1262|sx1276]]
  *
  * --pty    (default) creates a pseudo terminal and prints "pty=/dev/pts/N" on
  *          stdout; point a SerialInterface at that path.
@@ -307,6 +307,7 @@ int main(int argc, char **argv) {
   rnc_lora_cfg_init(&lopt.cfg);
   lopt.chip = 1262;
   lopt.peers = 1;
+  lopt.peer_delay_ms = 1300;
   snprintf(h.state, sizeof(h.state), ".");
   for (i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--pty"))
@@ -347,6 +348,8 @@ int main(int argc, char **argv) {
       i++;
     } else if (!strcmp(argv[i], "--lora-peers") && i + 1 < argc)
       lopt.peers = (unsigned)strtoul(argv[++i], NULL, 10);
+    else if (!strcmp(argv[i], "--lora-peer-delay") && i + 1 < argc)
+      lopt.peer_delay_ms = (unsigned)strtoul(argv[++i], NULL, 10);
     else if (!strcmp(argv[i], "--lora-loss") && i + 1 < argc)
       lopt.loss_permille = (unsigned)strtoul(argv[++i], NULL, 10);
     else if (!strcmp(argv[i], "--lora-chip") && i + 1 < argc) {
@@ -355,7 +358,7 @@ int main(int argc, char **argv) {
     } else {
       fprintf(stderr, "usage: %s [--pty | --stdio | --tcp HOST:PORT] [--state DIR] [--announce-ms N] [--board NAME]\n"
                       "          [--lora leaf|gateway --lora-freq F --lora-bw B --lora-sf N --lora-cr N --lora-txp DBM\n"
-                      "           [--lora-airtime PCT] [--lora-peers N] [--lora-loss PERMILLE] [--lora-chip sx1262|sx1276]]\n",
+                      "           [--lora-airtime PCT] [--lora-peers N] [--lora-peer-delay MS] [--lora-loss PERMILLE] [--lora-chip sx1262|sx1276]]\n",
               argv[0]);
       return 2;
     }

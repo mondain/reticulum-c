@@ -26,6 +26,8 @@ typedef struct lora_host_options {
   int chip;               /* 1262 (default) or 1276 for the harness board; peers use the other family */
   unsigned peers;         /* simulated boards behind the channel (default 1) */
   unsigned loss_permille; /* random frame loss on every link */
+  unsigned peer_delay_ms; /* peer k starts k * this after the channel (default 1300), so that the boards'
+                             first announces do not go on the air at the same moment */
   int verbose;
 } lora_host_options;
 
