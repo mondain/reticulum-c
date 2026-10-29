@@ -655,7 +655,7 @@ if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE
         # reassembly, the sync word, the airtime limiter ... are broken
         add_test(NAME reticulum_mcu_radio_mutations COMMAND ${RNC_BASH_MCU}
             ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_radio_mutations.sh ${CMAKE_SOURCE_DIR} ${CMAKE_C_COMPILER})
-        set_tests_properties(reticulum_mcu_radio_mutations PROPERTIES LABELS mcu TIMEOUT 1800)
+        set_tests_properties(reticulum_mcu_radio_mutations PROPERTIES LABELS "mcu;mutation" TIMEOUT 1800)
         # gateway mode: a reticulum-c-node reaches a board on a simulated LoRa segment
         # through the firmware logic in gateway mode (TCP side plus modelled radio)
         add_test(NAME reticulum_mcu_gateway COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_gateway.sh
