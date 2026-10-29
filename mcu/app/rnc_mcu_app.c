@@ -402,8 +402,14 @@ static void update_link(rnc_mcu_app *app, uint64_t now_ms) {
     }
     say(app, "transport up");
   } else {
-    if (app->link == 1)
+    if (app->link == 1) {
       app->stats.link_downs++;
+      /* the links that rode the lost connection are dead; their slots are few (the mcu profile
+       * has two) and would stay taken until the links time out, so a client that reconnects
+       * could be refused. With a radio some links may still be alive, so they are kept. */
+      if (!app->lora && app->responder)
+        (void)rnc_responder_drop_links(app->responder);
+    }
     say(app, "transport down");
   }
   app->link = up;

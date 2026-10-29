@@ -218,6 +218,17 @@ static void close_frees_slot(void) {
   CHECK(rnc_responder_link_count(n.responder) == 0);
   teardown(&n);
 }
+/* Links that rode a lost interface are dropped at once instead of holding their slots until
+ * they time out. */
+static void drop_links_frees_slots(void) {
+  net n;
+  setup(&n);
+  CHECK(rnc_responder_link_count(n.responder) == 1);
+  CHECK(rnc_responder_drop_links(n.responder) == RNC_OK);
+  CHECK(rnc_responder_link_count(n.responder) == 0);
+  CHECK(rnc_responder_drop_links(NULL) == RNC_INVALID);
+  teardown(&n);
+}
 static void arguments(void) {
   net n;
   uint8_t other[16] = {9};
@@ -285,6 +296,8 @@ int main(int argc, char **argv) {
     allow_list();
   else if (!strcmp(argv[1], "close"))
     close_frees_slot();
+  else if (!strcmp(argv[1], "drop_links"))
+    drop_links_frees_slots();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
   else if (!strcmp(argv[1], "max_request"))

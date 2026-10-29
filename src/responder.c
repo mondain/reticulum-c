@@ -222,6 +222,21 @@ size_t rnc_responder_link_count(const rnc_responder *r) {
     n += r->slots[i].used;
   return n;
 }
+rnc_result rnc_responder_drop_links(rnc_responder *r) {
+  size_t i;
+  if (!r)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_RESPONDER_LINKS; i++) {
+    responder_slot *s = &r->slots[i];
+    if (!s->used)
+      continue;
+    if (r->busy && r->current == s)
+      s->release_pending = 1; /* a handler is running on it: released when it returns */
+    else
+      slot_release(r, s);
+  }
+  return RNC_OK;
+}
 static rnc_result accept_link(rnc_responder *r, responder_destination *d,
                               const rnc_node_event *event, uint64_t now) {
   responder_slot *s = NULL;

@@ -106,7 +106,9 @@ while it works by feeding `rnc_responder_input()` and ticking the responder from
 inside the handler (no second handler starts; a link that closes meanwhile is
 released afterwards), or (c) call `rnc_responder_defer()`, return RNC_AGAIN and
 answer later with `rnc_responder_reply()` using the ticket, within the lifetime
-it requested (the service otherwise keeps a request for 30 seconds). A requester
+it requested (the service otherwise keeps a request for 30 seconds). `rnc_responder_drop_links()` releases every link at once for links that rode an
+interface that went away (the MCU firmware calls it when its transport connection
+drops, so its two slots are free when the peer reconnects). A requester
 runs one request per link: start, tick, poll. Both borrow the node and are
 thread-confined.
 
