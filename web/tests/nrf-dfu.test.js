@@ -239,3 +239,19 @@ test('ESP defaults to preserving flash, honors confirmed factory erase, and reje
     assert.match(wrong.error, /Wrong chip/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('a stalled serial write fails without retransmitting a partial frame', async () => {
+  const writes = [];
+  const port = {
+    async open() {
+      this.readable = new ReadableStream({ start() {} });
+      this.writable = new WritableStream({ write(bytes) { writes.push(bytes); return new Promise(() => {}); } });
+    },
+    async setSignals() {}, async close() { this.readable = null; this.writable = null; },
+  };
+  const transport = new DfuTransport(port, { ackTimeout: 20, retries: 2 });
+  await transport.open();
+  await assert.rejects(transport.send(Uint8Array.of(5, 0, 0, 0)), /DFU write timed out/);
+  assert.equal(writes.length, 1);
+  await transport.close().catch(() => {});
+});
