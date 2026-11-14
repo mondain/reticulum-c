@@ -26,7 +26,7 @@ typedef enum rnc_board_chip {
 
 #define RNC_BOARD_PMU_NONE 0
 #define RNC_BOARD_PMU_AXP192 1 /* the radio rail (LDO2) must be switched on over I2C first */
-#define RNC_BOARD_PMU_AXP2101 2 /* ... (ALDO3) likewise; not implemented */
+#define RNC_BOARD_PMU_AXP2101 2 /* the radio rail is ALDO3, 3.3 V */
 
 typedef struct rnc_board {
   const char *id;       /* the PlatformIO environment / Kconfig name */

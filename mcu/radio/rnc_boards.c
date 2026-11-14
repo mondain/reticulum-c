@@ -22,9 +22,8 @@ static const rnc_board BOARDS[] = {
      "with an AXP2101 is not supported"},
     {"lilygo_t_beam_supreme", "LilyGo T-Beam Supreme (ESP32-S3, SX1262, AXP2101)", RNC_BOARD_SX1262,
      {1262, RNC_SX126X_TCXO_1V8, 5000, 1, 0, 0x28}, 0, 12, 13, 11, 10, 5, 4, 1, N, N, N,
-     RNC_BOARD_PMU_AXP2101, 42, 41, 0, 22,
-     "pin map known, but the radio rail needs the AXP2101 PMU initialised and that is not "
-     "implemented: NOT SUPPORTED"},
+     RNC_BOARD_PMU_AXP2101, 42, 41, 1, 22,
+     "SX1262 variant; AXP2101 ALDO3 supplies the radio at 3.3 V; LR1121 is not supported"},
     {"lilygo_t3_s3", "LilyGo T3-S3 V1.x (ESP32-S3, SX1262)", RNC_BOARD_SX1262,
      {1262, RNC_SX126X_TCXO_1V8, 5000, 1, 0, 0x28}, 0, 5, 3, 6, 7, 8, 34, 33, N, N, N,
      RNC_BOARD_PMU_NONE, N, N, 1, 22,

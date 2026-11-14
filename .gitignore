@@ -9,3 +9,8 @@
 *.exe
 mcu/out/
 /mcu/platformio/.pio/
+/web/node_modules/
+/web/dist/
+/web/test-results/
+/web/playwright-report/
+__pycache__/

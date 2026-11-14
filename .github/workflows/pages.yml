@@ -1,0 +1,119 @@
+name: Firmware flasher Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'mcu/**'
+      - 'src/**'
+      - 'include/**'
+      - 'CMakeLists.txt'
+      - 'library.json'
+      - '.github/scripts/build-web-flasher.py'
+      - '.github/workflows/pages.yml'
+      - 'tests/test_web_firmware.py'
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-pages
+  cancel-in-progress: false
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {group: esp32, envs: 'heltec_wifi_lora_32_V3 heltec_wifi_lora_32_V2 ttgo_t_beam lilygo_t3_s3 lilygo_t_beam_supreme'}
+          - {group: nrf52, envs: 'wiscore_rak4631 heltec_t114 lilygo_t_echo'}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.platformio
+          key: platformio-${{ matrix.group }}-${{ hashFiles('mcu/build-platformio.sh', 'mcu/platformio/platformio.ini', 'mcu/platformio/boards/*.json') }}
+          restore-keys: platformio-${{ matrix.group }}-
+      - name: Build exact board firmware without embedded credentials
+        env:
+          RNC_RELEASE: '1'
+          RNC_COMMIT: ${{ github.sha }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv
+          mcu/build-platformio.sh ${{ matrix.envs }} out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pages-firmware-${{ matrix.group }}
+          path: out
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    permissions:
+      contents: read
+      pages: read
+    needs: firmware
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: pages-firmware-*
+          merge-multiple: true
+          path: firmware
+      - name: Validate publication rules
+        run: python3 tests/test_web_firmware.py
+      - name: Build browser application
+        working-directory: web
+        run: |
+          npm ci
+          npm test
+          npm run build
+      - name: Stage verified firmware
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="main-${SOURCE_COMMIT:0:12}"
+          if [ -n "$RELEASE_TAG" ]; then version="$RELEASE_TAG"; fi
+          python3 .github/scripts/build-web-flasher.py --firmware-root firmware \
+            --site-dir web/dist --version "$version" --commit "$SOURCE_COMMIT" --require-all \
+            --previous-site https://mondain.github.io/reticulum-c/
+      - name: Browser regression tests
+        working-directory: web
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:ui
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy public firmware flasher
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

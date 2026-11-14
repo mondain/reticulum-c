@@ -173,17 +173,53 @@ radio settings are provisioned at run time (serial console or
 mode, frequency, bandwidth, spreading factor, coding rate and power are all set:
 there are no transmit defaults, the hourly airtime budget defaults to 1%, and the
 operator is responsible for legal frequency, power and duty cycle. The ESP-IDF
-release images are generic and select no radio board; the seven PlatformIO
+release images are generic and select no radio board; the eight PlatformIO
 archives include the board's pin table. Board pin tables are in
-`mcu/radio/README.txt`; the T-Beam v1.2 and Supreme (AXP2101) are not supported.
+`mcu/radio/README.txt`; the Supreme SX1262 has a dedicated PlatformIO target
+with AXP2101 radio power control. T-Beam v1.2 and Supreme LR1121 are unsupported.
 
-Limits: the radio drivers and air framing are tested only against software models
-of the chips and a simulated shared channel, never on air and never against a real
-RNode; pin maps, TCXO voltages and the T-Beam power sequence are unverified. AES is
-the table-based software version (a timing side channel the hardware AES engines
-would avoid), the T-Deck has no PlatformIO board definition, the nRF52 board
-definitions are derived from the Adafruit Feather nRF52840, and nothing has been
-run on real hardware: the builds are proven, behaviour on a board is not.
+Hardware evidence: a LilyGo T-Echo leaf and T-Beam Supreme SX1262 gateway have
+exchanged packets at 915 MHz, BW 125 kHz, SF8, CR 4/5 and 0 dBm. A host client
+reached the T-Echo through USB, the Supreme and LoRa, verified a 10-byte `/echo`
+reply and received `/info` (three hops). This is a bench check, with one request
+retry; range, long-running load and stock RNode interoperability remain untested.
+Other boards still have build/model coverage only. AES uses software tables,
+the T-Deck has no PlatformIO target, and the nRF52 board definitions derive from
+the Adafruit Feather nRF52840.
+
+## Browser firmware installer
+
+[Install and configure firmware](https://mondain.github.io/reticulum-c/) over USB.
+Choose the exact board and radio variant. ESP32 boards use browser flashing with
+SHA-256 download checks and MD5 flash readback. nRF52840 boards use acknowledged,
+application-only serial DFU; UF2 downloads are also available. Keep-identity mode
+is the default. ESP32 factory erase requires a separate confirmation.
+
+The setup wizard uses the firmware's `rnc-config` console, not RNode EEPROM
+provisioning. It reads saved settings before enabling edits and never enables
+LoRa automatically. Frequency and power must be chosen explicitly. Wi-Fi
+passwords are not stored by the page. Browser flashing requires HTTPS and a
+browser with Web Serial support; downloads remain available without it.
+
+The Pages workflow builds all eight board variants from the displayed source
+commit, validates flash layouts and checksums, and retains up to five versions.
+Only T-Echo and Supreme SX1262 have hardware bench evidence. This does not
+establish long-running, range, or stock RNode radio interoperability.
+
+To preview locally, build firmware with `mcu/build-platformio.sh`, then:
+
+```sh
+npm --prefix web ci
+npm --prefix web test
+npm --prefix web run build
+python3 .github/scripts/build-web-flasher.py \
+  --firmware-root mcu/out/platformio --site-dir web/dist \
+  --version local --commit "$(git rev-parse HEAD)" --allow-development --require-all
+npm --prefix web run preview
+```
+
+Browser regressions run with `npm --prefix web run test:ui` after staging the
+catalogue. Use `npx playwright install chromium` inside `web/` for the test browser.
 
 ## Generic C text example
 

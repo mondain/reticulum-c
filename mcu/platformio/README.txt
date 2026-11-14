@@ -11,17 +11,20 @@ framework so it builds for common LoRa boards with one command:
     provisioning, ESP32 only), boards/ (board definitions PlatformIO
     does not ship), scripts/ (collects the flashable files)
 
-STATUS: every environment below builds. The firmware has NOT been run on hardware.
+STATUS: every environment below builds. T-Echo and Supreme SX1262 have passed a
+hardware bench exchange; other boards have no execution evidence.
 The board talks to a host over its serial/USB port, or (ESP32 and ESP32-S3 environments
 only) over Wi-Fi and TCP, see "Wi-Fi mode" below, and, once configured, over a LoRa radio,
-see "LoRa radio" below. The LoRa support has only been tested against software models of the
-radio chips; nothing has been sent or received on air.
+see "LoRa radio" below. A host client through the Supreme gateway reached the
+T-Echo leaf over LoRa at 915 MHz/BW125k/SF8/CR4/5/0dBm, verified /echo and /info,
+and observed the T-Echo at three hops. This is not a range or sustained-load test.
 
 Environments
 ------------
   env                      board                          chip       Serial (HDLC)
   heltec_wifi_lora_32_V3   Heltec WiFi LoRa 32 V3         ESP32-S3   UART0 (CP2102 bridge)
   heltec_wifi_lora_32_V2   Heltec WiFi LoRa 32 V2         ESP32      UART0 (CP2102 bridge)
+  lilygo_t_beam_supreme    LilyGo T-Beam Supreme SX1262  ESP32-S3   native USB (CDC)
   ttgo_t_beam              LilyGo T-Beam (original)       ESP32      UART0 (CP2104 bridge)
   lilygo_t3_s3             LilyGo T3-S3 (also: other      ESP32-S3   native USB (CDC)
                            ESP32-S3 boards with USB)
@@ -87,7 +90,7 @@ clock policy uses (../README.txt, "Unix time policy"); the default is the curren
 
 LoRa radio
 ----------
-All seven environments contain the LoRa driver for their board (the board table is
+All eight environments contain the LoRa driver for their board (the board table is
 mcu/radio/rnc_boards.c; the environment name selects the entry): SX1262 on heltec_wifi_lora_32_V3,
 lilygo_t3_s3, wiscore_rak4631, heltec_t114, lilygo_t_echo; SX1276 on heltec_wifi_lora_32_V2 and
 ttgo_t_beam (v1.0/v1.1, its AXP192 radio rail is switched on over I2C). The radio is OFF, and the
@@ -120,7 +123,14 @@ Flashing
 --------
 ESP32 / ESP32-S3 (esptool, from the board's USB port):
 
+Initial installation or intentional identity/settings reset only:
+
   python3 -m esptool --chip esp32s3 -p /dev/ttyUSB0 -b 460800 write_flash 0x0 merged.bin
+
+WARNING: merged.bin contains erased padding over NVS and resets both the node's
+identity and its provisioned settings. To update an existing node, use the
+separate-parts command in flash.txt; with the same partition layout it preserves
+NVS. Back up state before changing partition layouts.
 
 --chip esp32 for the ESP32 boards; /dev/ttyACM0 for a native USB port (lilygo_t3_s3);
 COMx on Windows. If the board does not enter the bootloader by itself, hold BOOT, tap

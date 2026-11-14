@@ -47,6 +47,8 @@ describe() {
       SERIAL="UART0 behind the CP2104 USB bridge, 115200 baud, 8N1." ;;
     lilygo_t3_s3) WIFI=arduino; LORA=arduino; TITLE="LilyGo T3-S3 (ESP32-S3, native USB), Arduino/PlatformIO build"
       SERIAL="The native USB serial port (CDC); the baud rate is ignored." ;;
+    lilygo_t_beam_supreme) WIFI=arduino; LORA=arduino; TITLE="LilyGo T-Beam Supreme SX1262 (ESP32-S3, AXP2101), Arduino/PlatformIO build"
+      SERIAL="The native USB Serial/JTAG port; the baud rate is ignored." ;;
     wiscore_rak4631) LORA=arduino; TITLE="RAKwireless WisCore RAK4631 (nRF52840), Arduino/PlatformIO build"
       SERIAL="The native USB serial port (CDC); the host must assert DTR." ;;
     heltec_t114) LORA=arduino; TITLE="Heltec Mesh Node T114 (nRF52840), Arduino/PlatformIO build"
@@ -120,7 +122,8 @@ of every hour; it is a safety net, not a compliance proof.
   set lora.mode leaf, set lora.freq 868.1, set lora.bw 125, set lora.sf 8, set lora.cr 5,
   set lora.txp 14, set lora.airtime 1, save, reboot)$LORA_TOOL
   The over-the-air format is meant to be compatible with stock RNodes on the same frequency
-  and modem settings. THIS HAS NEVER BEEN TRIED ON AIR: the firmware has not run on a radio.
+  and modem settings. A T-Echo leaf and Supreme SX1262 gateway have passed a short 915 MHz bench exchange;
+  range, sustained load and stock RNode radio interoperability remain unverified.
   Read MANUAL.txt and the notes in the project (mcu/radio/README.txt) before relying on it.
 "
   fi
@@ -168,9 +171,9 @@ Files
 The ELF file with symbols is not included; build from source to debug.
 
 Limits (read MANUAL.txt for the complete list)
-  - NOT tested on hardware: the firmware builds, and the same application logic passes
-    the host tests (the radio against software models of the chips); it has not been
-    flashed to a board by the project yet, and nothing has been sent or received on air.
+  - Hardware bench coverage: T-Echo and Supreme SX1262, including routed /echo and
+    /info over LoRa. Other boards have build/model coverage only. This is not
+    sustained-load, range or independent radio interoperability evidence.
   - $LORA_LIMIT; the board talks to a host over serial/USB$WIFI_LIMIT. No Bluetooth.
   - Leaf node (no forwarding) unless the LoRa gateway mode is configured; at most 2 links,
     8 remembered announces, 12 paths.
@@ -221,7 +224,7 @@ mcu/esp-idf/example is a complete firmware project; mcu/build-esp-idf.sh --docke
 builds it (see mcu/README.txt for the details, boards and limits).
 
 This is a source archive: the firmware images are in the reticulum-c-$release-mcu-*.zip
-files of the release. Not tested on hardware. The LoRa radio (mcu/radio) is optional and OFF
+files of the release. See the manual for board-specific hardware evidence. The LoRa radio (mcu/radio) is optional and OFF
 until configured: select the board with the Kconfig choice "LoRa board" and read
 mcu/radio/README.txt (regulatory notes) first.
 EOF
@@ -242,11 +245,11 @@ then #include "rnc_mcu_app.h" (see mcu/app) or the core headers. The library is 
 mcu capacity profile and the portable crypto backend (no OpenSSL); the build flags and the
 include paths for your sources come from library.json and mcu/platformio/lib_extra.py.
 
-mcu/platformio is a complete project for seven boards (README.txt there); with a Python 3
+mcu/platformio is a complete project for eight boards (README.txt there); with a Python 3
 and network access, mcu/build-platformio.sh builds all of them with a pinned PlatformIO.
 
 This is a source archive: the firmware images are in the reticulum-c-$release-mcu-*.zip
-files of the release. Not tested on hardware. The LoRa radio (mcu/radio) is optional and OFF
+files of the release. See the manual for board-specific hardware evidence. The LoRa radio (mcu/radio) is optional and OFF
 until configured; read mcu/radio/README.txt (regulatory notes) first.
 EOF
 }

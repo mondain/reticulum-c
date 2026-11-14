@@ -11,6 +11,8 @@
 # The flash offsets and flash parameters come from the platform builder itself
 # (FLASH_EXTRA_IMAGES, ESP32_APP_OFFSET, the board's flash mode and size), so they are
 # whatever `pio run -t upload` would use.
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -40,6 +42,19 @@ def size_report(elf, out):
     out.write("".join(lines))
 
 
+def flash_metadata(art, metadata, filenames):
+    """Machine-readable offsets and content hashes for release/web staging."""
+    metadata["schema"] = 1
+    metadata["files"] = {}
+    for filename in filenames:
+        with open(os.path.join(art, filename), "rb") as image:
+            data = image.read()
+        metadata["files"][filename] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    with open(os.path.join(art, "flash.json"), "w") as out:
+        json.dump(metadata, out, indent=2)
+        out.write("\n")
+
+
 def esp32(build, art):
     mcu = env.BoardConfig().get("build.mcu")  # noqa: F821
     flash_mode = env.subst("${__get_board_flash_mode(__env__)}")  # noqa: F821
@@ -63,13 +78,23 @@ def esp32(build, art):
         shutil.copyfile(path, os.path.join(art, target))
         names[off] = target
     shutil.copyfile(os.path.join(build, "firmware.elf"), os.path.join(art, NAME + ".elf"))
+    flash_metadata(art, {
+        "family": "esp32", "chip": mcu,
+        "flashMode": flash_mode, "flashFrequency": flash_freq, "flashSize": flash_size,
+        "mergedOffset": 0,
+        "partitionTableOffset": next(int(off, 0) for off, name in names.items() if name == "partitions.bin"),
+        "parts": [{"offset": int(off, 0), "name": names[off]} for off, _ in parts],
+    }, list(names.values()) + ["merged.bin"])
     chip = mcu
     args = " ".join("%s %s" % (off, names[off]) for off, _ in parts)
     with open(os.path.join(art, "flash.txt"), "w") as f:
         f.write(
-            "Flash the single merged image (all parts, written at address 0x0):\n\n"
+            "Initial installation or intentional identity/settings reset only:\n\n"
+            "WARNING: merged.bin overwrites NVS, including identity and provisioned settings.\n"
+            "Do not use it to update a provisioned node whose identity must survive.\n\n"
             "  python3 -m esptool --chip %s -p /dev/ttyUSB0 -b 460800 write_flash 0x0 merged.bin\n\n"
-            "Or flash the parts separately (same result):\n\n"
+            "Update an existing node by flashing the parts separately (preserves NVS\n"
+            "with the same partition layout):\n\n"
             "  python3 -m esptool --chip %s -p /dev/ttyUSB0 -b 460800 write_flash \\\n"
             "    --flash_mode %s --flash_freq %s --flash_size %s %s\n\n"
             "Replace /dev/ttyUSB0 with the board's port (/dev/ttyACM0 on a native USB port, COMx on\n"
@@ -97,6 +122,8 @@ def nrf52(build, art):
     uf2conv = os.path.join(framework, "tools", "uf2conv", "uf2conv.py")
     run([sys.executable, uf2conv, hexfile, "-c", "-f", "0xADA52840",
          "-o", os.path.join(art, NAME + ".uf2")], stdout=subprocess.DEVNULL)
+    flash_metadata(art, {"family": "nrf52", "chip": "nrf52840"},
+                   [NAME + ".uf2", NAME + "-dfu.zip"])
     with open(os.path.join(art, "flash.txt"), "w") as f:
         f.write(
             "Put the board into the bootloader: double-tap RESET (a drive named after the board, for\n"

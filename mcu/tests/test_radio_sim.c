@@ -619,7 +619,7 @@ static void test_regulatory_gate(void) {
     }
     CHECK(rnc_board_find("nonexistent") == NULL);
     CHECK(supported >= 7);
-    CHECK(rnc_board_find("lilygo_t_beam_supreme") && !rnc_board_find("lilygo_t_beam_supreme")->supported);
+    CHECK(rnc_board_find("lilygo_t_beam_supreme") && rnc_board_find("lilygo_t_beam_supreme")->supported);
   }
 }
 

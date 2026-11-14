@@ -97,7 +97,7 @@ jobs:
           - {name: host}
           - {name: esp-idf-esp32, chip: esp32}
           - {name: esp-idf-esp32s3, chip: esp32s3}
-          - {name: platformio-esp32, group: esp32, envs: 'heltec_wifi_lora_32_V3 heltec_wifi_lora_32_V2 ttgo_t_beam lilygo_t3_s3'}
+          - {name: platformio-esp32, group: esp32, envs: 'heltec_wifi_lora_32_V3 heltec_wifi_lora_32_V2 ttgo_t_beam lilygo_t3_s3 lilygo_t_beam_supreme'}
           - {name: platformio-nrf52, group: nrf52, envs: 'wiscore_rak4631 heltec_t114 lilygo_t_echo'}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0

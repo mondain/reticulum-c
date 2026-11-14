@@ -1,5 +1,6 @@
 /* ESP-IDF radio HAL; see radio_hal_idf.h. NOT RUN ON HARDWARE: compiled only. */
 #include "radio_hal_idf.h"
+#include "rnc_axp2101.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "driver/spi_master.h"
@@ -57,16 +58,16 @@ static uint64_t hal_now(void *context) {
 }
 
 static void pin_out(int pin, int level) {
-  gpio_config_t io = {.pin_bit_mask = 1ULL << pin, .mode = GPIO_MODE_OUTPUT};
   if (pin < 0)
     return;
+  gpio_config_t io = {.pin_bit_mask = 1ULL << pin, .mode = GPIO_MODE_OUTPUT};
   (void)gpio_config(&io);
   gpio_set_level((gpio_num_t)pin, level);
 }
 static void pin_in(int pin) {
-  gpio_config_t io = {.pin_bit_mask = 1ULL << pin, .mode = GPIO_MODE_INPUT};
   if (pin < 0)
     return;
+  gpio_config_t io = {.pin_bit_mask = 1ULL << pin, .mode = GPIO_MODE_INPUT};
   (void)gpio_config(&io);
 }
 
@@ -106,6 +107,37 @@ static int axp192_enable_lora(int sda, int scl) {
   return 0;
 }
 
+static int axp2101_read(void *context, uint8_t reg, uint8_t *value) {
+  (void)context;
+  return i2c_master_write_read_device(I2C_NUM_0, 0x34, &reg, 1, value, 1,
+                                    pdMS_TO_TICKS(100)) == ESP_OK ? 0 : -1;
+}
+static int axp2101_write(void *context, uint8_t reg, uint8_t value) {
+  uint8_t bytes[2] = {reg, value};
+  (void)context;
+  return i2c_master_write_to_device(I2C_NUM_0, 0x34, bytes, sizeof(bytes),
+                                   pdMS_TO_TICKS(100)) == ESP_OK ? 0 : -1;
+}
+static int axp2101_enable_lora(int sda, int scl) {
+  i2c_config_t cfg;
+  int result;
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.mode = I2C_MODE_MASTER;
+  cfg.sda_io_num = sda;
+  cfg.scl_io_num = scl;
+  cfg.sda_pullup_en = GPIO_PULLUP_ENABLE;
+  cfg.scl_pullup_en = GPIO_PULLUP_ENABLE;
+  cfg.master.clk_speed = 100000;
+  if (i2c_param_config(I2C_NUM_0, &cfg) != ESP_OK ||
+      i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0) != ESP_OK)
+    return -1;
+  result = rnc_axp2101_enable_radio(NULL, axp2101_read, axp2101_write);
+  i2c_driver_delete(I2C_NUM_0);
+  if (result == 0)
+    vTaskDelay(pdMS_TO_TICKS(20));
+  return result;
+}
+
 int radio_hal_idf_init(const rnc_board *board, rnc_radio_hal *hal) {
   spi_bus_config_t bus;
   spi_device_interface_config_t dev;
@@ -122,8 +154,8 @@ int radio_hal_idf_init(const rnc_board *board, rnc_radio_hal *hal) {
     pin_out(board->power_pin, 1);
   if (board->pmu == RNC_BOARD_PMU_AXP192 && axp192_enable_lora(board->i2c_sda, board->i2c_scl) != 0)
     return -2;
-  if (board->pmu == RNC_BOARD_PMU_AXP2101)
-    return -3; /* not implemented */
+  if (board->pmu == RNC_BOARD_PMU_AXP2101 && axp2101_enable_lora(board->i2c_sda, board->i2c_scl) != 0)
+    return -3;
   pin_out(board->reset, 1);
   pin_out(board->rxen, 0);
   pin_out(board->txen, 0);

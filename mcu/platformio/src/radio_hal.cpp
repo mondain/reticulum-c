@@ -1,4 +1,5 @@
 #include "radio_hal.h"
+#include "rnc_axp2101.h"
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -79,6 +80,30 @@ static uint64_t hal_now(void *) {
 }
 
 #if defined(ARDUINO_ARCH_ESP32)
+static int axp2101_read(void *, uint8_t reg, uint8_t *value) {
+  Wire1.beginTransmission(0x34);
+  Wire1.write(reg);
+  if (Wire1.endTransmission(false) != 0 || Wire1.requestFrom(0x34, 1) != 1)
+    return -1;
+  *value = (uint8_t)Wire1.read();
+  return 0;
+}
+static int axp2101_write(void *, uint8_t reg, uint8_t value) {
+  Wire1.beginTransmission(0x34);
+  Wire1.write(reg);
+  Wire1.write(value);
+  return Wire1.endTransmission() == 0 ? 0 : -1;
+}
+static int axp2101_enable_lora(int sda, int scl) {
+  if (!Wire1.begin(sda, scl, 100000))
+    return -1;
+  int result = rnc_axp2101_enable_radio(NULL, axp2101_read, axp2101_write);
+  Wire1.end();
+  if (result == 0)
+    delay(20);
+  return result;
+}
+
 // The T-Beam v1.0/v1.1 power the LoRa module from LDO2 of the AXP192: set 3.3 V and switch
 // it on over I2C (address 0x34; register 0x28 holds the LDO2 voltage in its high nibble,
 // register 0x12 the output enables, bit 2 is LDO2). UNTESTED.
@@ -132,9 +157,12 @@ int rnc_radio_hal_init(const rnc_board *board, rnc_radio_hal *hal) {
 #if defined(ARDUINO_ARCH_ESP32)
   if (board->pmu == RNC_BOARD_PMU_AXP192 && axp192_enable_lora(board->i2c_sda, board->i2c_scl) != 0)
     return -2;
+  if (board->pmu == RNC_BOARD_PMU_AXP2101 && axp2101_enable_lora(board->i2c_sda, board->i2c_scl) != 0)
+    return -3;
+#else
+  if (board->pmu != RNC_BOARD_PMU_NONE)
+    return -3;
 #endif
-  if (board->pmu == RNC_BOARD_PMU_AXP2101)
-    return -3; // not implemented
   pinMode(board->cs, OUTPUT);
   digitalWrite(board->cs, HIGH);
   pinMode(board->reset, OUTPUT);
