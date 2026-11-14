@@ -1,5 +1,10 @@
 # reticulum-c
 
+**[Open the firmware installer](https://mondain.github.io/reticulum-c/)**
+
+Flash supported ESP32 and nRF52840 boards over USB, download UF2 images, and
+configure your node directly from your browser.
+
 An independent, experimental C11 Reticulum SDK with packet/identity security,
 authenticated links, Channels, Buffer streams, Resources, request/response
 services and a bounded routing engine. The protocol core uses OpenSSL 3 and a
