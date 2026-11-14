@@ -16,8 +16,10 @@ evidence](COMPATIBILITY.md) before choosing a deployment.
 
 ## Build and test
 
-Requirements: C11 compiler, CMake 3.16+, OpenSSL 3 development files, and BZip2
-development files for the default compression-enabled build.
+Default host-build requirements: C11 compiler, CMake 3.16+, OpenSSL 3 development
+files, and BZip2 development files for the compression-enabled build. The portable
+MCU core uses neither OpenSSL nor BZip2; select both `RNC_CRYPTO=portable` and
+`RNC_PROFILE=mcu` as described below.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -35,6 +37,13 @@ and installed-consumer tests; that selection is not live network certification.
 tests; `-DRNC_BUILD_EXAMPLES=OFF` disables the POSIX examples.
 `-DRNC_BUILD_HOST=OFF` disables the POSIX host and daemon.
 `-DRNC_COMPRESSION=OFF` removes BZip2 and rejects compressed transfers/streams.
+
+`-DRNC_CRYPTO=portable` selects Monocypher and the built-in digest/AES backend
+instead of OpenSSL for the core. POSIX host programs and OpenSSL-dependent tests
+still require OpenSSL. `-DRNC_PROFILE=mcu` reduces capacities, defaults compression,
+host programs and examples to off, and changes public structure sizes. Build the
+library and all its consumers with the same profile; choosing the MCU profile
+alone does not change the crypto backend.
 
 Some tests drive real tools and need `bash` and `git`; they are skipped when
 either is missing. The git tests use temporary directories under `$TMPDIR`
@@ -151,8 +160,9 @@ are covered by the firmware archives described below.
 The `mcu/` directory builds the SDK core, with no OpenSSL, for microcontrollers:
 a portable crypto backend (`-DRNC_CRYPTO=portable`, Monocypher plus our own
 SHA-256, HMAC, HKDF and AES-256-CBC) and a small capacity profile
-(`-DRNC_PROFILE=mcu`: MTU 500, small tables; about 87 KB of heap for a node with
-two links and a responder, 12 KB of task stack). A portable example application
+(`-DRNC_PROFILE=mcu`: MTU 500, small tables; about 87 KB of host-measured heap for
+a node with two links and a responder; at least 12 KB of task stack, with 16 KB
+allocated by the PlatformIO builds). A portable example application
 (`mcu/app`) is a Reticulum node that speaks HDLC over a serial port, announces
 itself and answers `/echo` and `/info`; it runs on the board and, unchanged, on
 the host, where a test drives it through a real `reticulum-c-node`.
@@ -161,8 +171,12 @@ the host, where a test drives it through a real `reticulum-c-node`.
 | --- | --- | --- |
 | Heltec WiFi LoRa 32 V2, other ESP32 | ESP-IDF (`mcu/build-esp-idf.sh`) | `mcu-esp-idf-esp32` |
 | Heltec WiFi LoRa 32 V3, other ESP32-S3 | ESP-IDF | `mcu-esp-idf-esp32s3` |
-| Heltec V3, V2, T-Beam, LilyGo T3-S3 | PlatformIO/Arduino (`mcu/build-platformio.sh`) | `mcu-<board>` |
+| Heltec V3/V2, T-Beam v1.0/v1.1, Supreme SX1262, LilyGo T3-S3 SX1262 | PlatformIO/Arduino (`mcu/build-platformio.sh`) | `mcu-<board>` |
 | RAK4631, Heltec T114, LilyGo T-Echo (nRF52840) | PlatformIO/Arduino | `mcu-<board>` |
+
+The table describes the current source and packaging targets; older release tags
+can predate board support. Use the browser installer for the displayed, exact
+source revision, or check a release's asset list before choosing its archive.
 
 Each firmware archive holds the flashable files and flash instructions; the
 ESP-IDF component and PlatformIO library are also released as source archives
@@ -311,9 +325,11 @@ them a port of `rngit`. Interface and tool coverage and every known difference
 are in [COMPATIBILITY.md](COMPATIBILITY.md) and
 [docs/spec-gap-list.md](docs/spec-gap-list.md).
 
-Defaults remain MTU 500 and a two-message Channel TX window. The implementation
-does not claim complete RNS API/configuration compatibility. Radio hardware,
-Windows, codecs and media devices have no execution evidence here.
+Defaults remain MTU 500 and a two-message initial Channel TX window. The
+implementation does not claim complete RNS API/configuration compatibility.
+Hardware evidence is limited to the T-Echo/Supreme bench exchange and flashing
+checks described above. Other radio boards, Windows, codecs and media devices
+have no execution evidence here.
 Keepalives provide unauthenticated liveness, not identity.
 SINGLE datagrams alone do not authenticate a sender or prevent replay.
 

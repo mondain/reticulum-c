@@ -5,7 +5,7 @@
 //   - nRF52840 (Adafruit nRF52 core):   RNG peripheral, InternalFileSystem for state
 // and runs rnc_mcu_app_step from its own FreeRTOS task with a 16 KB stack.
 //
-// In serial mode (the default; the only mode of the nRF52 boards) the serial port
+// In serial mode (the default; nRF52 also supports LoRa leaf/gateway modes) the serial port
 // ("Serial": a UART behind the board's USB bridge, or the native USB CDC port) carries
 // ONLY the HDLC byte stream of the Reticulum SerialInterface: the application's log hook
 // is not wired, and framework logging is switched off, so no log text is ever mixed

@@ -1,8 +1,9 @@
 # Source and compatibility provenance
 
 The implementation and C tests were developed as an independent C11 protocol
-library. Protocol source files use the C standard library and OpenSSL 3 C APIs;
-optional Buffer/Resource compression uses BZip2. POSIX I/O is a separate target.
+library. Protocol source files use the C standard library, with OpenSSL 3 C APIs
+by default or the optional portable backend described below. Optional
+Buffer/Resource compression uses BZip2. POSIX I/O is a separate target.
 No Python, Go or Rust stack is linked into the runtime library or installed SDK.
 
 | Reference | Exact snapshot | Use |
@@ -38,6 +39,39 @@ It is compiled only into the optional `-DRNC_CRYPTO=portable` backend, which use
 for X25519 and Ed25519 (including its SHA-512). SHA-256, HMAC, HKDF and AES-256-CBC
 for that backend are original code in `src/crypto_portable.c`.
 
+## Browser firmware installer (`web/`)
+
+The browser application is separate from the C runtime and installed SDK. Its
+nRF52840 uploader in `web/src/nrf-dfu.js` adapts the legacy serial DFU protocol
+and timing described by Adafruit's `Adafruit_nRF52_nrfutil`
+`nordicsemi/dfu/dfu_transport_serial.py`, and uses Liam Cottle's browser
+implementation as a reference. The inspected browser reference was
+[`liamcottle/rnode-flasher` at `678b1e3aa7ec0f9f4cd8bdb206e1b9d1cd9761c1`](https://github.com/liamcottle/rnode-flasher/tree/678b1e3aa7ec0f9f4cd8bdb206e1b9d1cd9761c1),
+specifically `js/nrf52_dfu_flasher.js` (MIT, copyright 2024 Liam Cottle).
+Nordic Semiconductor's copyright 2015 BSD 3-clause notice for the protocol
+reference and Cottle's MIT notice are retained in
+[`web/public/nrf-dfu-license.txt`](web/public/nrf-dfu-license.txt).
+
+This uploader implements application-only legacy DFU for Adafruit nRF52
+bootloaders, including HCI/SLIP framing, CRC16 and acknowledgement checks. It
+does not implement Nordic Secure DFU or install a bootloader or SoftDevice.
+The reference browser application's other bundled libraries are not copied
+into this application; the dependencies below are installed through npm.
+
+| Dependency | Pinned version | Use and license |
+| --- | --- | --- |
+| Espressif esptool-js | 0.5.7 | ESP32/ESP32-S3 serial bootloader and flash verification; Apache-2.0. The application wraps serial cleanup and reset behavior in `web/src/flash.js`. |
+| JSZip | 3.10.1 | Read application-only nRF52 DFU ZIP packages; dual licensed MIT or GPL-3.0-or-later, usable under the MIT option. |
+| SparkMD5 | 3.0.2 | Compute the MD5 values esptool-js uses to verify flash contents; package declares WTFPL or MIT, with the WTFPL v2 text retained in the notices. |
+
+Exact npm versions, transitive dependencies and archive integrity hashes are
+recorded in [`web/package-lock.json`](web/package-lock.json). Direct dependency
+license texts and the DFU reference notices are retained in
+[`web/public/THIRD_PARTY_NOTICES.txt`](web/public/THIRD_PARTY_NOTICES.txt), which
+Vite copies into the published site along with `nrf-dfu-license.txt`. These
+dependencies and reference notices retain their own license terms; this
+repository's MIT license does not replace them.
+
 ## LoRa radio support (`mcu/radio/`): what was taken from the RNode firmware
 
 The over-the-air format of the LoRa interface, the modem settings and the board pin maps
@@ -57,8 +91,9 @@ bit 2, 0x08D8, 0x08AC, 0x08E7 setting 0x28); the TCXO voltage code per board; wh
 drives the antenna switch per board; board pin numbers and chip variants; the AXP192 LDO2
 use on the original T-Beam. No source code, no comments and no identifiers were copied or
 translated from that firmware, and no file of it is in this repository or its releases.
-Everything in `mcu/radio/` was written independently from those facts and from the public
-Semtech documents (SX1261/2 and SX1276/77/78/79 data sheets, AN1200.13). Facts that could
+The radio drivers were written independently from those facts and from the public
+Semtech documents (SX1261/2 and SX1276/77/78/79 data sheets, AN1200.13); the later
+AXP2101 helper has the additional source of facts described below. Facts that could
 not be established from the source are listed under "Not established" in
 `mcu/radio/README.txt`. The RNode firmware keeps its own licence.
 
@@ -67,3 +102,11 @@ RNode firmware commit read: 56775c51b60a6190242e324c210997dcc7637e53.
 The unmodified reference `RNodeInterface.updateBitrate` (RNS 1.5.5, the snapshot above) is
 called by `mcu/tests/ref_rnode_bitrate.py` for a comparison test (only with
 `RNC_INTEROP_TESTS`); it is not redistributed.
+
+The T-Beam Supreme SX1262 addition uses AXP2101 register-layout and voltage
+encoding facts from XPowersLib's AXP2101 definitions for the independent
+`mcu/radio/rnc_axp2101.h` helper: chip ID 0x4a, ALDO3 voltage register 0x94,
+500 mV plus 100 mV per step, and enable bit 2 in register 0x90. The helper sets
+only the radio's ALDO3 rail to 3.3 V and checks the writes. This attribution is
+separate from the earlier RNode firmware snapshot; XPowersLib is not linked or
+vendored by this implementation.

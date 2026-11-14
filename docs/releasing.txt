@@ -9,12 +9,11 @@ package compatibility all read it, and so do the firmware build scripts. SOVERSI
 (the ABI number) is separate, also in CMakeLists.txt; raise it only for an
 incompatible ABI change.
 
-Five more files repeat the version because their tools read them directly:
+Four more files repeat the version because their tools read them directly:
     library.json                                        (PlatformIO library)
     idf_component.yml                                   (ESP-IDF, repository root)
     mcu/esp-idf/components/reticulum_c/idf_component.yml
     mcu/app/rnc_mcu_app.h                               (fallback RNC_MCU_VERSION)
-    CMakeLists.txt                                      (the source of truth)
 When bumping, change all of them in the same pull request.
 .github/scripts/check-version.sh reads every one and fails, naming the file and
 both values, unless they agree; it also runs as the ctest
@@ -29,9 +28,9 @@ is on main. A suffix after a hyphen makes a pre-release: v0.3.0-rc1. The suffix
 is ignored when the tag is compared with the project version, so v0.3.0-rc1
 needs `project(reticulum_c VERSION 0.3.0 ...)`.
 
-No tag exists in the repository before the first release. Tags are the record of
-what was released; the GitHub release page carries the archives, SHA256SUMS and
-generated notes.
+Tags record what was released; the GitHub release page carries the archives,
+SHA256SUMS and generated notes. Main-branch firmware on the browser installer
+is a separate publication and can include changes not yet in a tagged release.
 
 How a release happens
 ---------------------
@@ -56,6 +55,7 @@ Firmware per board:    reticulum-c-<version>-mcu-<board>.zip (flashable files,
                        flash instructions, BUILDINFO), for esp32 and esp32s3
                        (ESP-IDF) and the PlatformIO boards heltec_wifi_lora_32_v3,
                        heltec_wifi_lora_32_v2, ttgo_t_beam, lilygo_t3_s3,
+                       lilygo_t_beam_supreme (SX1262 variant),
                        wiscore_rak4631, heltec_t114, lilygo_t_echo
 Sources for firmware:  reticulum-c-<version>-esp-idf-component.tar.gz and
                        reticulum-c-<version>-platformio-library.tar.gz
@@ -65,11 +65,47 @@ Toolchain pins that change the firmware builds: the ESP-IDF Docker image
 (espressif/idf:v5.4.4, in mcu/build-esp-idf.sh), PlatformIO 6.1.19 (in
 mcu/build-platformio.sh, whose hash is also the CI cache key) and the platform
 versions in mcu/platformio/platformio.ini. The Linux archives use alpine:3.20.
-The firmware has not been run on hardware. ESP-IDF archives are generic (no LoRa
-board selected, so no radio); only the PlatformIO archives carry a board's radio
-pin table. Radio and Wi-Fi settings are provisioned at run time, so no archive
+Hardware bench coverage is a T-Echo leaf and Supreme SX1262 gateway using
+PlatformIO firmware, including routed /echo and /info at 915 MHz. Other boards,
+range, sustained load and stock RNode interoperability remain unverified.
+ESP-IDF archives are generic (no LoRa board selected, so no radio); only the
+PlatformIO board archives carry a selected board's radio pin table. Radio and
+Wi-Fi settings are provisioned at run time, so no archive
 contains credentials or transmit defaults; package-mcu.sh refuses images built
 with compiled-in credentials.
+
+Browser installer publication
+------------------------------
+.github/workflows/pages.yml builds all eight PlatformIO board environments and
+deploys https://mondain.github.io/reticulum-c/ independently of the Release
+workflow. It runs for relevant main-branch pushes, externally published release
+events or manual dispatch. Main and manually dispatched builds use
+main-<12-character-commit>; release-event builds use the release tag.
+
+The Release workflow publishes with GITHUB_TOKEN, so its release event does not
+trigger another workflow. After an automated release, manually run Firmware
+flasher Pages at the release tag to publish that revision to the installer;
+the current manual path still labels it main-<12-character-commit>. A release
+published directly by a user or an external token can trigger the tagged path.
+For example, with the GitHub CLI: gh workflow run pages.yml --ref v0.2.1
+See https://docs.github.com/en/actions/concepts/security/github_token for the
+event restrictions. Pages publication does not add archives to an older release.
+
+The staging script (.github/scripts/build-web-flasher.py) checks build provenance,
+rejects compiled-in Wi-Fi credentials, verifies hashes, chip headers, flash
+offsets and application-only nRF52 packages, and publishes an allowlisted catalog.
+It retains up to five catalog versions, prioritizing tagged releases in history.
+Logs, ELF files, merged images and identity/settings images are not published.
+The browser verifies SHA-256 before writing; ESP32 updates use separate parts
+and MD5 flash verification. A factory erase is an explicit user choice. nRF52
+uses acknowledged serial DFU or downloadable UF2, preserving its internal file
+system. Browser setup uses the rnc-config console, not RNode EEPROM provisioning.
+
+Validate publication rules with python3 tests/test_web_firmware.py. In web/ run
+npm ci, npm test, npm run build and npm run test:ui (install Playwright Chromium
+with npx playwright install --with-deps chromium first). Pages success verifies
+this pipeline; check the separate C SDK and interoperability workflow for the
+full SDK CI result.
 
 Trial builds
 ------------

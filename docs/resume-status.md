@@ -1,6 +1,42 @@
-# SDK 0.2 PR readiness record
+# SDK 0.2 readiness and validation record
 
-## Scope
+## Current status (2026-11-14)
+
+The [browser firmware installer](https://mondain.github.io/reticulum-c/) is live.
+Its first published build is `main-8b46e4b63da4`, sourced from merge commit
+`8b46e4b63da4aee4260307d49dcc30be5d87dba1` ([PR #41](https://github.com/mondain/reticulum-c/pull/41)).
+The catalogue identifies the source revision of every offered build; this is
+separate from tagged release archives such as the earlier `v0.2.0-rc4`.
+
+Validation recorded at that implementation snapshot:
+
+- Local Linux default static Debug/OpenSSL build: 251/251 tests, with BZip2,
+  POSIX host and examples enabled. External RNS/Leviculum oracles and sanitizers
+  were not enabled in this run.
+- Firmware publication validation: 27 Python cases; browser transport and
+  configuration checks: 31 JavaScript cases; seven Chromium UI regressions.
+- All eight PlatformIO board builds and the selected Supreme ESP-IDF build pass.
+  The [Pages build and deployment](https://github.com/mondain/reticulum-c/actions/runs/43635333668)
+  completed successfully. The separate hosted SDK CI run for that commit was
+  cancelled; it is not additional passing cross-platform or oracle evidence.
+- Real T-Echo application-only JavaScript DFU completed with acknowledgements.
+  Real Supreme flashing verified all four ESP32 parts by MD5, retained settings,
+  and acknowledged provisioning-console `get` and `reboot`.
+- A T-Echo leaf and Supreme SX1262 gateway exchanged LoRa packets at 915 MHz,
+  BW 125 kHz, SF8, CR 4/5, 0 dBm and a 1% hourly airtime limit. A host reached
+  the T-Echo through USB, Supreme and LoRa at three hops, verifying a 10-byte
+  `/echo` reply and receiving `/info`; one request required a retry.
+
+Only those two board profiles have hardware bench evidence. Range, sustained
+load, other boards, actual Wi-Fi deployment and on-air stock RNode
+interoperability remain unverified. See the current [README](../README.md),
+[compatibility record](../COMPATIBILITY.md) and [release instructions](releasing.txt).
+
+The sections below retain the original PR #2 preparation and evidence. Their
+snapshot counts and verification limits describe that historical milestone,
+not the current feature inventory or a new certification claim.
+
+## Original SDK expansion scope
 
 [PR #2](https://github.com/mondain/reticulum-c/pull/2) adds a bounded C11 SDK
 with a sans-I/O protocol core and a separate optional POSIX host. Version 0.2.0
@@ -67,7 +103,7 @@ counted as passing checks.
 
 External Resource/service/security/RPC method fixtures establish differential
 behavior; they are distinct from live external Resource/service sessions.
-Physical radio, AutoInterface multicast deployment, Windows and additional
-reference implementations remain unverified. Those require separate execution
-and are outside the verified scope of this PR. This is an
+At that original PR snapshot, physical radio, AutoInterface multicast deployment,
+Windows and additional reference implementations had no execution evidence.
+Those require separate execution and are outside the verified scope of this PR. This is an
 experimental SDK expansion, not a release or a complete-stack certification.

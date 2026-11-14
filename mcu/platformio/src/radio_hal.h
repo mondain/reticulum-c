@@ -1,6 +1,6 @@
 // Arduino implementation of the radio HAL (mcu/radio/rnc_radio_hal.h) for ESP32 (arduino-esp32
 // SPIClass) and nRF52840 (Adafruit nRF52 core SPIClass on SPIM2 with an identity pin map,
-// variants/rnc_nrf52840). NOT RUN ON HARDWARE: compiled only.
+// variants/rnc_nrf52840). Bench-tested on T-Echo and Supreme SX1262; other boards remain unverified.
 #pragma once
 #include "rnc_boards.h"
 #include "rnc_radio_hal.h"

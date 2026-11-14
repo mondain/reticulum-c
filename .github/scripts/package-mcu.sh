@@ -134,13 +134,16 @@ of every hour; it is a safety net, not a compliance proof.
   - Wi-Fi mode: the TCP link is plaintext and unauthenticated at the transport level (like
     any Reticulum TCP interface); the Wi-Fi password sits unencrypted in flash."
     WIFI_TEXT="
-WI-FI. The firmware starts in serial mode. It can instead join a Wi-Fi network and connect
+WI-FI. An unprovisioned image starts in serial mode; updates that preserve settings
+retain the selected mode. It can join a Wi-Fi network and connect
 to the TCPServerInterface of a Reticulum node (same HDLC framing, TCP client). No
 credentials are in this image: provision them after flashing, in either way:
 
   1. no console: tools/wifi-config.sh$arduino_flag --chip CHIP --device /dev/ttyUSB0 \\
          --ssid NAME --host NODE_ADDRESS --password-stdin < password.txt
      (needs esptool and esp-idf-nvs-partition-gen from pip, or Docker with --docker)
+     ESP-IDF writes the separate settings partition and keeps the identity.
+     PlatformIO --arduino replaces the entire NVS partition, including the identity.
   2. console: within 2 seconds after reset send the line  rnc-config  on the serial port
      (115200 baud, 8N1), or press BOOT after reset; then  set mode wifi, set ssid ...,
      set password ..., set host ..., save, reboot.
@@ -162,6 +165,24 @@ routes between the board and the network.
 Serial port: $SERIAL
 In serial mode nothing but the HDLC stream is written to it.
 $WIFI_TEXT$LORA_TEXT
+Updating
+  ESP32 merged.bin is for initial installation or an intentional reset: its
+  erased padding overwrites identity NVS (and settings on PlatformIO). Use the
+  separate-parts command in flash.txt to preserve NVS with the same partition layout.
+  nRF52840 UF2/DFU updates contain only the application and preserve its internal
+  file system, bootloader and SoftDevice. An existing compatible bootloader is required.
+
+Browser install and setup
+  https://mondain.github.io/reticulum-c/ offers the eight exact PlatformIO board
+  images and the rnc-config setup console in desktop browsers with Web Serial.
+  Main-commit builds there can be newer than this release archive. Generic
+  ESP-IDF images are not offered by the browser installer.
+  ESP32 updates use separate parts, SHA-256 download checks and MD5 flash
+  verification; factory erase requires an explicit choice and confirmation.
+  nRF52840 supports acknowledged application-only serial DFU and UF2 downloads.
+  Wi-Fi setup keeps an existing masked password when left blank; choose an
+  open network explicitly to remove it. See MANUAL.txt for the applicable port.
+
 Files
   flash.txt     the exact flashing commands for this board (start here)
   BUILDINFO     release, version, commit, toolchain versions, build time
@@ -224,7 +245,8 @@ mcu/esp-idf/example is a complete firmware project; mcu/build-esp-idf.sh --docke
 builds it (see mcu/README.txt for the details, boards and limits).
 
 This is a source archive: the firmware images are in the reticulum-c-$release-mcu-*.zip
-files of the release. See the manual for board-specific hardware evidence. The LoRa radio (mcu/radio) is optional and OFF
+files of the release. See the manual for board-specific hardware evidence.
+The LoRa radio (mcu/radio) is optional and OFF
 until configured: select the board with the Kconfig choice "LoRa board" and read
 mcu/radio/README.txt (regulatory notes) first.
 EOF
@@ -249,7 +271,8 @@ mcu/platformio is a complete project for eight boards (README.txt there); with a
 and network access, mcu/build-platformio.sh builds all of them with a pinned PlatformIO.
 
 This is a source archive: the firmware images are in the reticulum-c-$release-mcu-*.zip
-files of the release. See the manual for board-specific hardware evidence. The LoRa radio (mcu/radio) is optional and OFF
+files of the release. See the manual for board-specific hardware evidence.
+The LoRa radio (mcu/radio) is optional and OFF
 until configured; read mcu/radio/README.txt (regulatory notes) first.
 EOF
 }

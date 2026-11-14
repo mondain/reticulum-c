@@ -6,7 +6,7 @@
  * one destination `reticulum_c.mcu.example`, and the request paths
  *
  *   /echo   returns the request value unchanged
- *   /info   returns a MessagePack map {name, version, board, uptime[, heap][, unix]}
+ *   /info   returns a MessagePack map {name, version, board, uptime[, heap][, lora]}
  *
  * It must be built with the mcu capacity profile (RNC_PROFILE_MCU defined for the
  * library AND for this file) and the portable crypto backend, and it contains no

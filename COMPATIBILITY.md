@@ -4,6 +4,35 @@ This is an experimental subset. No complete-stack or broad certification claim
 is made. Record a peer's exact revision and features exercised; unsupported
 features are distinct from protocol failures.
 
+## Current snapshot (2026-11-14)
+
+Documentation was checked against `0828e517ecd09d6d5bd8b8a0662b05e3dc4d2387`.
+Its implementation matches the preceding merge `8b46e4b`; the later commit
+updates documentation. The latest published prerelease, `v0.2.0-rc4`, predates
+the T-Beam Supreme support and browser installer described here.
+
+| Check | Result | Scope |
+| --- | --- | --- |
+| Local Linux native suite | 251/251 | Debug static SDK, OpenSSL 3, BZip2, POSIX host/examples; external RNS/Leviculum oracles and sanitizers disabled. |
+| Browser JavaScript units | 31/31 | Configuration, serial-console, nRF52 DFU and ESP flashing logic using test transports. |
+| Firmware publication units | 27/27 | Catalog, artifact integrity and publication rules. |
+| Chromium browser tests | 7/7 | Installer and console UI behavior with simulated serial devices. |
+| Hosted Pages workflow | Passed | Both firmware build groups, site build/tests and deployment at `8b46e4b`. |
+
+The [Pages workflow](https://github.com/mondain/reticulum-c/actions/runs/43635333668)
+built eight board images and published a catalog with 26 firmware files, all
+checked against their catalog byte sizes and SHA-256 values. This is separate
+from the [SDK CI run](https://github.com/mondain/reticulum-c/actions/runs/43635333684),
+which was canceled; it does not establish a current full SDK CI or external-peer
+oracle pass. Hardware evidence is limited to the T-Echo/Supreme bench described
+below. Browser mocks and radio models establish their tested behavior, not
+device qualification.
+
+The following sections retain earlier milestone evidence and test counts at
+their recorded revisions. Their branch names, toolchain versions and statements
+about work not yet tested describe those milestones, rather than the current
+test inventory. Later evidence supersedes earlier blanket hardware exclusions.
+
 ## Before repository extraction
 
 The independently buildable module passed 9/9 Linux unit groups with GCC 13.3
@@ -81,13 +110,13 @@ Linux static/shared/compression-disabled/sanitizers, macOS, RNS and Leviculum.
 The complete RNS suite was also rerun locally at that snapshot: 88/88 passed.
 
 Socket and leak tests require execution outside the restricted local sandbox.
-Actual radio, AutoInterface multicast deployment, Windows, live external
-Resource/service sessions and additional implementations still need separate
-verification.
+At this milestone, actual radio, AutoInterface multicast deployment, Windows,
+live external Resource/service sessions and additional implementations had not
+been verified by that matrix.
 
 ## Spec gap closure branch (`feature/spec-gap-closure`)
 
-Local Linux evidence (GCC 13.3, OpenSSL 3.0.13), not yet run in hosted CI:
+Local Linux evidence at this milestone (GCC 13.3, OpenSSL 3.0.13), before hosted CI:
 
 | Configuration | Result | Scope |
 | --- | --- | --- |
@@ -111,7 +140,8 @@ control is enabled by default. See `docs/spec-gap-list.md` for what remains.
 
 ## Interface additions (`feature/rnode-correctness`)
 
-Local Linux evidence, same toolchain and oracle as above, not yet run in hosted CI:
+Local Linux evidence at this milestone, same toolchain and oracle as above,
+before hosted CI:
 129/129 with the pinned RNS oracle (static SDK), host tests clean under
 ASAN/UBSAN/LSAN.
 
@@ -1037,8 +1067,8 @@ responder and two active links with services peaks at 86 KB of heap (about 7.7 K
 of stack measured; use at least 12 KB). The constants size public structures, so
 every consumer of the headers must be built with the same profile.
 
-Evidence: known-answer tests (NIST, RFC 4231, 5869, 7748, 8032) pass on both
-backends, a differential test runs 57,000 random comparisons between them
+At the initial port milestone, known-answer tests (NIST, RFC 4231, 5869, 7748, 8032)
+passed on both backends, and a differential test ran 57,000 random comparisons between them
 (mutations of the AES polynomial, the HKDF counter and a SHA-256 rotation each
 fail both), the existing suite passes with the portable backend (also with no
 OpenSSL installed, and under sanitizers), and the interop tests against the
@@ -1048,17 +1078,20 @@ without draining events and are not applicable there. The reference
 Python RNS reaches the example firmware logic through a node and gets correct
 `/echo` and `/info` answers.
 
-Firmware: an ESP-IDF component and example (esp32 and esp32s3; the images are
-317 KB and 341 KB with 12 and 14 KB of static RAM) and a PlatformIO/Arduino
-project covering Heltec V3 and V2, a T-Beam, a LilyGo T3-S3 and the nRF52840
-boards RAK4631, Heltec T114 and LilyGo T-Echo (203 KB of flash and 13 KB of static
-RAM on nRF52, leaving about 115 KB of heap after the node and a 16 KB task). The
+Firmware: an ESP-IDF component and example (esp32 and esp32s3) and a
+PlatformIO/Arduino project covering Heltec V3 and V2, the original T-Beam,
+T-Beam Supreme SX1262, LilyGo T3-S3 and the nRF52840 boards RAK4631, Heltec T114
+and LilyGo T-Echo. Initial build measurements were 317/341 KB flash and 12/14 KB
+static RAM for the ESP-IDF examples, and 203 KB flash/13 KB static RAM on nRF52;
+these are historical build measurements, not current per-board runtime budgets. The
 firmware clock is a build-time epoch plus uptime with a persisted high-water mark
-so announces stay fresh across reboots (policy in `rnc_mcu_app.h`). All builds run
-in CI and in the release. Not verified: any run on hardware (flashing, USB CDC,
-the nRF52 bootloader flow, real heap use), a LoRa radio on air (see the next section), the T-Deck (no PlatformIO board), and whether
-the T114, T-Echo and RAK4631 use the Adafruit bootloader and S140 memory map their
-derived board definitions assume.
+so announces stay fresh across reboots (policy in `rnc_mcu_app.h`). The Pages
+workflow builds all eight PlatformIO environments; release packaging also
+defines firmware builds, but each release's board set depends on its tagged
+source. T-Deck has no PlatformIO environment. The T-Echo's Adafruit application
+DFU/boot path has run on hardware; equivalent bootloader/memory-map assumptions
+on T114 and RAK4631 remain unverified, as do hardware memory budgets on the other
+boards. See the bench evidence below.
 
 ### Wi-Fi transport and LoRa radio (mcu)
 
@@ -1090,7 +1123,31 @@ SX127x models, frames between the two families, a shared-medium simulator with
 loss, collision and hidden-node cases, two app instances speaking Reticulum over
 simulated LoRa (announce, path request, link, `/echo`, `/info`, a 900-byte
 Resource), a default-build `reticulum-c-node` reaching a simulated board through a
-simulated gateway, and 30 of 30 mutations caught. Not verified: anything on real
-chips or on air, interop with a real RNode (the models were written from the same
-datasheets as the drivers, so a shared misreading would pass), TCXO voltages, board
-pins, the AXP192 sequence, CAD parameters (implemented, unused by the interface).
+simulated gateway, and 30 of 30 mutations caught at the initial radio milestone.
+Models were written from the same datasheets as the drivers, so a shared
+misreading could pass. The later bench below adds real SX1262 on-air evidence;
+stock RNode interoperability, other board pins/TCXO voltages, the original
+T-Beam's AXP192 sequence and CAD parameters (implemented, unused by the interface)
+remain unverified on hardware.
+
+### Physical T-Echo and T-Beam Supreme bench (2026-11-14)
+
+A LilyGo T-Echo leaf and T-Beam Supreme SX1262 gateway exchanged real LoRa
+traffic at 915 MHz, BW 125 kHz, SF8, CR 4/5, 0 dBm and a 1% hourly airtime
+budget. A host client reached the T-Echo through USB, the Supreme gateway and
+LoRa, with the path reported as three hops. `/echo` returned the exact 10-byte
+payload and `/info` returned 116 bytes; one request needed a retry. The Supreme
+uses the AXP2101 ALDO3 radio rail at 3.3 V. This supports a bench compatibility
+claim for these two SX1262 boards and settings only.
+
+The browser installer's JavaScript transports also ran against both physical
+devices: T-Echo application-only nRF52 DFU completed with bootloader
+acknowledgements, and the Supreme's four ESP flash parts passed device-side MD5
+verification. The installed applications responded to the provisioning console's
+`get` and `reboot` commands. This hardware exercise complements the browser UI
+tests; it does not mean every browser, OS, USB adapter or listed board was tested.
+
+No range test, sustained-load/soak test or over-the-air qualification against
+stock RNode firmware has been completed. Other boards remain covered by builds
+and models. Supreme LR1121 variants and the original T-Beam v1.2 are unsupported;
+the Supreme environment targets the SX1262 variant.

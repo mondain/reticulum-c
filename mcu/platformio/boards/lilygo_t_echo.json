@@ -40,7 +40,7 @@
   "frameworks": [
     "arduino"
   ],
-  "name": "LilyGo T-Echo (nRF52840, SX1262 not used)",
+  "name": "LilyGo T-Echo (nRF52840, SX1262)",
   "upload": {
     "maximum_ram_size": 248832,
     "maximum_size": 815104,

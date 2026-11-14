@@ -8,7 +8,8 @@ framework so it builds for common LoRa boards with one command:
     library: library.json at the repository root
   - this directory is a PlatformIO project: platformio.ini (one environment per
     board), src/main.cpp (the Arduino port), src/wifi_mode.cpp (Wi-Fi TCP transport and
-    provisioning, ESP32 only), boards/ (board definitions PlatformIO
+    provisioning, ESP32 only), src/nrf_mode.cpp (nRF52 radio settings and console),
+    boards/ (board definitions PlatformIO
     does not ship), scripts/ (collects the flashable files)
 
 STATUS: every environment below builds. T-Echo and Supreme SX1262 have passed a
@@ -53,7 +54,8 @@ with the name, vendor, USB product string and the Arduino variant changed. The v
 variants/rnc_nrf52840 (written for this project): an identity pin map, so Arduino pin n is
 chip GPIO n (P1.k is 32 + k) and the radio pin numbers of mcu/radio/rnc_boards.c can be used
 as they are; it drives no LED or button. The boards are known to ship the Adafruit
-bootloader; this was not tested on the boards.
+bootloader. Acknowledged serial DFU has been exercised on the T-Echo;
+the RAK4631 and T114 bootloader paths remain unverified on hardware.
 
 Prerequisites
 -------------
@@ -79,7 +81,7 @@ or with your own PlatformIO 6.1.x:
   pio run -e heltec_wifi_lora_32_V3 -t upload      build and flash over USB
 
 OUTDIR/<env>/ holds: flash.txt (the exact commands), size.txt, build-info.txt,
-build.log, reticulum-c-mcu.elf, and
+build.log, reticulum-c-mcu.elf, flash.json (offsets, sizes and SHA-256 hashes), and
   ESP32 / ESP32-S3: merged.bin (one image for flash address 0x0), reticulum-c-mcu.bin
                     (the application only), bootloader.bin, partitions.bin, boot_app0.bin
   nRF52840:         reticulum-c-mcu.uf2, reticulum-c-mcu.hex, reticulum-c-mcu-dfu.zip
@@ -92,10 +94,11 @@ LoRa radio
 ----------
 All eight environments contain the LoRa driver for their board (the board table is
 mcu/radio/rnc_boards.c; the environment name selects the entry): SX1262 on heltec_wifi_lora_32_V3,
-lilygo_t3_s3, wiscore_rak4631, heltec_t114, lilygo_t_echo; SX1276 on heltec_wifi_lora_32_V2 and
+lilygo_t3_s3, lilygo_t_beam_supreme, wiscore_rak4631, heltec_t114, lilygo_t_echo;
+SX1276 on heltec_wifi_lora_32_V2 and
 ttgo_t_beam (v1.0/v1.1, its AXP192 radio rail is switched on over I2C). The radio is OFF, and the
 chip is not touched, until the mode and the frequency, bandwidth, spreading factor, coding rate
-and transmit power have been set at runtime; NO radio setting is compiled into any image, and
+and transmit power have been set at runtime; no transmit defaults are compiled in, and
 the operator is responsible for a legal frequency, power and duty cycle (mcu/radio/README.txt).
 
   lora.mode leaf      LoRa is the only interface (announces on LoRa, answers /echo and /info
@@ -137,20 +140,49 @@ COMx on Windows. If the board does not enter the bootloader by itself, hold BOOT
 RESET, release BOOT. flash.txt has the same command for the board you built, and the
 separate-parts variant.
 
-nRF52840 (RAK4631, T114, T-Echo): the boards run the Adafruit nRF52 bootloader.
+nRF52840 (RAK4631, T114, T-Echo): these images require the Adafruit nRF52 bootloader.
   1. Double-tap RESET: a USB drive appears (names like RAK4631, HT-n5262, TECHOBOOT).
   2. Copy reticulum-c-mcu.uf2 onto it. The board reboots into the firmware.
 Alternative over the serial DFU port (pip install adafruit-nrfutil):
 
   adafruit-nrfutil --verbose dfu serial --package reticulum-c-mcu-dfu.zip -p /dev/ttyACM0 -b 115200 --singlebank
 
-The UF2 file contains the application only (from 0x26000); the bootloader and SoftDevice
-that came with the board stay. A board without the Adafruit bootloader needs it flashed
+The UF2 and DFU files contain the application only (from 0x26000); the internal
+file system holding identity/settings, bootloader and SoftDevice stay in place.
+A board without the Adafruit bootloader needs it flashed
 first with a debug probe (see the board vendor's instructions); that is not covered here.
+
+Browser install and setup
+-------------------------
+https://mondain.github.io/reticulum-c/ publishes all eight board images with a
+version selector and SHA-256 downloads. Main builds are labeled main-<commit>;
+they are separate from tagged release archives. The catalog retains up to five
+versions as new builds are deployed, prioritizing tagged releases in its history.
+Choose the exact board/radio variant: Supreme LR1121 and T-Beam v1.2 are unsupported.
+
+On a desktop Chromium browser with Web Serial, select and confirm the board, then
+connect its USB port. ESP32 updates download and verify the separate parts by
+SHA-256, write the board-specific flash headers and verify flash contents with
+MD5. The default update preserves NVS with an unchanged partition layout. Factory
+installation requires an explicit erase choice and confirmation and erases all
+flash, including identity and settings. The site does not flash merged.bin.
+
+For nRF52840, request the bootloader or double-tap RESET, then choose the bootloader
+serial port for acknowledged application-only DFU. UF2 is also downloadable for
+drag-and-drop installation. Application-only updates preserve the internal file
+system. Browser transfer checks have been exercised on the Supreme SX1262 and
+T-Echo; other board paths have build and automated-test coverage.
+
+The setup form uses this firmware's rnc-config console, not the RNode EEPROM/KISS
+protocol. Connect settings, tap RESET if prompted, read the saved values, then
+save and reboot. Radio settings have no transmit defaults: enter all settings
+and select a legal frequency, power and airtime budget. Wi-Fi edits apply only
+when selected; leaving an existing masked password blank preserves it. Explicitly
+choose an open network to clear it. The form never reads the password in clear.
 
 Serial setup
 ------------
-In serial mode (the default, and the only mode of the nRF52 environments) Serial carries
+With the radio off and host transport set to serial (the default), Serial carries
 only the HDLC byte stream of the Reticulum SerialInterface (flag 0x7E,
 escape 0x7D, mask 0x20): the application's log hook is not connected and framework
 logging is off (ESP32: CORE_DEBUG_LEVEL=0 and esp_log_level_set(NONE)). The ESP32 boot ROM
@@ -158,7 +190,7 @@ still prints a few bytes at reset at 115200 baud; the HDLC receiver ignores them
 boards boot silently.
 
   UART boards (heltec V3/V2, T-Beam): 115200 baud, 8N1 (RNC_MCU_BAUD to change it)
-  USB CDC boards (T3-S3, RAK4631, T114, T-Echo): the baud rate is ignored; the host must
+  USB boards (Supreme, T3-S3, RAK4631, T114, T-Echo): the baud rate is ignored; the host must
   assert DTR, which every normal serial open does (the nRF52 USB stack drops output while
   DTR is low).
 
@@ -180,7 +212,7 @@ reticulum-c-node configuration (any host node with a SerialInterface works):
 Within a few seconds the node logs the announce of reticulum_c.mcu.example; request /echo
 or /info from it (mcu/tests/echo_client.c; /info reports the board name = the environment,
 the version, uptime and free heap). The device announces at start, 5 seconds later, then
-every 10 minutes. It is a leaf node: it does not forward traffic.
+every 10 minutes. It is a leaf node unless LoRa gateway mode is configured.
 
 What the port does (src/main.cpp)
 ---------------------------------
@@ -213,8 +245,8 @@ listens on TCP:
     listen_ip = 0.0.0.0
     listen_port = 4242
 
-A freshly flashed image is in serial mode, exactly as before: nothing changes until you
-provision it. The nRF52 environments have no Wi-Fi and are unchanged.
+An unprovisioned image starts in serial mode. Updates that preserve settings
+retain the selected mode. The nRF52 environments have no Wi-Fi.
 
 The mode and the credentials are set at runtime and are NEVER in a release image. They
 are stored with Preferences in the standard NVS partition, namespace "rnc_net", keys
@@ -283,22 +315,22 @@ nRF52 memory and the profile decision
 -------------------------------------
 The nRF52840 has 256 KB of RAM. The linker script of the Adafruit core reserves the
 lowest 24 KB for the SoftDevice (even though this firmware does not enable it), the rest
-is .data/.bss, a 2 KB main stack and the heap. Measured on the built ELF (all three
-nRF52 environments are identical in memory):
+is .data/.bss, a 2 KB main stack and the heap. A measured radio-enabled RAK4631
+build had the following layout; size.txt reports the actual build's values:
 
   RAM region for the application       0x20006000 .. 0x20040000   232 KB
-  .data + .bss (PlatformIO "RAM")      13,164 bytes
-  heap (__HeapBase .. __HeapLimit)     222,356 bytes (217 KB), in size.txt
+  .data + .bss (PlatformIO "RAM")      16,732 bytes
+  heap (__HeapBase .. __HeapLimit)     218,788 bytes (214 KB), in size.txt
   main stack                           2 KB
 
 The default mcu profile needs about 86 KB of heap for the node, the responder and two
 links (tests/footprint.c, a host measurement), about 5 KB for the application's scratch
-buffers and a 16 KB task stack taken from the heap: about 107 KB in total, which leaves
-about 115 KB of the 222 KB heap for the Adafruit core's own tasks (USB, timers; a few KB)
+buffers and a 16 KB task stack taken from the heap: about 107 KB in total, plus
+about 4 KB for the radio interface. The measured build leaves roughly 100 KB
+for the Adafruit core's own tasks (USB, timers; a few KB)
 and for you. That is far above the 30 KB margin, so the nRF52 builds use the default mcu
-profile unchanged and no smaller profile is defined. (PlatformIO's "RAM: 5.3%" counts
-only static data; it is not the memory budget.) The runtime heap was not measured on a
-board; /info reports the free heap so you can read it.
+profile unchanged and no smaller profile is defined. (PlatformIO's RAM percentage counts
+only static data; it is not the memory budget.) /info reports the runtime free heap.
 
 If you need the memory (for example for a radio driver, a display or BLE), a custom
 profile can still be supplied for the library and the sketch together:
@@ -333,20 +365,21 @@ library.json) and RNC_MCU_BUILD_EPOCH. Use a task stack of at least 12 KB (16 KB
 
 Limits
 ------
-  - Not run on hardware: the builds are verified, the firmware behaviour is verified only
-    through the portable application on the host (mcu/tests).
-  - No LoRa radio driver (SX126x/SX127x), no RNode-style firmware, no Bluetooth. The only
-    network interface is the serial port, or on ESP32 a Wi-Fi TCP client (no access point
-    mode, no UDP/AutoInterface, no TLS, no IFAC): a host node is needed to route to a
-    network.
+  - Hardware bench coverage: T-Echo leaf and Supreme SX1262 gateway, including
+    routed /echo and /info over LoRa. Other boards retain build/model coverage.
+    Range, sustained load and stock RNode interoperability remain unverified.
+  - No RNode KISS host protocol or Bluetooth. Host interfaces are serial/USB or,
+    on ESP32, a Wi-Fi TCP client (no access point mode, UDP/AutoInterface, TLS or
+    IFAC). LoRa is available as a leaf or gateway interface once configured.
   - Wi-Fi mode (ESP32 environments) is built, not run on hardware; its application logic is
     tested on the host (mcu/tests). It adds about 420 KB of flash (heltec V3: 339 KB ->
     759 KB) and 30 KB of static RAM, plus the Wi-Fi driver's heap, and uses more power.
-  - Leaf node: no transport/forwarding, at most 2 links, 8 remembered announces, 12 paths,
-    packets up to 500 bytes (include/reticulum_c/rnc_profile_mcu.h).
+  - Leaf node unless LoRa gateway mode is configured: at most 2 links,
+    8 remembered announces, 12 paths, packets up to 500 bytes
+    (include/reticulum_c/rnc_profile_mcu.h).
   - AES is table-based software (not constant time against cache timing); X25519/Ed25519
     are Monocypher. Hardware crypto is not used.
-  - The nRF52 board definitions are derived (see above); display, buttons and LoRa pins
-    are not mapped.
+  - The nRF52 board definitions are derived (see above). The identity pin map
+    supports the radio GPIOs; display and buttons have no application support.
   - The nRF52 firmware assumes the Adafruit bootloader and the S140 6.1.1 memory map.
   - T-Deck: no environment (no PlatformIO board definition).

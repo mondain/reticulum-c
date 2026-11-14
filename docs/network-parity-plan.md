@@ -1,10 +1,18 @@
-# Reticulum network functionality implementation plan
+# Reticulum network functionality implementation plan (historical)
 
-User authorization: proceed with implementations to eliminate the audited gaps.
+This is the completed SDK 0.2 expansion plan for PR #2, retained as a design
+record. It is not an outstanding implementation queue. For current features and
+remaining gaps, use [compatibility](../COMPATIBILITY.md) and the
+[gap inventory](spec-gap-list.md); dated verification is in the
+[readiness record](resume-status.md).
+
+Original authorization: implement the audited SDK expansion.
 C11, MIT, Linux first, macOS second, Windows last. RNS 1.5.5 at
-`e40191b3d193b46b7f2d8a44424a594cd758839b` is the protocol baseline. Read the
-Reticulum Manual 1.5.5 in text form before the reference source. External
-implementations are test oracles only. No implementation is copied from them.
+`e40191b3d193b46b7f2d8a44424a594cd758839b` is the protocol baseline. The original
+review used the Reticulum Manual in text form before the reference source. External protocol
+implementations served as test oracles, not runtime dependencies; this statement
+is scoped to the protocol core, not the browser dependencies listed in
+[provenance](../PROVENANCE.md).
 
 ## Design and boundaries
 
@@ -48,9 +56,12 @@ use the standard Channel system message 0xff00 and preserve EOF/backpressure.
 ## Explicit verification boundaries
 
 The original audit included wider interoperability and hardware goals. This
-PR implements the SDK APIs and records the coverage actually executed. Live
-external Resource/service sessions, AutoInterface multicast deployment, physical
-radio, Windows and a third reference stack remain future validation work.
+record describes what PR #2 implemented and verified at its own snapshot.
+Physical radio was outside that original evidence. Subsequent T-Echo/Supreme
+SX1262 bench flashing and LoRa exchanges are recorded in the current
+[readiness record](resume-status.md). They do not establish range, sustained-load
+or stock RNode radio interoperability. AutoInterface multicast deployment,
+Windows and a third reference stack remain separate validation work.
 Differential fixtures, PTYs and successful compilation do not replace those
 checks or establish complete-stack compatibility.
 

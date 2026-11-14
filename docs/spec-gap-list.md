@@ -1,29 +1,26 @@
 # Reticulum manual vs reticulum-c: spec gap list
 
-- **Date:** 2026-10-26, rows updated as items were completed (last on 2026-10-28)
-- **Baseline:** Reticulum Manual (`Downloads/Reticulum.Manual.pdf`, text extracted with `pdftotext`). It is newer than the RNS 1.5.5 baseline used by the SDK, so some items (rngit, interface discovery, blackhole management) postdate it.
-- **Method:** three read-only audits by manual section, based on headers and source rather than README claims. No builds or tests were run. Items marked *(unverified)* rest on header/grep evidence only. The audit did not read all of `host_posix.c`, `ipc.c`, `service.c`, `channel.c`, `ratchet.c` or `ifac.c` in full.
+- **Date:** original audit 2026-10-26; implementation status reconciled with current headers and source on 2026-11-14.
+- **Baseline:** the supplied Reticulum Manual, reviewed as text extracted with `pdftotext`. The manual and external reference snapshots are identified in [PROVENANCE.md](../PROVENANCE.md); the manual is not bundled in this repository. This is a historical manual comparison, not a fresh review against a newer protocol specification.
+- **Method:** the original three read-only audits followed manual sections and inspected headers and source. They ran no builds or tests and did not read all of `host_posix.c`, `ipc.c`, `service.c`, `channel.c`, `ratchet.c` or `ifac.c` in full. The 2026-11-14 reconciliation also ran no tests; it corrects stale summaries, API mappings and defaults using current source. Later verification observations retained below apply only to the named scenarios. Items marked *(unverified)* rest on header/grep evidence only.
 
-**Legend:** IMPL = implemented, PART = partial, MISS = missing, N/A = not applicable to an SDK or by design.
+**Legend:** IMPL = implemented, PART = partial, MISS = missing, N/A = not applicable to an SDK or by design. IMPL records implementation coverage, not full protocol conformance or hardware certification. See [COMPATIBILITY.md](../COMPATIBILITY.md) for validation scope.
 
 > **Note on config parsing:** a Reticulum-style config parser exists in `examples/node_daemon.c` (not in the library). It accepts `[reticulum]` and `[interfaces]` sections and the keys listed in [section 5](#5-config-and-utilities-manual-ch5). An early interface-audit report claiming there was no config layer was wrong.
 
 ## 1. Summary
 
-The core protocol is solid: identities, SINGLE/GROUP/PLAIN destinations, announces (including ratcheted), path request/response, HEADER_1/2, IFAC, links, MTU negotiation, Channel, Buffer, Resources (bz2, metadata, segments), request/response, transport forwarding and link tables.
+The implementation covers identities, SINGLE/GROUP/PLAIN destinations, announces (including ratcheted), path request/response, HEADER_1/2, IFAC, links, MTU negotiation, Channel, Buffer, Resources (bz2, metadata, segments), request/response, transport forwarding and link tables. Endpoint proofs/receipts, interface policy, announce retries, known-destination persistence and link lifecycle APIs are implemented; they are no longer open work items.
 
-Largest gaps, in priority order:
+Concrete remaining gaps include:
 
-1. Endpoint packet delivery proofs and `PacketReceipt` (PROVE_NONE/APP/ALL, implicit/explicit proofs, timeouts). Blocks the Echo and rnprobe patterns.
-2. Interface policy: interface modes, configurable `announce_cap`, per-destination announce rate limiting, new-destination rate limiting, path request burst control, ingress control.
-3. Announce propagation details (manual 6.7.4): retransmit retries, local rebroadcast accounting, hold-down timers, mode-dependent path expiry.
-4. Missing interface types: none of the reference's network interface types is missing now (I2P, RNode Multi and Weave are done; the first two ran on the emulators' ground truth, none on hardware). Missing options on existing types ([section 4](#4-interfaces-manual-ch7-ch8)).
-5. RNode correctness (bitrate from SF/BW/CR, airtime limits, callsign beacon, detection and the firmware check are done).
-6. Management plane: blackhole management, remote management destination, probe responder, network identities and interface discovery are done (see sections 3 and 4).
-7. Persistent known-destination store (`Identity.recall`) and tunnels are done. The transport packet cache is deliberately not built: see section 3.
-8. Link lifecycle polish: RTT-scaled keepalive, STALE state, statistics getters, teardown reason enum, public RTT accessor.
-9. Resource window growth and rate-based timeouts: done (see section 5).
-10. CLI tools and examples. (Logging hook and the `loglevel` / `instance_name` options are done.)
+1. Announce propagation exceptions: path-response hold-down, the hop-limit difference and `MODE_INTERNAL` (section 2).
+2. Host interface options: Auto device lists/multiple NICs and scope selection, UDP multiple targets, TCP device binding/`i2p_tunneled`, serial locking/hardware flow control, and the I2P/RNode Multi/Weave options listed in section 4.
+3. Management and discovery details: the RPC rate table is empty; two discovery auto-connect options are accepted without effect; I2P/Weave discovery announcements are absent.
+4. API differences: no resend convenience method or per-link physical-signal tracking; event APIs replace Python callbacks. Bounded tables and queues differ from the reference's capacities.
+5. CLI feature subsets and stand-alone protocol examples (sections 5 and 6). The C `rnodeconf` tool does not flash firmware; the separate browser flasher under `web/` targets this project's MCU firmware.
+
+Host RNode/RNode Multi adapters remain unverified against real stock RNode hardware. Separately, this project's native MCU LoRa firmware has a short 2026-11-14 bench exchange on a T-Echo leaf and T-Beam Supreme SX1262 gateway at 915 MHz: three-hop host access, a 10-byte `/echo` reply and a 116-byte `/info` response, with one request retry. This does not establish stock-RNode interoperability, range or sustained-load reliability; see [mcu/radio/README.txt](../mcu/radio/README.txt).
 
 ## 2. Protocol (manual ch6, ch9)
 
@@ -39,16 +36,16 @@ Largest gaps, in priority order:
 | IMPL | Transport vs endpoint mode | |
 | IMPL | Announce validation, path learning, freshness, 300s future-timestamp reject | `node.c` |
 | IMPL | Announce rebroadcast with jitter, HEADER_2 rewrite | |
-| IMPL | 2% announce bandwidth cap, lowest-hops-first | Hard-coded in `node.c` |
+| IMPL | Announce bandwidth cap, lowest-hops-first | Configurable per interface through `rnc_interface_policy` and daemon `announce_cap`; default 2% |
 | IMPL | Path request/response (context 11), tag dedup, 15s pending table | |
 | IMPL | Link request forwarding, link table, reverse-path validation, MTU clamp | |
 | IMPL | IFAC (derive, apply, verify, tag size 1-64) | `src/ifac.c` |
 | IMPL | Wire format, MTU 500..4096 with 3B signalling | |
-| IMPL | Crypto primitives (OpenSSL) | |
+| IMPL | Crypto primitives | OpenSSL backend (`src/crypto.c`); optional portable backend (`src/crypto_portable.c`, vendored Monocypher), documented in [PROVENANCE.md](../PROVENANCE.md) |
 | IMPL | Ratchets: generate, rotate, export/import, encrypt/decrypt, 30-day peer expiry | `src/ratchet.c` |
-| IMPL | Announce propagation (6.7.4) | One retry after 5.5s (PATHFINDER_R/G/RW), cancelled after 2 heard neighbour rebroadcasts or when passed on a further hop; single transmission for shared-instance clients; locally originated announces blocked on AP interfaces. Verified against reference `Transport.py` at the pinned commit. Hold-down of announces during path-request answers is not implemented; hop drop remains at wire hops >= 127 (reference allows 128 after increment); `MODE_INTERNAL` not implemented |
+| PART | Announce propagation (6.7.4) | One retry after 5.5s (PATHFINDER_R/G/RW), cancelled after 2 heard neighbour rebroadcasts or when passed on a further hop; single transmission for shared-instance clients; locally originated announces blocked on AP interfaces. Verified against reference `Transport.py` at the pinned commit. Hold-down of announces during path-request answers is not implemented; hop drop remains at wire hops >= 127 (reference allows 128 after increment); `MODE_INTERNAL` not implemented |
 | IMPL | Path expiry | 7 days; AP 1 day, Roaming 6 hours by ingress interface mode |
-| IMPL | Delivery proofs | Endpoint proof creation (implicit 64B / explicit 96B) via `rnc_node_prove` and PROVE_ALL; validation by signer in `rnc_node_send_tracked` receipts (closed in `feature/spec-gap-closure`) |
+| IMPL | Delivery proofs | Endpoint proof creation (implicit 64B / explicit 96B) via `rnc_node_prove` and PROVE_ALL; validation by signer in `rnc_node_send_tracked` receipts |
 | IMPL | Packet prioritisation | The reference prioritises announces with fewer hops (the announce queue here does the same) and scans interfaces fastest first; nothing else is prioritised there either |
 | IMPL | `PacketReceipt` equivalent: `rnc_node_send_tracked` + `RNC_NODE_RECEIPT` event (delivered/failed, RTT, timeout); `rnc_node_set_proof_strategy` (NONE/APP/ALL) | PROVE_APP is signalled by the LOCAL event; no callback API by design |
 | IMPL | Tunnels and tunnel table | Synthesis packet on TCP client connect (not kiss-framed), validation, tunnel table with 8 h expiry, path association and restoration when a tunnel reappears, signed persistence beside the state file (`<state>.tunnels`); verified against the reference's TCP client |
@@ -63,7 +60,7 @@ Largest gaps, in priority order:
 
 | Status | Feature | Notes |
 | --- | --- | --- |
-| PART | Shared instance and RPC server (HMAC, MessagePack GET queries) | Several query names (`blackholed_identities`, `rate_table`, `path_table` fields) are decoded but the host supplies the data; the first two return empty |
+| PART | Shared instance and RPC server (HMAC, MessagePack queries and blackhole mutations) | Daemon responses include interface/path statistics, link counts and blackhole entries (`examples/node_rpc.h`); `rate_table` still returns an empty array. Shared-instance data transport is TCP only |
 | PART | `get_instance`, `transport_enabled`, `link_mtu_discovery`, `should_use_implicit_proof` accessors | `rnc_node_implicit_proofs` / `rnc_node_set_implicit_proofs` cover `should_use_implicit_proof`; `rnc_node_link_mtu_discovery` covers `link_mtu_discovery`; `get_instance` and `transport_enabled` are Python-instance accessors |
 
 ### Identity
@@ -88,9 +85,10 @@ Largest gaps, in priority order:
 
 | Status | Feature | Notes |
 | --- | --- | --- |
-| PART | Send via `rnc_node_send`, `rnc_link_send_packet(_hashed)` | |
+| IMPL | Send via `rnc_node_send`, `rnc_link_send_packet(_hashed)` | Explicit C send functions in `rnc_node.h` and `rnc_link.h` |
 | IMPL | `PacketReceipt` status, rtt, timeout | `rnc_node_send_tracked` (DELIVERED/FAILED event with rtt), `rnc_node_receipt_status` (SENT/DELIVERED/FAILED, culled = RNC_STATE), `rnc_node_receipt_timeout` and timeout 0 for the reference default (6 s per hop plus first-hop 6 s + MTU at the interface rate). Callbacks are events |
-| MISS | `resend`, `get_rssi/get_snr/get_q` | Resend by building and tracking a new packet |
+| MISS | `resend` convenience method | Resend by building and tracking a new packet |
+| PART | Packet `get_rssi/get_snr/get_q` | RNode signal figures are carried by `rnc_host_event` (`has_signal`, `rssi`, `snr`, `quality`), rather than stored on `rnc_packet`; other host kinds do not supply these figures |
 
 ### Link
 
@@ -127,7 +125,7 @@ Largest gaps, in priority order:
 | Status | Feature | Notes |
 | --- | --- | --- |
 | IMPL | `has_path` / `hops_to` / `next_hop` | `rnc_node_lookup`, `rnc_node_hops_to` (128 when unknown) |
-| PART | `register_announce_handler` with aspect filter | Event-based; `rnc_announce_matches_aspect` provides the filter |
+| IMPL | Announce events with aspect filter | `RNC_NODE_ANNOUNCE` events and `rnc_announce_matches_aspect`; Python callback registration is replaced by event dispatch |
 | IMPL | `await_path`; `request_path` on_interface/tag/recursive options | `rnc_host_await_path` (runs the host, asks again every 5 s, optional event callback and interrupt), `rnc_node_request_path_ex` |
 | IMPL | `blackhole_identity` / `unblackhole_identity` / `is_blackholed`, expiry, reference file format | Node API, daemon admin (`BLACKHOLE` / `UNBLACKHOLE` / `BLACKHOLES`), RPC get/set, persisted beside `--state`; verified with the reference `rnpath -B/-b/-U` |
 | IMPL | Blackhole publishing (`rnstransport.info.blackhole`, `/list`, open to all) | Daemon `publish_blackhole`; verified with the reference `rnpath -p` |
@@ -137,24 +135,24 @@ Largest gaps, in priority order:
 
 ## 4. Interfaces (manual ch7, ch8)
 
-Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The host adapter is closed to new kinds (`host_add` rejects kind > `RNODE`).
+Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNode, Pipe, AX.25 KISS, I2P, RNode Multi and Weave. Backbone/BackboneClient map to TCP listen/connect in the daemon. `rnc_host_add` accepts the enum through `RNC_HOST_WEAVE`; there is no dynamic plugin API.
 
 | Interface | Status | Detail |
 | --- | --- | --- |
 | Auto | IMPL | IPv6 link-local multicast, `group_id`, discovery/data ports, 1.6s announce, 22s peer timeout, per-peer sub-interfaces |
 | Auto | PART | `multicast_address_type` / scope (only temporary link scope) |
 | Auto | MISS | `allowed_devices`, `ignored_devices`, multiple devices; multi-NIC; Android/Windows specifics; address-change handling |
-| Backbone / BackboneClient | PART | Verified against the reference in both directions; daemon types map to TCP listen/connect (same HDLC wire format) with 100 Mb/s pacing and fast-flap IP blocking; no epoll data-plane egress/ingress watermarks, `device` binding or `prefer_ipv6` |
+| Backbone / BackboneClient | PART | Verified against the reference in both directions; daemon types map to TCP listen/connect (same HDLC wire format) with 100 Mb/s pacing and fast-flap IP blocking; no epoll data-plane egress/ingress watermarks or `device` binding; the common TCP `prefer_ipv6` option is accepted |
 | TCP server | IMPL | Listen, accept, IPv4/IPv6, DNS |
 | TCP server | IMPL | `prefer_ipv6`, TCP keepalive and user timeout on accepted sockets |
 | TCP server | MISS | `i2p_tunneled`, device binding |
-| TCP client | IMPL | Connect, auto-reconnect (1s fixed) |
+| TCP client | IMPL | Connect, auto-reconnect (default 5 s wait, configurable) |
 | TCP client | IMPL | `reconnect_wait`, `max_reconnect_tries`, `connect_timeout`, `prefer_ipv6`, keepalive and user timeout |
 | TCP client | PART | Address resolved once on add; reconnects reuse it |
 | TCP client | IMPL | `kiss_framing` (`fixed_mtu` is the existing `mtu`) |
 | TCP client | MISS | `i2p_tunneled` |
-| UDP | PART | Single unicast target; receive-only mode |
-| UDP | MISS | Broadcast, multiple targets |
+| UDP | IMPL | Single target (unicast or IPv4 broadcast); receive-only mode. Datagram sockets enable `SO_BROADCAST` in `src/host_posix.c`; this source reconciliation did not exercise broadcast delivery |
+| UDP | MISS | Multiple targets |
 | I2P | IMPL | `I2PInterface` through a router's SAM v3 bridge: session and key file (named as the reference names them), `peers` (b32 names, bare b32, full destinations), `connectable`, 15 s reconnect, keepalive and read watchdog, 1064 byte MTU. Verified against the unmodified reference in both directions through a fake SAM router; not tested against a real I2P router |
 | I2P | MISS | SAM address from the environment (`target_host`/`target_port` set it instead), `i2p_tunneled` on TCP interfaces, stale-tunnel state, I2P interface discovery announcements |
 | RNode LoRa | IMPL | Radio setup over KISS, `radio_ready` ack, flow control, serial reopen |
@@ -163,7 +161,8 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | RNode LoRa | MISS | BLE RNode, battery, temperature and channel statistics |
 | RNode LoRa | IMPL | WiFi RNode over TCP: `port = tcp://host` (port 7633, or `rnc_host_config.port`); the same KISS protocol, detection and radio setup once the socket opens, a detection ping after 3.5 s of silence, reconnect after a drop |
 | RNode Multi | IMPL | `RNodeMultiInterface`: one serial device, radios found by the device itself (`CMD_INTERFACES`) and selected with `CMD_SEL_INT` before each command and frame, `[[[radio]]]` sections (`vport`, frequency, bandwidth, txpower, spreadingfactor, codingrate, flow_control, airtime limits, outgoing, interface_enabled), per radio RSSI/SNR/quality, firmware 1.74 or newer, 5 s reconnect. Command streams match the unmodified reference against the same emulated device; not tested on real hardware |
-| RNode Multi | MISS | The shared station-ID timer (each radio keeps its own), IFAC on the radios (the reference gives them none either), display/framebuffer, TCP/BLE transport |
+| RNode Multi | MISS | The shared station-ID timer (each radio keeps its own), display/framebuffer, TCP/BLE transport |
+| RNode Multi | N/A | IFAC on individual radios is not supported; the pinned reference also gives these radios no IFAC |
 | Weave | IMPL | `WeaveInterface`: a Weave switch on a serial line (3 Mbaud, HDLC, WDCL framing): discovery broadcast, Ed25519 signed handshake with a per-run switch identity, every endpoint the switch reports (alive events and packets) is a peer interface (MTU 1024, 250 kb/s or `configured_bitrate`), 20 s peer timeout, packets seen from two endpoints within 0.75 s delivered once, 2 s handshake deadline and 5 s reconnect. The unmodified reference's `WeaveInterface` and this host complete the handshake with, and exchange packets through, the same emulated switch; not tested on real hardware |
 | Weave | MISS | Remote display, device log/statistics rendering, `ET_PROTO_WEAVE_EP_VIA` routing hints (parsed and ignored), USB switch discovery (`weaveconf`), Weave announcements |
 | Serial | IMPL | HDLC over termios, speed |
@@ -183,14 +182,14 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | Status | Feature | Notes |
 | --- | --- | --- |
 | IMPL | `type`, `enabled` (daemon), `name`, `bitrate`, `mtu`, IFAC (`networkname`, `passphrase`, `ifac_size`) | |
-| PART | `outgoing`, `bootstrap_only`, `ifac_netname` / `ifac_netkey` aliases | `outgoing = No` (receive only, inherited by accepted connections) and `bootstrap_only` are implemented; the `ifac_netname` / `ifac_netkey` aliases are not (the reference reads `network_name`/`networkname` and `passphrase`/`pass_phrase`, which the daemon accepts) |
-| IMPL | Interface modes: full, gateway, access_point, roaming, boundary | `rnc_node_interface_policy`; announce propagation rules follow the reference behavior as recalled, (the manual's table is an image, so the reference source was used). Rules verified against the pinned reference `Transport.py`. Gateway/AP/roaming interfaces now search for unknown paths on behalf of clients. Config keys `mode`/`interface_mode` in the daemon |
+| IMPL | `outgoing`, `bootstrap_only`, reference IFAC key aliases | `outgoing = No` is receive only and inherited by accepted connections; `bootstrap_only` is implemented. The daemon accepts `network_name`/`networkname` and `passphrase`/`pass_phrase`. The earlier audit listed `ifac_netname` / `ifac_netkey`, but those are not the pinned reference's config key spellings |
+| IMPL | Interface modes: full, gateway, access_point, roaming, boundary | `rnc_node_interface_policy`; the original audit used the pinned reference `Transport.py` because the manual's table is an image. The listed mode rules were compared with that source. Gateway/AP/roaming interfaces now search for unknown paths on behalf of clients. Config keys `mode`/`interface_mode` in the daemon |
 | IMPL | Announce rate control: `announce_cap` | Per-interface via policy and daemon `announce_cap` (percent); default 2% |
 | IMPL | `announce_rate_target` / `grace` / `penalty` | Per-interface policy and daemon keys; blocks rebroadcast only, paths still learned; bounded 128-entry table |
 | IMPL | New destination rate limiting (8.18) and ingress control (8.20) | Frequency-tracked burst detection, held announces released one per interval, pending-request and known-destination exemptions. Held announces share a 32-entry node table (reference default is 256 per interface). Released announces bypass the burst gate instead of re-entering it. Config keys `ingress_control`, `ic_*` in the daemon |
 | IMPL | Path request burst control (8.19) and egress control | Per-interface request frequency; recursive requests suppressed during bursts and on interfaces over `ec_pr_freq` |
 | IMPL | Recursive path-request search by mode | Only gateway, access point, roaming and local interfaces (or `recursive_prs`) search; boundary searches boundary and gateway peers; plain FULL no longer recurses, matching the reference. This changed the default for transport nodes |
-| PART | Ingress control (8.20) | Bounded queues (node queue, 32 frames per host interface, 8 node / 24 host interface slots) are capacity limits only |
+| PART | Queue backpressure and watermarks | The rate-based ingress controls are implemented above. Bounded queues (node queue, 32 frames per host interface, default 8 node / 24 host interface slots) impose capacity limits; they do not provide Backbone epoll watermarks |
 
 
 ## 5. Config and utilities (manual ch5)
@@ -221,7 +220,7 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 | PART | `rncp` | `reticulum-c-cp` (examples/reticulum_cp.c) over the new `rnc_transfer` library: listen (`-l`, `-a`, `-n`, `-s`, `-O`, `-F`, `-j`, `-b`), push and fetch (`-f`), compatible with the reference in all four directions. Not implemented: identity allow-list files, `-p`, `-P`, `-C`, `-S`, files over 16 MiB (held in memory), the reference's `--config` (it attaches over `--connect HOST:PORT`) |
 | PART | `rnx` | `reticulum-c-x` (examples/reticulum_x.c): listener with an allow list and client (`-w`, `-m`, `-d`, `-N`, `--stdin`, `--stdout`, `--stderr`), compatible with the reference in both directions. Not implemented: accept-anyone (`-n`, deliberately), interactive mode (`-x`), `-W`, `-p`, allowed-identity files, `--config`; a command is stopped after 25 s and requests/responses are limited to about 64 kB |
 | PART | `rnsh` | `reticulum-c-sh` (examples/reticulum_sh.c): listener (allow list, `-C`, `-A`, default program) and initiator (`-m`, `-N`, `-w`, terminal raw mode, window size, `~.`) speaking protocol 1, compatible with the reference rnsh in both directions. Not implemented: accept-anyone (`-n`, deliberately), line-interactive mode, allowed-identities file, `-p`, `-s`, compression of sent stream data, terminal attribute application on the pty |
-| PART | `rnodeconf` | `reticulum-c-rnodeconf` (examples/reticulum_rnodeconf.c): `-i` device information (product, signature against the vendor keys and `--trust-key`, firmware, modem, TNC settings), `-c` stored configuration, TNC and normal mode with radio parameters, Bluetooth, display, NeoPixel, interference avoidance and WiFi settings, read back by and compared with the reference against an emulated RNode. Not implemented: firmware download, flashing, update and extraction, autoinstall, EEPROM provisioning, backup, dump and wipe, signing keys, hash commands, the trusted-keys directory |
+| PART | `rnodeconf` | `reticulum-c-rnodeconf` (examples/reticulum_rnodeconf.c): `-i` device information (product, signature against the vendor keys and `--trust-key`, firmware, modem, TNC settings), `-c` stored configuration, TNC and normal mode with radio parameters, Bluetooth, display, NeoPixel, interference avoidance and WiFi settings, read back by and compared with the reference against an emulated RNode. Not implemented: firmware download, flashing, update and extraction, autoinstall, EEPROM provisioning, backup, dump and wipe, signing keys, hash commands, the trusted-keys directory. The separate browser flasher (`web/src/flash.js`, `web/src/nrf-dfu.js`) installs this project's MCU firmware; it does not close these reference `rnodeconf` gaps |
 | N/A | `rnir`, `rnpkg`, `RNS.Resolver` | Stubs in the pinned reference: they only start Reticulum or `pass`, so there is nothing to implement |
 | IMPL | `rngit` | Git over Reticulum, in four tools: `reticulum-c-git` (repository node: list, fetch, push, delete, create, fork, mirror, sync, permissions, releases, work documents, statistics, and the nomadnet page server with markdown conversion, a built-in syntax highlighter, charts, thanks counters, signature display and media conversion), `reticulum-c-git-remote` (`git-remote-rns` helper), `reticulum-c-git-admin` (create, fork, mirror, sync, gperms, rperms, release, work) and `reticulum-c-git-cs` (the `rngcs` commit signing tool). Verified against the unmodified reference in both directions: real git clone, push, pull and branch operations, management commands (the reference CLI against the C node and the C tool against the reference node), signatures byte-identical to the reference's, and 119 page answers compared with the reference's pages with no difference. Differences: bundles and artifacts are held in memory (at most 15 MiB), syntax highlighting is a compact built-in tokeniser rather than pygments, and the reference's `rngit` single command is split in these tools (see COMPATIBILITY.md) |
 | IMPL | Remote management, blackhole publishing and subscribing, interface discovery | |
@@ -230,32 +229,17 @@ Existing kinds: TCP listen, TCP connect, UDP, Auto, Serial, KISS, RNode. The hos
 
 | Status | Example | Notes |
 | --- | --- | --- |
-| IMPL | Announce (incl. ratcheted, path request), Broadcast/PLAIN, GROUP, Link, Identification (allow-list), Requests/Responses, Channel, Buffer, Filetransfer | |
-| IMPL | Echo | Encrypt/decrypt, proofs and receipts with RTT, `rnc_node_hops_to` |
-| PART | Callback-style APIs | Provided as events instead (service, resource, link) |
+| PART | Announce (incl. ratcheted, path request), Broadcast/PLAIN, GROUP, Link, Identification (allow-list), Requests/Responses, Channel, Buffer, Filetransfer | Library behavior and tests exist; dedicated stand-alone examples are absent |
+| PART | Echo | Library encrypt/decrypt, proofs and receipts with RTT, `rnc_node_hops_to`; MCU test client in `mcu/tests/echo_client.c`, but no general host echo example |
+| N/A | Callback-style APIs | Service, Resource and Link use event dispatch instead of Python callbacks by design |
 
-The repository's executables are `examples/text_peer.c`, the node daemon (`node_daemon.c`) and the tools of section 5 (`reticulum-c-ctl`, `-cp`, `-x`, `-sh`, `-rnodeconf`, `-git`, `-git-remote`, `-git-admin`, `-git-cs`). There is still no stand-alone example for announce, broadcast, echo, link, identification, request, channel, buffer or filetransfer: the tests cover them.
+The repository's executables are `examples/text_peer.c`, the node daemon (`node_daemon.c`) and the tools of section 5 (`reticulum-c-ctl`, `-cp`, `-x`, `-sh`, `-rnodeconf`, `-git`, `-git-remote`, `-git-admin`, `-git-cs`). Dedicated stand-alone protocol examples remain absent; the library tests cover those behaviors. MCU applications under `mcu/` and the browser tools under `web/` are separate from this manual-example checklist.
 
-## 7. Suggested ordering
+## 7. Remaining work ordering
 
-**Phase A: library protocol parity**
+The original Phase A library list (proofs/receipts, policy/rate controls, recall and link lifecycle) and Phase C management list (blackholes and remote management) have implementations above. Phase B host kinds and Phase D CLI tools also exist, with the explicit omissions in their tables. Their existence does not close the remaining options or validation gaps.
 
-1. Endpoint DATA proofs and `PacketReceipt`, proof strategy, probe responder.
-2. Announce propagation per 6.7.4 and per-destination rate limiting.
-3. Interface modes with mode-dependent path expiry and announce filtering.
-4. Configurable `announce_cap`, new-destination limit, path-request burst control, ingress control.
-5. Known-destination store (recall), announce aspect filter, link statistics and lifecycle (RTT keepalive, STALE, reason enum, RTT accessor).
-
-**Phase B: host interfaces**
-
-1. RNode detection and firmware check: done (with bitrate, airtime limits, beacon).
-2. Backbone, TCP hardening, KISS TNC parameters, serial parameters, UDP broadcast.
-3. Pipe, AX.25 KISS, I2P, RNode Multi and Weave (done); Auto allow/ignore lists.
-
-**Phase C: management plane**
-
-1. Blackhole table with filtering, then publish/subscribe.
-2. Remote management destination and ACL; mutating admin calls.
-3. (done)
-
-**Phase D:** CLI tools (done: ctl, cp, x, sh, rnodeconf and the rngit tools); stand-alone protocol examples remain.
+1. Resolve the announce propagation exceptions listed in section 2 and expose the RPC rate table.
+2. Fill the host options in section 4, including Auto device selection, UDP multiple targets and serial/TCP gaps; retain separate validation for emulator-backed host adapters and real hardware.
+3. Implement or reject the two no-effect discovery options, then cover I2P/Weave discovery announcements.
+4. Extend the CLI subsets and add runnable stand-alone protocol examples. Keep browser MCU firmware installation distinct from reference `rnodeconf` parity.

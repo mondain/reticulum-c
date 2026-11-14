@@ -5,7 +5,8 @@
 //
 // The console runs only on request: the line "rnc-config" on Serial within a short window
 // after boot. The nRF52 boards have no Wi-Fi, so the other keys (mode, ssid, ...) are accepted
-// by the console but unused. NOT RUN ON HARDWARE: compiled only.
+// by the console but unused. Provisioning has bench evidence on T-Echo; the
+// other nRF52 board ports have build/model coverage only.
 #include "wifi_mode.h"
 
 #if defined(NRF52840_XXAA) || defined(ARDUINO_ARCH_NRF52)

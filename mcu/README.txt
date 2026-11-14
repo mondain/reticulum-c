@@ -1,5 +1,5 @@
-reticulum-c for microcontrollers (ESP32 and ESP32-S3)
-======================================================
+reticulum-c for microcontrollers (ESP32, ESP32-S3 and nRF52840)
+============================================================
 
 This directory holds everything needed to run the reticulum-c protocol core on a
 microcontroller and an example firmware you can flash today:
@@ -15,10 +15,11 @@ microcontroller and an example firmware you can flash today:
   mcu/esp-idf/      ESP-IDF components and the example project
   mcu/build-esp-idf.sh   one command that builds a flashable image
   mcu/platformio/   the same firmware for the Arduino framework on ESP32 and nRF52840
-                    boards (Heltec V3/V2, T-Beam, T3-S3, RAK4631, Heltec T114, LilyGo
-                    T-Echo): see mcu/platformio/README.txt; build with mcu/build-platformio.sh
+                    boards (Heltec V3/V2, T-Beam, T-Beam Supreme SX1262, T3-S3, RAK4631,
+                    Heltec T114, LilyGo T-Echo): see mcu/platformio/README.txt;
+                    build with mcu/build-platformio.sh
 
-STATUS: the firmware builds for esp32 and esp32s3 and the same application logic
+STATUS: the firmware builds for ESP32, ESP32-S3 and nRF52840, and the same application logic
 passes the host tests against reticulum-c-node and the reference Reticulum.
 Hardware bench evidence: T-Echo leaf and Supreme SX1262 gateway at 915 MHz,
 BW 125 kHz, SF8, CR 4/5, 0 dBm, 1% airtime budget. A host client reached the
@@ -28,19 +29,20 @@ and stock RNode radio interoperability remain unverified.
 
 What the firmware is
 --------------------
-A Reticulum node for a microcontroller with one interface, in one of two modes chosen
-at runtime (see "Wi-Fi mode" below):
+A Reticulum node for a microcontroller. With the optional LoRa radio off, it has
+one host interface, selected at runtime (see "Wi-Fi mode" below):
 
   serial (the default)  the Reticulum SerialInterface framing (HDLC: flag 0x7E,
                         escape 0x7D, mask 0x20) on a UART or on the chip's USB
                         Serial/JTAG port;
-  wifi                  the same HDLC framing on a TCP connection (station mode) to
+  wifi (ESP32 only)      the same HDLC framing on a TCP connection (station mode) to
                         the TCPServerInterface of a Reticulum node, so the board joins
                         a network with no cable.
 
-A freshly flashed image is in serial mode, exactly as before. The node
+An unprovisioned image starts in serial mode. Updates that preserve settings
+retain the selected mode. The node
 
-  - creates a persistent identity at first boot (stored in NVS flash),
+  - creates a persistent identity at first boot (ESP32: NVS; nRF52840: internal file system),
   - registers the destination  reticulum_c.mcu.example,
   - announces at start, again 5 seconds later, then every 10 minutes
     (Kconfig: Reticulum MCU example -> Announce interval),
@@ -53,6 +55,18 @@ The firmware is a leaf node: it does not forward other nodes' traffic (no
 transport), except in the LoRa gateway mode below. A host node (reticulum-c-node or the
 reference rnsd) that has the board as a SerialInterface, or that accepts its TCP
 connection, routes between the board and the rest of the network.
+
+The build and ESP-IDF instructions below cover ESP32 and ESP32-S3. For nRF52840
+builds, USB serial provisioning and application-only UF2/DFU updates, use
+mcu/platformio/README.txt. nRF52840 stores its identity in its internal file system.
+
+Browser install and setup
+-------------------------
+https://mondain.github.io/reticulum-c/ provides the eight exact PlatformIO board
+images and a serial setup console. Select the board and catalog version; these
+can be main-commit builds as well as releases. Web Serial needs a supported
+Chromium browser on a desktop and a USB connection; downloads remain available
+in other browsers. See mcu/platformio/README.txt for update and erase behavior.
 
 Prerequisites
 -------------
@@ -333,7 +347,8 @@ described in mcu/radio/README.txt; the essentials:
   Limits); a gateway is a small bridge, not a repeater for a busy network.
 
   Build. ESP-IDF: menuconfig -> Reticulum MCU example -> LoRa board (Heltec V3 on esp32s3;
-  Heltec V2 or T-Beam v1.0/1.1 on esp32; LilyGo T3-S3 on esp32s3), or RNC_SDKCONFIG_EXTRA
+  Heltec V2 or T-Beam v1.0/1.1 on esp32; LilyGo T3-S3 or Supreme SX1262 on esp32s3),
+  or RNC_SDKCONFIG_EXTRA
   with CONFIG_RETICULUM_MCU_LORA_BOARD_HELTEC_V3=y and so on. The default is no LoRa board.
   The Arduino/PlatformIO environments (mcu/platformio) select their board by name. The board
   only chooses the pin map and the chip; the radio settings are provisioned.
@@ -403,9 +418,10 @@ limit) and two links, plus about 5 KB for the application's scratch buffers: aro
 92 KB of heap in total. Task stack: the core needed 7.7 KB high-water in the
 footprint scenario; the example task uses 16 KB (Kconfig minimum 12 KB). Static
 RAM of the firmware: about 12 KB (ESP32) and 14 KB (ESP32-S3) of .data and .bss.
-Flash: the application image is about 251 KB (ESP32) and 275 KB (ESP32-S3), the
-core itself about 57 KB of code plus tables. See size.txt in OUTDIR for the
-build's own report.
+The earlier serial-only application image was about 251 KB (ESP32) and 275 KB
+(ESP32-S3), with about 57 KB of core code and tables. These are baseline
+measurements, not sizes for the current Wi-Fi/radio-enabled images. See size.txt
+in OUTDIR for the actual build's report.
 
 Boards
 ------
@@ -424,8 +440,10 @@ Set the board name in menuconfig so /info reports it.
 
 Limits
 ------
-  - The LoRa radio (SX126x/SX127x) is new, optional and OFF until configured; it has never
-    run on a real radio. The firmware is not an RNode (it does not speak KISS to a host); it
+  - The LoRa radio (SX126x/SX127x) is optional and OFF until configured. The bench
+    evidence above covers T-Echo and Supreme SX1262 using PlatformIO firmware;
+    ESP-IDF board ports and other boards retain build/model coverage only.
+    The firmware is not an RNode (it does not speak KISS to a host); it
     is a Reticulum node with a LoRa interface. Bluetooth is not part of this firmware. Wi-Fi
     is a TCP client only (no access point mode, no Reticulum AutoInterface, no UDP, no TLS,
     no IFAC).
@@ -438,18 +456,20 @@ Limits
     long as the resolver takes; use an IP address if that matters.
   - Wi-Fi mode is not tested on hardware: only built. The application logic and the TCP
     client are tested on the host (above); the ESP-IDF Wi-Fi and lwIP glue, the
-    provisioning console and the NVS partition handling are compiled but never ran.
+    provisioning console and NVS handling in the ESP-IDF port remain unverified
+    on hardware. The PlatformIO console has been exercised on the Supreme and T-Echo.
   - nRF52840 boards have no Wi-Fi; their firmware (mcu/platformio) has the
-    serial mode only.
+    serial host transport and optional LoRa leaf/gateway modes.
   - AES is table-based software (not constant time with respect to cache timing);
     X25519/Ed25519 come from Monocypher. The ESP32 hardware crypto is not used.
-  - Not tested on hardware; only built, and run on the host.
+  - Hardware coverage is a short bench exchange, not range, sustained-load or
+    stock RNode interoperability evidence.
   - Leaf node unless the LoRa gateway mode is configured: at most 2 links, 8 remembered
     announces, 12 paths, 4 queued announces, 8 link table entries, 2 interfaces (see
     include/reticulum_c/rnc_profile_mcu.h).
   - Serial mode: the random numbers come from esp_fill_random with the SAR ADC entropy
-    source switched on (bootloader_random_enable), because the firmware does not run
-    the radio. Do not enable it together with an ADC user without reading the ESP-IDF
+    source switched on (bootloader_random_enable), because Wi-Fi and Bluetooth are
+    off. Do not enable it together with an ADC user without reading the ESP-IDF
     notes on random numbers. Wi-Fi mode does not call bootloader_random_enable: the
     radio is the entropy source.
   - The mcu profile caps packets at 500 bytes (the Reticulum default MTU); links

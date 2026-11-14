@@ -4,8 +4,15 @@ Include `<reticulum_c/rnc.h>` for values/crypto/framing and
 `<reticulum_c/rnc_link.h>` for the opaque link/channel state machine. Both headers
 support C++ inclusion. Serialize calls to an instance; no internal I/O loop,
 thread, socket or random-device access is owned by the protocol library.
-OpenSSL and instance creation allocate; Resources/services also allocate bounded
-transfer/event storage during use. All APIs require serialized access per instance.
+Instance creation allocates; the default OpenSSL backend and Resources/services
+also allocate during use. `-DRNC_CRYPTO=portable` selects the Monocypher-based
+backend without linking OpenSSL into the core. See [PROVENANCE.md](PROVENANCE.md)
+for its components and [mcu/README.txt](mcu/README.txt) for firmware integration.
+
+The capacities below describe the default host profile. `-DRNC_PROFILE=mcu`
+reduces tables, queues and Channel windows and caps MTU at 500;
+`RNC_PROFILE_HEADER` selects a custom profile. These constants size public
+structures: build the library and every consumer with the same profile.
 
 ## Identity, packet and framing
 
@@ -44,8 +51,9 @@ ratchet. It does not establish freshness, a usable route or application trust.
    public-only remote material. Authentication does not grant app permissions.
 6. `rnc_link_send()` queues a typed message up to `rnc_link_channel_mdu()` bytes
    (425 at default MTU). Configure the MTU before opening a link; negotiation
-   caps it to the peer's limit, at most 4096. Keep input on RNC_AGAIN, drain events
-   and retry. Types >=0xf000 are reserved; the Buffer API uses system type 0xff00.
+   caps it to the peer's limit, at most `RNC_MAX_MTU` (4096 on the host, 500 in
+   the mcu profile). Retain a send's payload on RNC_AGAIN, drain events and retry.
+   Types >=0xf000 are reserved; the Buffer API uses system type 0xff00.
    The default TX window is two messages; `rnc_link_configure_channel()` can
    enable bounded adaptive growth to 48. The RX reorder window is 48 slots.
 7. MESSAGE arrives in order with its type/sequence/payload. DELIVERED identifies
@@ -56,14 +64,22 @@ ratchet. It does not establish freshness, a usable route or application trust.
 
 The event queue has 64 entries. Channel input conservatively reserves 50 slots
 so a complete reorder window can be released atomically. Drain frequently.
+In the mcu profile these are six events, a four-slot RX window and a maximum
+four-message TX window; the initial TX window remains two.
 RNC_AGAIN does not commit the rejected operation. A crypto failure requires
 closing/recreating the instance. Treat malformed app framing according to the
 application protocol; unknown or forged receipts must not count as delivery.
 
-Handshake timeout is 30 seconds, active silence timeout 180 seconds. Initiators
-send keepalives every 30 seconds; correctly directed keepalive bytes extend
-liveness but are unauthenticated. Channel retry delay starts at three RTTs,
-clamped to 250–4000 ms, doubles per attempt and caps at 30 seconds. Up to five
+Handshake timeout defaults to 30 seconds. Before opening, configure a
+route-dependent timeout with `rnc_link_configure_establishment()`:
+first-hop timeout plus 6 seconds per hop (at least one hop). Active keepalive
+interval is RTT multiplied by 360/1.75, clamped to 5–360 seconds; use
+`rnc_link_keepalive_ms()` to read it. With no inbound traffic for twice that
+interval a link becomes STALE; it closes after a further four RTTs plus 5 seconds
+unless traffic resumes. Initiators send keepalives as the interval expires;
+correctly directed keepalive bytes extend liveness but are unauthenticated.
+Channel retry delay starts at three RTTs, clamped to 250–4000 ms, doubles per
+attempt and caps at 30 seconds. Up to five
 attempts retain their packet hashes; retries re-encrypt with fresh IVs.
 
 Input/output buffers and objects must not overlap. Functions document output
@@ -88,7 +104,8 @@ the instance's new data and receipt state.
 `rnc_service.h` sends complete MessagePack values inline or via Resources.
 Register paths with admission policy and service requests from polled events.
 Each instance permits one incoming and one outgoing Resource, eight pending
-requests and eight queued events. Completed malformed envelopes release their
+requests and eight queued events (four of each in the mcu profile).
+Completed malformed envelopes release their
 receive slot; event-queue backpressure retains completed input until drained.
 Late responses are discarded; request deadlines and the bounded replay cache
 do not guarantee durable exactly-once application effects.
@@ -123,6 +140,23 @@ forwarding and transit-link state. Supply interface IDs, incoming packets and
 both clocks; drain SEND/local-delivery events. Explicitly bind local links to
 the selected route/admitted ingress with `rnc_node_bind_link_on()`. Checkpoints
 are owner-signed public route records and remain configuration-bound.
+
+`rnc_transfer.h` composes links and Resources into bounded, in-memory file send
+and fetch jobs. Register the listener's destination on its borrowed node, feed
+LOCAL events, tick and poll results. The host owns files and must sanitize the
+received file name before writing it. Fetching is disabled without a fetch
+callback; admission defaults to the supplied identity allow-list unless
+`allow_all` is set.
+
+`rnc_discovery.h` encodes, validates and stores interface-discovery records;
+`rnc_stamp.h` provides the proof-of-work primitives, including a resumable
+search for event loops. These codecs do not connect interfaces themselves.
+`rnc_i2p.h` supplies destination/address codecs and SAM reply parsing; socket
+ownership stays with the host adapter.
+
+`rnc_log.h` supplies a process-wide callback and NOTICE default level. The library
+is silent until a callback is installed. Configure logging before concurrent
+use; the callback must be safe on each calling thread and copy messages it keeps.
 
 `rnc_host.h` belongs to the separate `reticulum_c::host` target. It owns POSIX
 descriptors, framing/IFAC, bounded outgoing queues and reconnects. Feed host
