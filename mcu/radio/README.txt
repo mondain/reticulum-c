@@ -1,12 +1,17 @@
 LoRa radio support for the reticulum-c microcontroller firmware
 ================================================================
 
-STATUS: written and tested on the host only. NOTHING HERE HAS EVER RUN ON A RADIO. The
-drivers were checked against software models of the chips that were written by the same
-author from the same datasheets, so a misreading of a datasheet would be in both. The over
-the air format was derived from the published RNode firmware (see "Provenance and
-licence") and has never been exchanged with a real RNode. Treat every claim of
-compatibility below as "derived and simulated", not "verified".
+STATUS: hardware bench exchange verified on 2026-11-14 with a LilyGo T-Echo leaf
+and a T-Beam Supreme SX1262 gateway. Settings: 915 MHz, 125 kHz bandwidth, SF8,
+CR 4/5, 0 dBm, 1% hourly airtime budget. Both radios completed transmissions
+and received frames with no CRC/TX failures during a short diagnostic capture.
+With normal firmware, a host client through USB -> Supreme -> LoRa reached the
+T-Echo at three hops, verified a 10-byte /echo reply and received /info; one
+request needed a retry. The first unsynchronized attempt timed out.
+
+This does not establish range, sustained-load reliability, other board pin maps,
+or on-air interoperability with stock RNode firmware. The additional chip models
+are authored from the same datasheets as the drivers and can share mistakes.
 
 What is here
 ------------
@@ -135,8 +140,8 @@ Not established
    taken from a datasheet table I could check; CAD is implemented and model-tested but the
    interface does not use it (it listens for the preamble and header instead).
  - The behaviour of the real chips at the edges of the datasheet's ranges.
- - AXP2101 power management (T-Beam Supreme): not implemented, so that board is listed but
-   not supported.
+ - T-Beam Supreme SX1262: AXP2101 ALDO3 radio power is implemented and checked
+   before SPI startup; the LR1121 version is not supported.
 
 Driver and HAL design
 ---------------------
@@ -227,8 +232,8 @@ that the entry is right; nothing was tested on a board.
                            ESP32                                    LDO2 -> radio, I2C      sequence is from the data
                                                                     SDA 21 SCL 22           sheet, untested; v1.2 (AXP2101)
                                                                                             NOT supported
- lilygo_t_beam_supreme     SX1262    12   13   11  10   5    4   1  AXP2101 needed         pins medium; NOT SUPPORTED
-                           ESP32-S3                                                         (no PMU driver)
+ lilygo_t_beam_supreme     SX1262    12   13   11  10   5    4   1  AXP2101 ALDO3 3.3 V    pins checked against LilyGo
+                           ESP32-S3                                                         TCXO 1.8 V, DIO2 switch
  lilygo_t3_s3 (SX1262)     SX1262     5    3    6   7   8   34  33  TCXO 1.8 V, DIO2 sw.  medium-high; other T3-S3
                            ESP32-S3                                                         variants (SX1276, SX1280,
                                                                                             LR1121) are not described
@@ -240,8 +245,8 @@ that the entry is right; nothing was tested on a board.
                            nRF52840                                  high, DIO2 sw.         does not enable DIO2 here;
                                                                                             this table does
 
-Not offered as an environment: the T-Beam Supreme (no PlatformIO board definition used,
-and the PMU is not supported), the T-Deck, boards with SX1280 or LR1121.
+The T-Beam Supreme SX1262 is offered as lilygo_t_beam_supreme (8 MB flash, native USB).
+Not offered as environments: the T-Deck and boards with SX1280 or LR1121.
 
 Tests (all on the host, label mcu; none of them proves anything about real radios)
 ----------------------------------------------------------------------------------

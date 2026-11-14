@@ -1,0 +1,22 @@
+{
+  "name": "reticulum-c-flasher",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build --base=./",
+    "test": "node --test tests/*.test.js",
+    "preview": "vite preview --host 127.0.0.1",
+    "test:ui": "playwright test"
+  },
+  "dependencies": {
+    "esptool-js": "0.5.7",
+    "jszip": "3.10.1",
+    "spark-md5": "3.0.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "vite": "8.3.8"
+  }
+}

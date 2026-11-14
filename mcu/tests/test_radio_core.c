@@ -5,6 +5,7 @@
  * check against a receiver written from the stock firmware's rules), the airtime budget
  * and the CSMA state machine, and the configuration parser. No hardware, no node. */
 #include "../radio/rnc_lora_air.h"
+#include "../radio/rnc_axp2101.h"
 #include "../radio/rnc_lora_cfg.h"
 #include "../radio/rnc_lora_mac.h"
 #include "../radio/rnc_lora_phy.h"
@@ -623,7 +624,61 @@ static void test_cfg(void) {
   CHECK(strstr(out, "error"));
 }
 
+typedef struct {
+  uint8_t regs[256];
+  unsigned calls, fail_at, voltage_writes, enable_writes;
+  int drop_voltage;
+} pmu_model;
+static int pmu_read(void *context, uint8_t reg, uint8_t *value) {
+  pmu_model *p = context;
+  if (++p->calls == p->fail_at) return -1;
+  *value = p->regs[reg];
+  return 0;
+}
+static int pmu_write(void *context, uint8_t reg, uint8_t value) {
+  pmu_model *p = context;
+  if (++p->calls == p->fail_at) return -1;
+  if (reg == 0x94) {
+    p->voltage_writes++;
+    if (p->drop_voltage) return 0;
+  } else if (reg == 0x90) {
+    CHECK_EQ(p->regs[0x94] & 0x1f, 28);
+    CHECK_EQ(p->voltage_writes, 1);
+    p->enable_writes++;
+  } else CHECK(0);
+  p->regs[reg] = value;
+  return 0;
+}
+static pmu_model pmu_new(void) {
+  pmu_model p = {0};
+  p.regs[3] = 0x4a;
+  p.regs[0x94] = 0xa3;
+  p.regs[0x90] = 0x89;
+  return p;
+}
+static void test_axp2101(void) {
+  pmu_model p = pmu_new();
+  unsigned i;
+  CHECK_EQ(rnc_axp2101_enable_radio(&p, pmu_read, pmu_write), 0);
+  CHECK_EQ(p.regs[0x94], 0xbc); /* 3.3 V, unrelated bits retained */
+  CHECK_EQ(p.regs[0x90], 0x8d); /* only ALDO3 enabled */
+  CHECK_EQ(p.enable_writes, 1);
+  for (i = 1; i <= 7; ++i) {
+    p = pmu_new(); p.fail_at = i;
+    CHECK(rnc_axp2101_enable_radio(&p, pmu_read, pmu_write) != 0);
+    CHECK_EQ(p.calls, i);
+    if (i <= 6) CHECK_EQ(p.enable_writes, 0);
+  }
+  p = pmu_new(); p.regs[3] = 0x41; /* AXP192 must not be programmed as AXP2101 */
+  CHECK(rnc_axp2101_enable_radio(&p, pmu_read, pmu_write) != 0);
+  CHECK_EQ(p.voltage_writes, 0); CHECK_EQ(p.enable_writes, 0);
+  p = pmu_new(); p.drop_voltage = 1;
+  CHECK(rnc_axp2101_enable_radio(&p, pmu_read, pmu_write) != 0);
+  CHECK_EQ(p.enable_writes, 0);
+}
+
 int main(void) {
+  test_axp2101();
   test_toa();
   test_ldro();
   test_bitrate_and_preamble();

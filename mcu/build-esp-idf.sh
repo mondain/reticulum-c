@@ -110,17 +110,55 @@ grep -q "^$BOOT_OFFSET bootloader/bootloader.bin" "$BUILD/flash_args" || {
 }
 (cd "$BUILD" && python3 -m esptool --chip "$CHIP" merge_bin -o "$OUT/merged.bin" @flash_args)
 
+# Match the machine-readable PlatformIO metadata contract. These generic ESP-IDF
+# images remain release downloads; the web catalog accepts exact board builds only.
+python3 - "$BUILD" "$OUT" "$CHIP" <<'PYFLASH'
+import hashlib
+import json
+from pathlib import Path
+import shlex
+import sys
+
+build, out = map(Path, sys.argv[1:3])
+lines = (build / "flash_args").read_text().splitlines()
+options = shlex.split(lines[0])
+settings = dict(zip(options[::2], options[1::2]))
+parts = []
+for line in lines[1:]:
+    if not line.strip():
+        continue
+    offset, source = shlex.split(line)
+    name = "reticulum-c-mcu.bin" if source == "reticulum_c_mcu.bin" else Path(source).name
+    parts.append({"name": name, "offset": int(offset, 0)})
+metadata = {
+    "schema": 1, "family": "esp32", "chip": sys.argv[3],
+    "flashMode": settings["--flash_mode"],
+    "flashFrequency": settings["--flash_freq"],
+    "flashSize": settings["--flash_size"], "mergedOffset": 0,
+    "partitionTableOffset": next(p["offset"] for p in parts if p["name"] == "partition-table.bin"),
+    "parts": parts, "files": {},
+}
+for name in [p["name"] for p in parts] + ["merged.bin"]:
+    data = (out / name).read_bytes()
+    metadata["files"][name] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+(out / "flash.json").write_text(json.dumps(metadata, indent=2) + "\n")
+PYFLASH
+
 APP_OFFSET=$(sed -n 's/^\(0x[0-9a-f]*\) reticulum_c_mcu.bin$/\1/p' "$BUILD/flash_args")
 PT_OFFSET=$(sed -n 's/^\(0x[0-9a-f]*\) partition_table\/partition-table.bin$/\1/p' "$BUILD/flash_args")
 FLASH_OPTS=$(head -1 "$BUILD/flash_args")
 cat > "$OUT/flash.txt" <<EOF
 reticulum-c $VERSION example firmware, ESP-IDF build for $CHIP.
 
-Flash the single merged image (all parts, from address 0x0 of the flash):
+Initial installation or intentional identity reset only:
+
+WARNING: merged.bin overwrites the identity NVS with erased bytes. Do not use it
+to update a provisioned node whose identity must survive.
 
   python3 -m esptool --chip $CHIP -p /dev/ttyUSB0 -b 460800 write_flash 0x0 merged.bin
 
-Or flash the parts separately (same result):
+Update an existing node by flashing the parts separately (preserves identity NVS
+and provisioning settings with this partition layout):
 
   python3 -m esptool --chip $CHIP -p /dev/ttyUSB0 -b 460800 write_flash $FLASH_OPTS \\
     $BOOT_OFFSET bootloader.bin $PT_OFFSET partition-table.bin $APP_OFFSET reticulum-c-mcu.bin

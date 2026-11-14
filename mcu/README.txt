@@ -19,9 +19,12 @@ microcontroller and an example firmware you can flash today:
                     T-Echo): see mcu/platformio/README.txt; build with mcu/build-platformio.sh
 
 STATUS: the firmware builds for esp32 and esp32s3 and the same application logic
-passes the host tests against reticulum-c-node and the reference Reticulum. It has
-NOT been run on hardware yet. The LoRa radio support (below) is new and has only ever
-run against software models of the radio chips: nothing has been sent or received on air.
+passes the host tests against reticulum-c-node and the reference Reticulum.
+Hardware bench evidence: T-Echo leaf and Supreme SX1262 gateway at 915 MHz,
+BW 125 kHz, SF8, CR 4/5, 0 dBm, 1% airtime budget. A host client reached the
+T-Echo through USB -> Supreme -> LoRa and verified /echo (10 bytes) and /info
+(three hops); one request required a retry. Other boards, range, sustained load
+and stock RNode radio interoperability remain unverified.
 
 What the firmware is
 --------------------
@@ -73,7 +76,14 @@ contains it.
 
 Flashing
 --------
+Initial installation or intentional identity reset only:
+
   python3 -m esptool --chip esp32s3 -p /dev/ttyUSB0 -b 460800 write_flash 0x0 merged.bin
+
+WARNING: merged.bin contains erased padding over the identity NVS partition.
+Flashing it resets the identity and clock mark. To update an existing node,
+use the separate-parts command in flash.txt; with an unchanged partition layout
+it writes only the bootloader, partition table and application, preserving NVS.
 
 (see flash.txt in OUTDIR; use /dev/ttyACM0 for a native USB port). If the board does
 not enter the bootloader by itself, hold BOOT, tap RESET, release BOOT.
@@ -82,8 +92,8 @@ The partition table (mcu/esp-idf/example/partitions.csv) has the application at 
 (1.5 MB), the identity NVS at 0x9000 and a separate 16 KB NVS partition "rnccfg" at
 0x190000 for the Wi-Fi settings. The partition table is part of merged.bin; the
 bootloader, the table and the application sit at the same offsets as in earlier
-versions, so the identity stored in the "nvs" partition survives an update by
-esptool. The rnccfg partition is not part of merged.bin: flashing does not touch the
+versions, so the identity stored in the "nvs" partition survives a separate-parts
+update. The rnccfg partition is not part of merged.bin: flashing does not touch the
 provisioned settings.
 
 Settings are in "idf.py menuconfig" under "Reticulum MCU example" (serial port, UART
@@ -336,7 +346,8 @@ described in mcu/radio/README.txt; the essentials:
   Boards (variants, pins and how sure I am: mcu/radio/README.txt): Heltec WiFi LoRa 32 V3
   (SX1262), V2 (SX1276), LilyGo T-Beam v1.0/1.1 (SX1276, AXP192 radio rail switched over
   I2C), LilyGo T3-S3 (SX1262 variant), RAK4631 (SX1262), Heltec T114 (SX1262), LilyGo T-Echo
-  (SX1262). The T-Beam Supreme (AXP2101) and the T-Beam v1.2 are not supported.
+  (SX1262). The T-Beam Supreme SX1262 is supported with AXP2101 ALDO3 power control;
+  Supreme LR1121 variants and the T-Beam v1.2 are not supported.
 
   Memory (ESP-IDF, measured): the LoRa support adds about 14.7 KB of flash on esp32 (775264
   -> 789984 bytes) and 14.7 KB on esp32s3 (765040 -> 779744) to an image without a board;

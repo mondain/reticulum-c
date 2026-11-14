@@ -1176,10 +1176,10 @@ static void downloads_and_media(void) {
 static void media_conversion(void) {
   char dir[160], script[220];
   fileout fo;
-  char oldpath[4096] = "";
   const char *op = getenv("PATH");
+  char *oldpath = op ? strdup(op) : NULL;
   FILE *f;
-  snprintf(oldpath, sizeof(oldpath), "%s", op ? op : "/usr/bin:/bin");
+  CHECK(!op || oldpath);
   snprintf(dir, sizeof(dir), "%s/fakebin", root);
   sh("mkdir -p %s", dir);
   /* an encoder that writes a minimal WebP (VP8X, 1x1) whatever it reads */
@@ -1189,9 +1189,13 @@ static void media_conversion(void) {
   fclose(f);
   chmod(script, 0755);
   {
-    char np[4400];
-    snprintf(np, sizeof(np), "%s:%s", dir, oldpath);
-    setenv("PATH", np, 1);
+    const char *search_path = oldpath ? oldpath : "/usr/bin:/bin";
+    size_t size = strlen(dir) + strlen(search_path) + 2;
+    char *np = malloc(size);
+    CHECK(np);
+    snprintf(np, size, "%s:%s", dir, search_path);
+    CHECK(setenv("PATH", np, 1) == 0);
+    free(np);
   }
   mc_winner = -1;
   setenv("RNGIT_MEDIA_BACKEND", "magick", 1);
@@ -1215,7 +1219,8 @@ static void media_conversion(void) {
   CHECK(fo.answered && fo.size == 10 && !strcmp(fo.name, "pic.png"));
   free(fo.data);
   unsetenv("RNGIT_MEDIA_BACKEND");
-  setenv("PATH", oldpath, 1);
+  CHECK((oldpath ? setenv("PATH", oldpath, 1) : unsetenv("PATH")) == 0);
+  free(oldpath);
   mc_winner = -1;
 }
 static void templates(void) {

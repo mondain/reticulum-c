@@ -106,6 +106,10 @@ menu "Reticulum MCU example"
             bool "LilyGo T-Beam v1.0/v1.1 (ESP32, SX1276, AXP192)"
             depends on IDF_TARGET_ESP32
 
+        config RETICULUM_MCU_LORA_BOARD_TBEAM_SUPREME
+            bool "LilyGo T-Beam Supreme (ESP32-S3, SX1262, AXP2101)"
+            depends on IDF_TARGET_ESP32S3
+
         config RETICULUM_MCU_LORA_BOARD_T3S3
             bool "LilyGo T3-S3 (ESP32-S3, SX1262)"
             depends on IDF_TARGET_ESP32S3
@@ -116,6 +120,7 @@ menu "Reticulum MCU example"
         default "heltec_wifi_lora_32_V3" if RETICULUM_MCU_LORA_BOARD_HELTEC_V3
         default "heltec_wifi_lora_32_V2" if RETICULUM_MCU_LORA_BOARD_HELTEC_V2
         default "ttgo_t_beam" if RETICULUM_MCU_LORA_BOARD_TBEAM
+        default "lilygo_t_beam_supreme" if RETICULUM_MCU_LORA_BOARD_TBEAM_SUPREME
         default "lilygo_t3_s3" if RETICULUM_MCU_LORA_BOARD_T3S3
         default ""
 
