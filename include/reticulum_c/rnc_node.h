@@ -100,7 +100,8 @@ typedef enum rnc_interface_mode {
   RNC_MODE_GATEWAY,
   RNC_MODE_ACCESS_POINT,
   RNC_MODE_ROAMING,
-  RNC_MODE_BOUNDARY
+  RNC_MODE_BOUNDARY,
+  RNC_MODE_INTERNAL /* reference MODE_INTERNAL: joins the nodes of one internal network */
 } rnc_interface_mode;
 /* Ingress/egress control (manual 8.18-8.20), enabled by default. Zero fields
  * select the reference defaults: new_time 7200s, burst_hold 15s, burst_penalty
@@ -127,6 +128,11 @@ typedef struct rnc_interface_policy {
    * other interfaces. GATEWAY, ACCESS_POINT and ROAMING always do; BOUNDARY
    * searches boundary and gateway peers; FULL only when this is set. */
   int recursive_path_requests;
+  /* Reference announces_from_internal (default on) and announces_to_internal (default off).
+   * An interface with no_announces_from_internal set never passes on announces learned on an
+   * INTERNAL interface. An interface with announces_to_internal set lets its announces go to
+   * INTERNAL interfaces even from a BOUNDARY one. */
+  int no_announces_from_internal, announces_to_internal;
   rnc_ingress_policy ingress;
 } rnc_interface_policy;
 rnc_result rnc_node_interface_policy(rnc_node *node, uint32_t interface_id,
@@ -343,6 +349,21 @@ rnc_result rnc_node_unbind_link(rnc_node *node, const uint8_t link_id[16]);
 size_t rnc_node_link_count(const rnc_node *node, int active_only);
 rnc_result rnc_node_route_at(const rnc_node *node, size_t ordinal,
                              uint64_t now_ms, rnc_route *route);
+/* Announce rate table, the entries the reference reports over RPC as `rate_table`:
+ * one per destination heard on an interface with an announce rate target. Times are the
+ * node's monotonic milliseconds (the caller converts to wall time); at most
+ * RNC_RATE_TIMESTAMPS recent announce times are kept, oldest first. RNC_AGAIN past the end. */
+#ifndef RNC_RATE_TIMESTAMPS
+#define RNC_RATE_TIMESTAMPS 16u
+#endif
+typedef struct rnc_rate_entry {
+  uint8_t destination[16];
+  unsigned violations;
+  uint64_t last_ms, blocked_until_ms;
+  size_t timestamp_count;
+  uint64_t timestamps_ms[RNC_RATE_TIMESTAMPS];
+} rnc_rate_entry;
+rnc_result rnc_node_rate_at(const rnc_node *node, size_t ordinal, rnc_rate_entry *entry);
 /* Owner-signed, versioned checkpoint of verified public routes/announces.
  * Export needs the node owner's private identity, import its public identity.
  * Import is atomic and only allowed into an empty learner with configured

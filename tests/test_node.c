@@ -592,6 +592,42 @@ static void hops_to(void) {
   rnc_node_free(na);
   rnc_node_free(nb);
 }
+/* Transport hop limit (PATHFINDER_M 128): the reference counts a hop on arrival and accepts an
+ * announce up to 128 hops, but its outbound path refuses a packet above 127, so a path at 128
+ * hops is learned and never rebroadcast. */
+static void announce_hop_limit(void) {
+  rnc_identity src = identity(), self = identity();
+  rnc_packet announce, relayed;
+  rnc_node_event e;
+  rnc_route route;
+  unsigned hops, relayed_count;
+  for (hops = 125; hops <= 128; hops++) {
+    rnc_node *n = rnc_node_new(&self, 1, rng, NULL);
+    CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK &&
+          rnc_node_add_interface(n, 2, 1000000) == RNC_OK);
+    CHECK(rnc_announce_create(&src, "hop.limit", NULL, 0, 1000, rng, NULL, &announce) == RNC_OK);
+    announce.hops = (uint8_t)hops;
+    if (hops <= 127) {
+      CHECK(rnc_node_input(n, 1, &announce, 1000, 0) == RNC_OK);
+      CHECK(rnc_node_lookup(n, announce.destination, 0, &route) == RNC_OK && route.hops == hops + 1u);
+    } else {
+      CHECK(rnc_node_input(n, 1, &announce, 1000, 0) != RNC_OK); /* 129 hops: refused */
+      CHECK(rnc_node_lookup(n, announce.destination, 0, &route) != RNC_OK);
+    }
+    discard(n);
+    CHECK(rnc_node_tick(n, 1000, 2000) == RNC_OK);
+    relayed_count = 0;
+    while (rnc_node_poll(n, &e) == RNC_OK)
+      if (e.type == RNC_NODE_SEND && e.interface_id == 2) {
+        relayed = e.packet;
+        relayed_count++;
+      }
+    (void)relayed;
+    /* up to 127 hops after arrival the announce is passed on; at 128 it is only learned */
+    CHECK(relayed_count == (hops + 1u <= 127u ? 1u : 0u));
+    rnc_node_free(n);
+  }
+}
 /* Destination.accepts_links: link requests to a destination that does not
  * accept them are dropped before the application sees them. */
 static void accepts_links(void) {
@@ -653,6 +689,8 @@ int main(int argc, char **argv) {
     request_path_options();
   else if (!strcmp(argv[1], "hops_to"))
     hops_to();
+  else if (!strcmp(argv[1], "announce_hop_limit"))
+    announce_hop_limit();
   else if (!strcmp(argv[1], "accepts_links"))
     accepts_links();
   else if (!strcmp(argv[1], "destination_data"))

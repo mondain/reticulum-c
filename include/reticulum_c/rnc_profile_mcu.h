@@ -102,6 +102,10 @@
 #ifndef RNC_NODE_RATES
 #define RNC_NODE_RATES 16u
 #endif
+/* recent announce times kept per rate table entry (16 on a host) */
+#ifndef RNC_RATE_TIMESTAMPS
+#define RNC_RATE_TIMESTAMPS 4u
+#endif
 #ifndef RNC_NODE_HELD
 #define RNC_NODE_HELD 2u
 #endif

@@ -37,6 +37,24 @@ static void config_file(const char *path, const char *text) {
   FILE *f = fopen(path, "w");
   CHECK(f && fputs(text, f) >= 0 && !fclose(f));
 }
+static void internal_mode_config_test(void) {
+  char dir[] = "/tmp/rnc-config-internal-XXXXXX", path[256];
+  config c;
+  CHECK(mkdtemp(dir) && snprintf(path, sizeof(path), "%s/config", dir) > 0);
+  config_file(path,
+              "[interfaces]\n[[A]]\ntype=TCPClientInterface\ntarget_host=127.0.0.1\ntarget_port=7001\n"
+              "mode=internal\nannounces_from_internal=No\nannounces_to_internal=Yes\n"
+              "[[B]]\ntype=SerialInterface\nport=/dev/null\n");
+  CHECK(read_config(path, &c));
+  CHECK(c.interfaces[0].host.mode == RNC_MODE_INTERNAL &&
+        c.interfaces[0].host.no_announces_from_internal == 1 &&
+        c.interfaces[0].host.announces_to_internal == 1);
+  CHECK(c.interfaces[1].host.mode == RNC_MODE_FULL && c.interfaces[1].host.no_announces_from_internal == 0 &&
+        c.interfaces[1].host.announces_to_internal == 0); /* the reference defaults */
+  config_file(path, "[interfaces]\n[[A]]\ntype=SerialInterface\nport=/dev/null\nannounces_to_internal=maybe\n");
+  CHECK(!read_config(path, &c));
+  CHECK(!unlink(path) && !rmdir(dir));
+}
 static void stable_interface_test(void) {
   char dir[] = "/tmp/rnc-config-binding-XXXXXX", path[256];
   config first, reordered, changed;
@@ -127,6 +145,13 @@ static void checkpoint_retry_test(void) {
   CHECK(!unlink(path) && !rmdir(dir));
   rnc_node_free(node);
 }
+static int has(const uint8_t *buf, size_t size, const char *text, size_t n) {
+  size_t i;
+  for (i = 0; i + n <= size; i++)
+    if (!memcmp(buf + i, text, n))
+      return 1;
+  return 0;
+}
 int main(void) {
   rnc_identity id;
   uint8_t private_key[64] = {1}, out[4096];
@@ -147,6 +172,36 @@ int main(void) {
   CHECK(size > 20);
   query("path_table", node, host, &id, &cfg, out, &size);
   CHECK(size == 1 && out[0] == 0x90);
+  /* rate_table: empty without entries, then one dict with the reference's five keys */
+  query("rate_table", node, host, &id, &cfg, out, &size);
+  CHECK(size == 1 && out[0] == 0x90);
+  {
+    rnc_interface_policy policy = {0};
+    rnc_identity src;
+    rnc_packet a;
+    uint8_t key2[64] = {2};
+    rnc_node *n2;
+    rnc_host *h2;
+    CHECK(rnc_identity_from_private(&src, key2) == RNC_OK);
+    n2 = rnc_node_new(&id, 1, rng, NULL);
+    CHECK(n2 && rnc_node_add_interface(n2, 1, 1000000) == RNC_OK &&
+          rnc_node_add_interface(n2, 2, 1000000) == RNC_OK); /* the table fills when there is somewhere to pass an announce on */
+    policy.announce_rate_target = 60;
+    policy.announce_rate_grace = 3;
+    policy.announce_rate_penalty = 120;
+    CHECK(rnc_node_interface_policy(n2, 1, &policy) == RNC_OK);
+    CHECK(rnc_announce_create(&src, "rate.rpc", NULL, 0, 1000, rng, NULL, &a) == RNC_OK);
+    CHECK(rnc_node_input(n2, 1, &a, 1000, 0) == RNC_OK);
+    h2 = rnc_host_new(n2);
+    CHECK(h2);
+    query("rate_table", n2, h2, &id, &cfg, out, &size);
+    CHECK(size > 40 && out[0] == 0x91 && out[1] == 0x85); /* one entry, a map of five */
+    CHECK(has(out, size, "hash", 4) && has(out, size, "last", 4) &&
+          has(out, size, "rate_violations", 15) && has(out, size, "blocked_until", 13) &&
+          has(out, size, "timestamps", 10));
+    rnc_host_free(h2);
+    rnc_node_free(n2);
+  }
   query("next_hop", node, host, &id, &cfg, out, &size);
   CHECK(size == 1 && out[0] == 0xc0);
   query("link_count", node, host, &id, &cfg, out, &size);
@@ -167,6 +222,7 @@ int main(void) {
   rnc_node_free(node);
   checkpoint_retry_test();
   stable_interface_test();
+  internal_mode_config_test();
   puts("node RPC response tests passed");
   return 0;
 }

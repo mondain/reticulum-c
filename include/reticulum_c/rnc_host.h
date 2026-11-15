@@ -108,6 +108,7 @@ typedef struct rnc_host_config {
   /* Per-destination announce rate control; see rnc_interface_policy. */
   uint32_t announce_rate_target, announce_rate_grace, announce_rate_penalty;
   int recursive_path_requests;  /* see rnc_interface_policy */
+  int no_announces_from_internal, announces_to_internal; /* see rnc_interface_policy */
   rnc_ingress_policy ingress;   /* zero = reference defaults */
   rnc_fast_flap fast_flap;      /* TCP_LISTEN only; off by default */
   /* TCP_CONNECT: retry pacing and limits (0 = reference defaults: 5 s wait,

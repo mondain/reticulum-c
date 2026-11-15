@@ -146,6 +146,7 @@ static void rate(void) {
   rnc_identity src;
   rnc_packet a;
   rnc_route route;
+  rnc_rate_entry entry;
   policy.announce_rate_target = 3600;
   policy.announce_rate_grace = 1;
   policy.announce_rate_penalty = 7200;
@@ -155,12 +156,23 @@ static void rate(void) {
   CHECK(rnc_node_input(n, 1, &a, 1000, 0) == RNC_OK);
   CHECK(rnc_node_tick(n, 1000, 600) == RNC_OK);
   CHECK(sends_on(n, 2) == 1);
+  /* the table the reference reports over RPC: hash, last, rate_violations, blocked_until,
+   * timestamps (one per announce seen) */
+  CHECK(rnc_node_rate_at(n, 0, &entry) == RNC_OK && !memcmp(entry.destination, a.destination, 16) &&
+        entry.violations == 0 && entry.last_ms == 0 && entry.blocked_until_ms == 0 &&
+        entry.timestamp_count == 1 && entry.timestamps_ms[0] == 0);
+  CHECK(rnc_node_rate_at(n, 1, &entry) == RNC_AGAIN);
   a = announce_from(&src, 1010); /* first violation, within grace */
   CHECK(rnc_node_input(n, 1, &a, 1010, 10000) == RNC_OK);
+  CHECK(rnc_node_rate_at(n, 0, &entry) == RNC_OK && entry.violations == 1 && entry.last_ms == 10000 &&
+        entry.blocked_until_ms == 0 && entry.timestamp_count == 2 && entry.timestamps_ms[1] == 10000);
   CHECK(rnc_node_tick(n, 1010, 10600) == RNC_OK);
   CHECK(sends_on(n, 2) >= 1);
   a = announce_from(&src, 1020); /* second violation: blocked */
   CHECK(rnc_node_input(n, 1, &a, 1020, 20000) == RNC_OK);
+  /* blocked until last (10 s) + target (3600 s) + penalty (7200 s) */
+  CHECK(rnc_node_rate_at(n, 0, &entry) == RNC_OK && entry.violations == 2 &&
+        entry.blocked_until_ms == 10000u + 3600000u + 7200000u && entry.timestamp_count == 3);
   /* Only the second announce's pending retry may go out, not the third. */
   CHECK(rnc_node_tick(n, 1020, 20600) == RNC_OK);
   CHECK(rnc_node_tick(n, 1020, 60000) == RNC_OK);
@@ -168,6 +180,125 @@ static void rate(void) {
   CHECK(rnc_node_lookup(n, a.destination, 60000, &route) == RNC_OK &&
         route.announced_at == 1020);
   rnc_node_free(n);
+}
+/* MODE_INTERNAL (reference Interface.MODE_INTERNAL, with announces_from_internal and
+ * announces_to_internal): what an announce learned on one interface may be passed on to. */
+static void internal_mode(void) {
+  rnc_interface_policy in = {0}, out = {0};
+  rnc_identity src;
+  rnc_packet a;
+  rnc_node *n;
+  /* out = INTERNAL: an announce from a BOUNDARY interface is not passed in ... */
+  in.mode = RNC_MODE_BOUNDARY;
+  out.mode = RNC_MODE_INTERNAL;
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  CHECK(rnc_identity_generate(&src, rng, NULL) == RNC_OK);
+  a = announce_from(&src, 1000);
+  CHECK(rnc_node_input(n, 1, &a, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1000, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 0);
+  rnc_node_free(n);
+  /* ... unless that interface announces_to_internal */
+  in.announces_to_internal = 1;
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  a = announce_from(&src, 1001);
+  CHECK(rnc_node_input(n, 1, &a, 1001, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1001, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 1);
+  rnc_node_free(n);
+  /* a plain interface feeds an INTERNAL one */
+  memset(&in, 0, sizeof(in));
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  a = announce_from(&src, 1002);
+  CHECK(rnc_node_input(n, 1, &a, 1002, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1002, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 1);
+  rnc_node_free(n);
+  /* an interface that refuses announces from INTERNAL ones (announces_from_internal off) */
+  memset(&in, 0, sizeof(in));
+  memset(&out, 0, sizeof(out));
+  in.mode = RNC_MODE_INTERNAL;
+  out.no_announces_from_internal = 1;
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  a = announce_from(&src, 1003);
+  CHECK(rnc_node_input(n, 1, &a, 1003, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1003, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 0);
+  rnc_node_free(n);
+  /* default: INTERNAL to a plain interface is passed on */
+  memset(&out, 0, sizeof(out));
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  a = announce_from(&src, 1004);
+  CHECK(rnc_node_input(n, 1, &a, 1004, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1004, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 1);
+  rnc_node_free(n);
+}
+/* An INTERNAL interface is not held to the announce bandwidth cap (the reference sends there
+ * outside the queueing branch): a burst goes out together instead of one per interval. */
+static void internal_no_cap(void) {
+  rnc_interface_policy out = {0};
+  rnc_identity src[3];
+  rnc_packet a;
+  rnc_node *n;
+  unsigned i;
+  out.mode = RNC_MODE_INTERNAL;
+  n = make(1, 0, NULL);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  for (i = 0; i < 3; i++) {
+    CHECK(rnc_identity_generate(&src[i], rng, NULL) == RNC_OK);
+    a = announce_from(&src[i], 1000);
+    CHECK(rnc_node_input(n, 1, &a, 1000, 0) == RNC_OK);
+  }
+  CHECK(rnc_node_tick(n, 1000, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 3);
+  rnc_node_free(n);
+}
+/* Answering a path request from a known path (reference Transport.path_request): the answer waits
+ * PATH_REQUEST_GRACE (0.4 s) so directly reachable peers can answer first, 1.5 s more on a
+ * roaming interface, and goes out at once to a local client. A roaming interface is not answered
+ * when the path comes from that same interface. */
+static size_t answered_after(rnc_interface_mode mode, int local, int path_on_asker, uint64_t tick_ms) {
+  rnc_interface_policy ask = {0};
+  rnc_identity src;
+  rnc_packet a, request;
+  uint8_t tag[16] = {7}, dest[16];
+  rnc_node *n = make(1, 0, NULL);
+  size_t c;
+  ask.mode = mode;
+  CHECK(rnc_node_interface_policy(n, 2, &ask) == RNC_OK);
+  if (local)
+    CHECK(rnc_node_local_interface(n, 2, 1) == RNC_OK);
+  CHECK(rnc_identity_generate(&src, rng, NULL) == RNC_OK);
+  a = announce_from(&src, 1000);
+  CHECK(rnc_node_input(n, path_on_asker ? 2 : 1, &a, 1000, 0) == RNC_OK);
+  memcpy(dest, a.destination, 16);
+  CHECK(rnc_node_tick(n, 1000, 700) == RNC_OK);
+  while (sends_on(n, 1) + sends_on(n, 2) > 0) {
+  }
+  CHECK(rnc_path_request_create(dest, NULL, tag, sizeof(tag), &request) == RNC_OK);
+  CHECK(rnc_node_input(n, 2, &request, 1001, 1000) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1001, 1000 + tick_ms) == RNC_OK);
+  c = sends_on(n, 2);
+  rnc_node_free(n);
+  return c;
+}
+static void path_response_grace(void) {
+  /* a known path on another interface is answered after the 0.4 s grace, not before */
+  CHECK(answered_after(RNC_MODE_FULL, 0, 0, 399) == 0);
+  CHECK(answered_after(RNC_MODE_FULL, 0, 0, 400) == 1);
+  /* a local client gets the answer at once */
+  CHECK(answered_after(RNC_MODE_FULL, 1, 0, 0) == 1);
+  /* a roaming interface waits another 1.5 s for better connected peers */
+  CHECK(answered_after(RNC_MODE_ROAMING, 0, 0, 1899) == 0);
+  CHECK(answered_after(RNC_MODE_ROAMING, 0, 0, 1900) == 1);
+  /* a roaming interface is never told about a path that lies behind itself */
+  CHECK(answered_after(RNC_MODE_ROAMING, 0, 1, 5000) == 0);
 }
 /* Locally originated announces are never sent on access-point interfaces. */
 static void access_point(void) {
@@ -224,6 +355,12 @@ int main(int argc, char **argv) {
     rate();
   else if (!strcmp(argv[1], "access_point"))
     access_point();
+  else if (!strcmp(argv[1], "path_response_grace"))
+    path_response_grace();
+  else if (!strcmp(argv[1], "internal_mode"))
+    internal_mode();
+  else if (!strcmp(argv[1], "internal_no_cap"))
+    internal_no_cap();
   else
     return 2;
   return 0;

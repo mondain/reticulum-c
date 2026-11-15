@@ -146,6 +146,8 @@ static unsigned mode_number(const rnc_host_status *s) {
     return 5u;
   case RNC_MODE_GATEWAY:
     return 6u;
+  case RNC_MODE_INTERNAL:
+    return 7u;
   default:
     return 1u;
   }
@@ -327,6 +329,33 @@ static void write_path_table(rnc_rpc_writer *w, rnc_host *h, rnc_node *node,
         key_string(w, "interface", "unknown");
     }
 }
+/* Announce rate table as Reticulum.get_rate_table reports it: a list of dicts with the
+ * destination hash, the time of the last counted announce, the violation count, the end of
+ * any block and the recent announce times. The node keeps monotonic milliseconds; these are
+ * shown as wall time. A block that never happened is 0, as in the reference. */
+static void write_rate_table(rnc_rpc_writer *w, rnc_node *node, uint64_t now) {
+  rnc_rate_entry e;
+  size_t i, k, count = 0;
+  double unix_now = (double)time(NULL);
+  while (rnc_node_rate_at(node, count, &e) == RNC_OK)
+    ++count;
+  (void)rnc_rpc_write_array(w, count);
+  for (i = 0; i < count && rnc_node_rate_at(node, i, &e) == RNC_OK; ++i) {
+    (void)rnc_rpc_write_map(w, 5);
+    (void)rnc_rpc_write_string(w, "hash");
+    (void)rnc_rpc_write_bin(w, e.destination, 16);
+    key_real(w, "last", unix_now + ((double)e.last_ms - (double)now) / 1000.0);
+    key_uint(w, "rate_violations", e.violations);
+    if (e.blocked_until_ms)
+      key_real(w, "blocked_until", unix_now + ((double)e.blocked_until_ms - (double)now) / 1000.0);
+    else
+      key_uint(w, "blocked_until", 0);
+    (void)rnc_rpc_write_string(w, "timestamps");
+    (void)rnc_rpc_write_array(w, e.timestamp_count);
+    for (k = 0; k < e.timestamp_count; ++k)
+      (void)rnc_rpc_write_real(w, unix_now + ((double)e.timestamps_ms[k] - (double)now) / 1000.0);
+  }
+}
 /* identity hash -> {source, until, reason}, as Transport.blackholed_identities */
 static void write_blackhole_list(rnc_rpc_writer *w, rnc_node *node) {
   rnc_blackhole_entry e;
@@ -426,7 +455,7 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
     (void)rnc_rpc_write_real(&w, bitrate ? 6.0 + 8000.0 / bitrate : 0);
     break;
   case RNC_RPC_RATE_TABLE:
-    (void)rnc_rpc_write_array(&w, 0);
+    write_rate_table(&w, node, now);
     break;
   case RNC_RPC_BLACKHOLED_IDENTITIES:
     write_blackhole_list(&w, node);

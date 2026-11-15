@@ -21,6 +21,8 @@
 #define PATH_LIFETIME UINT64_C(604800000)
 #define PACKET_LIFETIME UINT64_C(300000)
 #define REQUEST_LIFETIME UINT64_C(15000)
+#define PATH_REQUEST_GRACE UINT64_C(400)   /* Transport.PATH_REQUEST_GRACE: let direct peers answer first */
+#define PATH_REQUEST_RG UINT64_C(1500)     /* Transport.PATH_REQUEST_RG: extra wait on roaming interfaces */
 #ifndef RNC_NODE_ANNOUNCES
 #define RNC_NODE_ANNOUNCES 64u
 #endif
@@ -49,7 +51,7 @@ typedef struct node_interface {
   int local;
   rnc_interface_mode mode;
   uint32_t cap, rate_target, rate_grace, rate_penalty;
-  int recursive;
+  int recursive, no_from_internal, to_internal;
   rnc_ingress_policy ingress;
   uint64_t created, announce_after;
   node_freq ia, ip, op;
@@ -88,6 +90,8 @@ typedef struct node_rate {
   uint8_t destination[16];
   unsigned violations;
   uint64_t last, blocked_until, touched;
+  size_t stamps;
+  uint64_t stamp[RNC_RATE_TIMESTAMPS];
 } node_rate;
 typedef struct node_route {
   int used;
@@ -466,7 +470,7 @@ rnc_result rnc_node_local_interface(rnc_node *n, uint32_t id, int local) {
 rnc_result rnc_node_interface_policy(rnc_node *n, uint32_t id,
                                      const rnc_interface_policy *policy) {
   node_interface *i;
-  if (!n || !policy || policy->mode > RNC_MODE_BOUNDARY ||
+  if (!n || !policy || policy->mode > RNC_MODE_INTERNAL ||
       policy->announce_cap_permille > 1000u)
     return RNC_INVALID;
   i = interface(n, id);
@@ -478,6 +482,8 @@ rnc_result rnc_node_interface_policy(rnc_node *n, uint32_t id,
   i->rate_grace = policy->announce_rate_grace;
   i->rate_penalty = policy->announce_rate_penalty;
   i->recursive = policy->recursive_path_requests != 0;
+  i->no_from_internal = policy->no_announces_from_internal != 0;
+  i->to_internal = policy->announces_to_internal != 0;
   i->ingress = policy->ingress;
   return RNC_OK;
 }
@@ -693,13 +699,19 @@ static void relay_announce(rnc_node *n, rnc_packet *p) {
   p->flags = (uint8_t)((p->flags & 0x2fu) | 0x50u);
   memcpy(p->transport_id, n->id, 16);
 }
-static int mode_allows(rnc_interface_mode from, rnc_interface_mode to) {
-  if (to == RNC_MODE_ACCESS_POINT)
+/* Whether an announce learned on `from` may be passed on to `to`, in the order of the
+ * reference's Transport._outbound checks. */
+static int mode_allows(const node_interface *from, const node_interface *to) {
+  if (to->no_from_internal && from->mode == RNC_MODE_INTERNAL)
     return 0;
-  if (to == RNC_MODE_ROAMING)
-    return from != RNC_MODE_ROAMING && from != RNC_MODE_BOUNDARY;
-  if (to == RNC_MODE_BOUNDARY)
-    return from != RNC_MODE_ROAMING;
+  if (to->mode == RNC_MODE_ACCESS_POINT)
+    return 0;
+  if (to->mode == RNC_MODE_INTERNAL)
+    return from->to_internal || from->mode != RNC_MODE_BOUNDARY;
+  if (to->mode == RNC_MODE_ROAMING)
+    return from->mode != RNC_MODE_ROAMING && from->mode != RNC_MODE_BOUNDARY;
+  if (to->mode == RNC_MODE_BOUNDARY)
+    return from->mode != RNC_MODE_ROAMING;
   return 1;
 }
 static uint64_t path_lifetime(const rnc_node *n, uint32_t iface) {
@@ -717,7 +729,7 @@ static uint64_t path_lifetime(const rnc_node *n, uint32_t iface) {
 static int relay_target(rnc_node *n, uint32_t ingress, uint32_t target) {
   return (n->transport || interface(n, ingress)->local ||
           interface(n, target)->local) &&
-         mode_allows(interface(n, ingress)->mode, interface(n, target)->mode);
+         mode_allows(interface(n, ingress), interface(n, target));
 }
 static size_t relay_count(rnc_node *n, uint32_t ingress) {
   size_t i, c = 0;
@@ -997,6 +1009,13 @@ rnc_result rnc_node_known_import(rnc_node *n, const void *input, size_t size) {
   free(items);
   return r;
 }
+static void rate_stamp(node_rate *r, uint64_t now) {
+  if (r->stamps == RNC_RATE_TIMESTAMPS) {
+    memmove(r->stamp, r->stamp + 1, (RNC_RATE_TIMESTAMPS - 1u) * sizeof(r->stamp[0]));
+    r->stamps--;
+  }
+  r->stamp[r->stamps++] = now;
+}
 /* Reference-compatible per-destination announce rate table. Returns nonzero
  * when the announce must not be rebroadcast. Paths are learned regardless. */
 static int rate_blocked(rnc_node *n, const node_interface *iface,
@@ -1020,9 +1039,11 @@ static int rate_blocked(rnc_node *n, const node_interface *iface,
     r->used = 1;
     memcpy(r->destination, destination, 16);
     r->last = r->touched = now;
+    rate_stamp(r, now);
     return 0;
   }
   r->touched = now;
+  rate_stamp(r, now);
   if (now <= r->blocked_until)
     return 1;
   if (now - r->last < target)
@@ -1380,7 +1401,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
                (unsigned)p->hops);
     }
     emit(n, RNC_NODE_ANNOUNCE, ingress, p)->route = fresh.route;
-    if (targets && p->context == 0 &&
+    if (targets && p->context == 0 && p->hops <= 127 &&
         !rate_blocked(n, interface(n, ingress), p->destination, now)) {
       rnc_packet relay = *p;
       uint64_t due = after(now, ((unsigned)jitter[0] * 256 + jitter[1]) % 501u);
@@ -1402,7 +1423,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
       rnc_packet relay = *p;
       relay.context = 11;
       relay_announce(n, &relay);
-      if (n->requests[i].ingress != ingress)
+      if (n->requests[i].ingress != ingress && p->hops <= 127)
         emit(n, RNC_NODE_SEND, n->requests[i].ingress, &relay);
       n->requests[i].used = 0;
     }
@@ -1418,6 +1439,7 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
   node_request entry = {0};
   size_t i, slot = RNC_NODE_REQUESTS;
   int pr_limited, filtered = 0;
+  uint64_t due;
   rnc_result r;
   r = rnc_path_request_decode(packet, &request);
   if (r != RNC_OK)
@@ -1443,13 +1465,18 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
   if (route && rnc_node_is_blackholed(n, route->route.announce.identity.hash,
                                       unix_seconds))
     route = NULL;
+  /* Transport.path_request: a roaming interface is not answered when the path lies behind that
+   * same interface (a local destination is still announced). */
+  if (!d && route && interface(n, ingress)->mode == RNC_MODE_ROAMING &&
+      route->route.interface_id == ingress)
+    return RNC_OK;
   if (!d && !route) {
     /* Unknown destination: only interfaces that discover paths for their
      * clients search other interfaces (reference Transport.path_request). */
     const node_interface *in = interface(n, ingress);
     int search = in->local || in->recursive || in->mode == RNC_MODE_GATEWAY ||
                  in->mode == RNC_MODE_ACCESS_POINT ||
-                 in->mode == RNC_MODE_ROAMING ||
+                 in->mode == RNC_MODE_ROAMING || in->mode == RNC_MODE_INTERNAL ||
                  in->mode == RNC_MODE_BOUNDARY;
     filtered = !in->local && !in->recursive && in->mode == RNC_MODE_BOUNDARY;
     if (!search || pr_limited || !n->transport || !relay_count(n, ingress))
@@ -1472,7 +1499,16 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
       relay_announce(n, &reply);
     }
     reply.context = 11;
-    queue(n, ingress, &reply, now);
+    /* A local destination answers at once. An answer from a known path waits the grace period
+     * unless the asker or the path is a local client; a roaming asker waits longer still. */
+    due = now;
+    if (!d && !interface(n, ingress)->local &&
+        !interface(n, route->route.interface_id)->local) {
+      due = after(now, PATH_REQUEST_GRACE);
+      if (interface(n, ingress)->mode == RNC_MODE_ROAMING)
+        due = after(due, PATH_REQUEST_RG);
+    }
+    queue(n, ingress, &reply, due);
   } else {
     r = rnc_path_request_create(request.destination, n->id, request.tag,
                                 request.tag_size, &reply);
@@ -1553,6 +1589,27 @@ rnc_result rnc_node_request_path_ex(rnc_node *n, const uint8_t address[16],
 rnc_result rnc_node_request_path(rnc_node *n, const uint8_t address[16],
                                  uint64_t now) {
   return rnc_node_request_path_ex(n, address, 0, NULL, 0, 0, now);
+}
+rnc_result rnc_node_rate_at(const rnc_node *n, size_t ordinal, rnc_rate_entry *entry) {
+  size_t i, seen = 0;
+  if (!n || !entry)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_RATES; i++) {
+    const node_rate *r = &n->rates[i];
+    if (!r->used)
+      continue;
+    if (seen++ != ordinal)
+      continue;
+    memset(entry, 0, sizeof(*entry));
+    memcpy(entry->destination, r->destination, 16);
+    entry->violations = r->violations;
+    entry->last_ms = r->last;
+    entry->blocked_until_ms = r->blocked_until;
+    entry->timestamp_count = r->stamps;
+    memcpy(entry->timestamps_ms, r->stamp, r->stamps * sizeof(r->stamp[0]));
+    return RNC_OK;
+  }
+  return RNC_AGAIN;
 }
 unsigned rnc_node_hops_to(rnc_node *n, const uint8_t address[16], uint64_t now) {
   node_route *route = n && address ? route_find(n, address, now) : NULL;
@@ -1886,11 +1943,14 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
   if (!room(n, interface_count(n) + RNC_NODE_REQUESTS + 2u))
     return RNC_AGAIN;
   p = *packet;
-  if (p.hops >= 127)
+  type = p.flags & 3u;
+  /* PATHFINDER_M is 128 hops. The reference counts a hop on arrival and accepts an announce up
+   * to 128 hops (so up to 127 on the wire), but refuses to transmit above 127: such a path is
+   * learned and never passed on. Everything else keeps the stricter 127 bound. */
+  if (p.hops >= (type == RNC_ANNOUNCE ? 128u : 127u))
     return RNC_PROTOCOL;
   if (!interface(n, ingress)->local)
     p.hops++;
-  type = p.flags & 3u;
   destination = (p.flags >> 2) & 3u;
   if (type == RNC_ANNOUNCE) {
     n->input_packet = packet;
@@ -2078,26 +2138,37 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
     size_t best = RNC_NODE_QUEUE, wire;
     uint8_t raw[RNC_MTU];
     uint64_t wait;
-    if (!iface->id || iface->announce_after > now)
-      continue;
-    for (j = 0; j < RNC_NODE_QUEUE; j++)
-      if (n->queued[j].used && n->queued[j].iface == iface->id &&
-          n->queued[j].due <= now &&
-          (best == RNC_NODE_QUEUE ||
-           n->queued[j].packet.hops < n->queued[best].packet.hops))
-        best = j;
-    if (best == RNC_NODE_QUEUE)
-      continue;
-    if (rnc_packet_encode(&n->queued[best].packet, raw, sizeof(raw), &wire) !=
-        RNC_OK)
-      return RNC_PROTOCOL;
-    /* Default 2 percent announce bandwidth, rounded up in milliseconds. */
-    wait = ((uint64_t)wire * UINT64_C(8000000) +
-            (uint64_t)iface->bitrate * (iface->cap ? iface->cap : 20u) - 1u) /
-           ((uint64_t)iface->bitrate * (iface->cap ? iface->cap : 20u));
-    emit(n, RNC_NODE_SEND, iface->id, &n->queued[best].packet);
-    n->queued[best].used = 0;
-    iface->announce_after = after(now, wait);
+    int again;
+    /* an INTERNAL interface is outside the announce cap in the reference, so it drains its
+     * whole due queue at once; the others send one announce per interval */
+    do {
+      again = 0;
+      best = RNC_NODE_QUEUE;
+      if (!iface->id || iface->announce_after > now)
+        break;
+      for (j = 0; j < RNC_NODE_QUEUE; j++)
+        if (n->queued[j].used && n->queued[j].iface == iface->id &&
+            n->queued[j].due <= now &&
+            (best == RNC_NODE_QUEUE ||
+             n->queued[j].packet.hops < n->queued[best].packet.hops))
+          best = j;
+      if (best == RNC_NODE_QUEUE)
+        break;
+      if (rnc_packet_encode(&n->queued[best].packet, raw, sizeof(raw), &wire) !=
+          RNC_OK)
+        return RNC_PROTOCOL;
+      /* Default 2 percent announce bandwidth, rounded up in milliseconds. */
+      wait = ((uint64_t)wire * UINT64_C(8000000) +
+              (uint64_t)iface->bitrate * (iface->cap ? iface->cap : 20u) - 1u) /
+             ((uint64_t)iface->bitrate * (iface->cap ? iface->cap : 20u));
+      if (iface->mode == RNC_MODE_INTERNAL) {
+        wait = 0;
+        again = 1;
+      }
+      emit(n, RNC_NODE_SEND, iface->id, &n->queued[best].packet);
+      n->queued[best].used = 0;
+      iface->announce_after = after(now, wait);
+    } while (again);
   }
   n->now = now;
   return RNC_OK;
@@ -2270,7 +2341,7 @@ rnc_result rnc_node_state_import(rnc_node *n, const rnc_identity *owner,
     if (r != RNC_OK)
       goto done;
     at += wire;
-    if (entry.packet.hops >= 128 ||
+    if (entry.packet.hops > 128 ||
         (!entry.packet.hops && interface(n, iface) &&
          !interface(n, iface)->local)) {
       r = RNC_PROTOCOL;
@@ -2738,7 +2809,7 @@ rnc_result rnc_node_tunnels_import(rnc_node *n, const rnc_identity *owner,
       r = rnc_packet_decode(state + at, wire, &p->entry.packet);
       if (r == RNC_OK)
         r = rnc_announce_verify(&p->entry.packet, &p->entry.route.announce);
-      if (r != RNC_OK || p->entry.packet.hops >= 128) {
+      if (r != RNC_OK || p->entry.packet.hops > 128) {
         r = r == RNC_OK ? RNC_PROTOCOL : r;
         goto done;
       }
