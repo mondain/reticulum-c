@@ -44,7 +44,7 @@ extern "C" {
 #define RNC_MCU_FIRMWARE_NAME "reticulum-c-mcu"
 #endif
 #ifndef RNC_MCU_VERSION
-#define RNC_MCU_VERSION "0.2.1"
+#define RNC_MCU_VERSION "0.3.0"
 #endif
 #ifndef RNC_MCU_BUILD_EPOCH
 #define RNC_MCU_BUILD_EPOCH 1767225600u /* 2026-01-01: used when the build supplies none */
