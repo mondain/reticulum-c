@@ -43,6 +43,12 @@ typedef struct rnc_rnode_stats {
 typedef struct rnc_rnode {
   rnc_lora_if *li; /* the radio; may be NULL in tests of the framing only */
   uint8_t platform, mcu, board;
+  /* what the host has set; the radio runs only when all five are set and the state is on */
+  rnc_lora_params p;
+  uint8_t set, on;
+  uint8_t sf_min;      /* lowest spreading factor the chip takes (5, or 6 for an SX127x) */
+  int8_t txp_max;      /* highest output power the board accepts, dBm */
+  uint16_t lock_short, lock_long; /* airtime locks, hundredths of a percent; 0 = not set */
   /* parser */
   uint8_t in[RNC_RNODE_IN_MAX];
   uint16_t in_len;
@@ -56,6 +62,11 @@ typedef struct rnc_rnode {
 /* `platform`, `mcu` and `board` are the identity bytes reported for commands 0x48, 0x49
  * and 0x47. */
 void rnc_rnode_init(rnc_rnode *rn, rnc_lora_if *li, uint8_t platform, uint8_t mcu, uint8_t board);
+/* The limits of this chip and board, from the board table; the defaults (5, 22) are those
+ * of the SX126x. A setting outside them is refused, not clipped. */
+void rnc_rnode_set_limits(rnc_rnode *rn, uint8_t sf_min, int8_t txp_max_dbm);
+/* 1 when the radio is running: every setting made, the state on and the chip up. */
+int rnc_rnode_radio_on(const rnc_rnode *rn);
 /* Bytes from the host. Never blocks. */
 void rnc_rnode_feed(rnc_rnode *rn, const uint8_t *bytes, size_t size, uint64_t now_us);
 /* Copies up to `capacity` bytes for the host into `out`; returns how many. */
