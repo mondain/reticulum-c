@@ -9,7 +9,7 @@ if(NOT status EQUAL 0)
 endif()
 file(RENAME "${work}/original" "${work}/relocated")
 execute_process(COMMAND "${CMAKE_COMMAND}" -S "${RNC_SOURCE_ROOT}/tests/consumer" -B "${work}/build"
-    "-DCMAKE_C_COMPILER=${RNC_TEST_CC}" "-DCMAKE_PREFIX_PATH=${work}/relocated"
+    "-DCMAKE_C_COMPILER=${RNC_TEST_CC}" "-DRNC_CONSUMER_VERSION=${RNC_CONSUMER_VERSION}" "-DCMAKE_PREFIX_PATH=${work}/relocated"
     -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF
     RESULT_VARIABLE status)
 if(NOT status EQUAL 0)

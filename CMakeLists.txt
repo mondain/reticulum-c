@@ -295,6 +295,7 @@ endif()
         add_test(NAME installed_consumer COMMAND ${CMAKE_COMMAND}
             -DRNC_BUILD_ROOT=${CMAKE_BINARY_DIR} -DRNC_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DRNC_CONFIG=$<CONFIG> -DRNC_TEST_CC=${CMAKE_C_COMPILER}
+            -DRNC_CONSUMER_VERSION=${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_consumer.cmake)
     endif()
 endif()
