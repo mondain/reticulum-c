@@ -12,7 +12,7 @@ foreach(s ${RNC_RADIO_SRCS})
     list(APPEND RNC_RADIO_LIST "${RNC_ROOT}/mcu/radio/${s}")
 endforeach()
 idf_component_register(
-    SRCS "${RNC_ROOT}/mcu/app/rnc_mcu_app.c" ${RNC_RADIO_LIST}
+    SRCS "${RNC_ROOT}/mcu/app/rnc_mcu_app.c" "${RNC_ROOT}/mcu/app/rnc_status.c" ${RNC_RADIO_LIST}
     INCLUDE_DIRS "${RNC_ROOT}/mcu/app" "${RNC_ROOT}/mcu/radio"
     REQUIRES reticulum_c)
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
