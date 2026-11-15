@@ -106,6 +106,16 @@ int main(void) {
   CHECK(cfg.port == 4965 && strstr(reply, "error"));
   type(&con, &cfg, "set mode radio", reply, sizeof(reply));
   CHECK(!strcmp(cfg.mode, "wifi") && strstr(reply, "error"));
+  /* the RNode modem mode */
+  type(&con, &cfg, "set mode rnode", reply, sizeof(reply));
+  CHECK(!strcmp(cfg.mode, "rnode") && rnc_mcu_cfg_rnode_mode(&cfg) && !rnc_mcu_cfg_wifi_mode(&cfg));
+  CHECK(!strstr(reply, "error"));
+  type(&con, &cfg, "get mode", reply, sizeof(reply));
+  CHECK(strstr(reply, "mode=rnode"));
+  type(&con, &cfg, "set mode xyz", reply, sizeof(reply));
+  CHECK(!strcmp(cfg.mode, "rnode") && strstr(reply, "error"));
+  type(&con, &cfg, "set mode wifi", reply, sizeof(reply));
+  CHECK(!strcmp(cfg.mode, "wifi") && !rnc_mcu_cfg_rnode_mode(&cfg));
   type(&con, &cfg, "set password short", reply, sizeof(reply)); /* WPA needs 8..63 */
   CHECK(!strcmp(cfg.password, "correct horse") && strstr(reply, "error"));
   type(&con, &cfg, "set colour red", reply, sizeof(reply));

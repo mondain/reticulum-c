@@ -362,3 +362,39 @@ void rnc_rnode_reset(rnc_rnode *rn) {
     rn->li->budget.budget_ms = rn->default_budget_ms;
   }
 }
+
+/* ---- the boot window ---------------------------------------------------------------- */
+static const char CONSOLE_LINE[] = "rnc-config";
+
+void rnc_rnode_window_init(rnc_rnode_window *w) { memset(w, 0, sizeof(*w)); }
+
+int rnc_rnode_window_feed(rnc_rnode_window *w, uint8_t byte) {
+  const size_t want = sizeof(CONSOLE_LINE) - 1u;
+  if (w->keep_len == RNC_RNODE_WINDOW_KEEP) { /* full: the oldest byte goes */
+    memmove(w->keep, w->keep + 1, RNC_RNODE_WINDOW_KEEP - 1u);
+    w->keep_len--;
+  }
+  w->keep[w->keep_len++] = byte;
+  if (byte == '\n' || byte == '\r') {
+    int match = w->line_len == want && !memcmp(w->line, CONSOLE_LINE, want);
+    w->line_len = 0;
+    if (match) { /* the line and its terminator are not for the KISS parser */
+      w->keep_len = (uint16_t)(w->keep_len - (want + 1u));
+      return 1;
+    }
+    return 0;
+  }
+  if (w->line_len < sizeof(w->line))
+    w->line[w->line_len++] = byte; /* one byte beyond the console line marks "too long" */
+  return 0;
+}
+
+size_t rnc_rnode_window_take(rnc_rnode_window *w, uint8_t *out, size_t capacity) {
+  size_t n = w->keep_len < capacity ? w->keep_len : capacity;
+  if (n == 0u)
+    return 0u;
+  memcpy(out, w->keep, n);
+  memmove(w->keep, w->keep + n, (size_t)w->keep_len - n);
+  w->keep_len = (uint16_t)(w->keep_len - n);
+  return n;
+}

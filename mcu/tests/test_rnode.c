@@ -3,6 +3,7 @@
  *
  * LIMIT: checks the logic against the command set the project's host adapter and the
  * reference RNodeInterface use; it is not a test on real hardware. */
+#include "../radio/rnc_radio.h"
 #include "../radio/rnc_rnode.h"
 #include "radio/sim_board.h"
 #include <stdio.h>
@@ -518,6 +519,77 @@ static void test_flow_control(void) {
   CHECK(count_ready(d.host_out, d.host_out_len) > ready_before);
 }
 
+/* ---- boot window and radio preparation (Task 6) ----------------------------------- */
+
+static void test_boot_window(void) {
+  rnc_rnode_window window;
+  uint8_t out[512];
+  size_t i, n;
+  const uint8_t detect[] = {FEND, 0x08, 0x73, FEND};
+  rnc_rnode_window_init(&window);
+  /* a host's DETECT during the window is not a console request and is kept for replay */
+  for (i = 0; i < sizeof(detect); i++)
+    CHECK_EQ(rnc_rnode_window_feed(&window, detect[i]), 0);
+  n = rnc_rnode_window_take(&window, out, sizeof(out));
+  CHECK_EQ(n, sizeof(detect));
+  CHECK(n == sizeof(detect) && !memcmp(out, detect, n));
+  CHECK_EQ(rnc_rnode_window_take(&window, out, sizeof(out)), 0); /* taken once */
+  /* the console line is recognised and not replayed; the lines before it are kept */
+  rnc_rnode_window_init(&window);
+  CHECK_EQ(rnc_rnode_window_feed(&window, 'Z'), 0);
+  CHECK_EQ(rnc_rnode_window_feed(&window, '\n'), 0);
+  for (i = 0; i < 10; i++)
+    CHECK_EQ(rnc_rnode_window_feed(&window, (uint8_t)"rnc-config"[i]), 0);
+  CHECK_EQ(rnc_rnode_window_feed(&window, '\n'), 1);
+  n = rnc_rnode_window_take(&window, out, sizeof(out));
+  CHECK_EQ(n, 2);
+  CHECK(n == 2 && out[0] == 'Z' && out[1] == '\n');
+  /* a CR LF terminated line works too, and a near miss does not */
+  rnc_rnode_window_init(&window);
+  for (i = 0; i < 10; i++)
+    (void)rnc_rnode_window_feed(&window, (uint8_t)"rnc-config"[i]);
+  CHECK_EQ(rnc_rnode_window_feed(&window, '\r'), 1);
+  rnc_rnode_window_init(&window);
+  for (i = 0; i < 9; i++)
+    (void)rnc_rnode_window_feed(&window, (uint8_t)"rnc-confi"[i]);
+  CHECK_EQ(rnc_rnode_window_feed(&window, '\n'), 0);
+  /* a long stream keeps only the newest bytes */
+  rnc_rnode_window_init(&window);
+  for (i = 0; i < 300; i++)
+    (void)rnc_rnode_window_feed(&window, (uint8_t)i);
+  n = rnc_rnode_window_take(&window, out, sizeof(out));
+  CHECK_EQ(n, 256);
+  CHECK(n == 256 && out[0] == (uint8_t)44 && out[255] == (uint8_t)299);
+}
+
+static void test_prepare_for_host(void) {
+  sim_medium med;
+  sim_board a;
+  rnc_radio r;
+  const rnc_board *board = rnc_board_find("lilygo_t_echo");
+  uint8_t sf_min = 0;
+  int8_t txp_max = 0;
+  CHECK(board && board->supported);
+  sim_medium_init(&med, 7);
+  sim_board_init(&a, &med, 1262, 1, 100);
+  /* prepared for a host: the drivers are bound, nothing is started, the chip is not touched */
+  CHECK_EQ(rnc_radio_prepare_host(&r, board, &a.m126.hal, 100, NULL, NULL), RNC_RADIO_OK);
+  CHECK(!rnc_lora_if_up(&r.li));
+  CHECK_EQ(a.m126.have_freq, 0);
+  CHECK_EQ(r.li.budget.budget_ms, 36000);
+  rnc_radio_limits(board, &sf_min, &txp_max);
+  CHECK_EQ(sf_min, 5);
+  CHECK_EQ(txp_max, board->max_txp_dbm);
+  CHECK_EQ(rnc_radio_prepare_host(&r, board, NULL, 100, NULL, NULL), RNC_RADIO_BOARD_UNSUPPORTED);
+  CHECK_EQ(rnc_radio_prepare_host(&r, NULL, &a.m126.hal, 100, NULL, NULL), RNC_RADIO_BOARD_UNSUPPORTED);
+  {
+    const rnc_board *sx1276 = rnc_board_find("heltec_wifi_lora_32_V2");
+    CHECK(sx1276);
+    rnc_radio_limits(sx1276, &sf_min, &txp_max);
+    CHECK_EQ(sf_min, 7);
+  }
+}
+
 int main(void) {
   test_identity_commands();
   test_escaping();
@@ -531,6 +603,8 @@ int main(void) {
   test_flow_control();
   test_reset_restores_default_budget();
   test_leave_and_reset();
+  test_boot_window();
+  test_prepare_for_host();
   if (failures) {
     fprintf(stderr, "test_rnode: %d failure(s)\n", failures);
     return 1;

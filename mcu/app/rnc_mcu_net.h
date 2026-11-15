@@ -104,10 +104,11 @@ static inline void rnc_mcu_txq_clear(rnc_mcu_txq *q) { q->head = q->size = 0; }
 /* ---- provisioning settings ------------------------------------------------ */
 #define RNC_MCU_MODE_SERIAL "serial"
 #define RNC_MCU_MODE_WIFI "wifi"
+#define RNC_MCU_MODE_RNODE "rnode" /* a LoRa modem for a host (mcu/radio/rnc_rnode.h) */
 #define RNC_MCU_DEFAULT_PORT 4242 /* the Reticulum TCPServerInterface default */
 
 typedef struct rnc_mcu_cfg {
-  char mode[8];       /* "serial" (the default) or "wifi" */
+  char mode[8];       /* "serial" (the default), "wifi" or "rnode" */
   char ssid[33];      /* 1..32 bytes */
   char password[65];  /* empty (open network) or 8..63 characters */
   char host[64];      /* the node's name or address */
@@ -124,6 +125,9 @@ static inline void rnc_mcu_cfg_init(rnc_mcu_cfg *c) {
 static inline int rnc_mcu_cfg_wifi_mode(const rnc_mcu_cfg *c) {
   return !strcmp(c->mode, RNC_MCU_MODE_WIFI);
 }
+static inline int rnc_mcu_cfg_rnode_mode(const rnc_mcu_cfg *c) {
+  return !strcmp(c->mode, RNC_MCU_MODE_RNODE);
+}
 /* 1 when the settings can start a Wi-Fi connection (the mode is not looked at). */
 static inline int rnc_mcu_cfg_wifi_ready(const rnc_mcu_cfg *c) {
   size_t p = strlen(c->password);
@@ -138,7 +142,8 @@ static inline int rnc_mcu_cfg_set(rnc_mcu_cfg *c, const char *key, const char *v
     return 0;
   }
   if (!strcmp(key, "mode")) {
-    if (strcmp(value, RNC_MCU_MODE_SERIAL) && strcmp(value, RNC_MCU_MODE_WIFI))
+    if (strcmp(value, RNC_MCU_MODE_SERIAL) && strcmp(value, RNC_MCU_MODE_WIFI) &&
+        strcmp(value, RNC_MCU_MODE_RNODE))
       return -1;
     memset(c->mode, 0, sizeof(c->mode));
     memcpy(c->mode, value, n);
@@ -244,7 +249,7 @@ static inline unsigned rnc_mcu_console_line(rnc_mcu_console *c, rnc_mcu_cfg *cfg
   } else if (!strcmp(cmd, "help")) {
     (void)snprintf(reply, reply_size,
                    "commands: get [key] | set key value | clear | save | reboot\n"
-                   "keys: mode (serial|wifi) ssid password host port\n"
+                   "keys: mode (serial|wifi|rnode) ssid password host port\n"
                    "LoRa: lora.mode (off|leaf|gateway) lora.freq lora.bw lora.sf lora.cr lora.txp\n"
                    "lora.airtime; the radio stays off until mode, freq, bw, sf, cr and txp are set\n"
                    "set mode wifi, fill in the rest, then save and reboot");

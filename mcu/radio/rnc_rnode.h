@@ -84,6 +84,26 @@ int rnc_rnode_reset_requested(rnc_rnode *rn);
 /* The host is gone (disconnect, reset): clears the parser and the pending output. */
 void rnc_rnode_reset(rnc_rnode *rn);
 
+/* ---- the boot window ------------------------------------------------------------------
+ * In rnode mode the serial port carries KISS frames only, but every boot still opens the
+ * short setup window in which the line "rnc-config" starts the setup console (so a board
+ * can always be switched back without reflashing). A host may start talking at once after
+ * a USB-triggered reset, so the bytes seen during the window that are not that line are
+ * kept (the newest RNC_RNODE_WINDOW_KEEP) and replayed to rnc_rnode_feed afterwards. */
+#define RNC_RNODE_WINDOW_KEEP 256u
+typedef struct rnc_rnode_window {
+  uint8_t keep[RNC_RNODE_WINDOW_KEEP];
+  uint16_t keep_len;
+  uint8_t line[11]; /* the current line, up to one byte more than the console line */
+  uint8_t line_len;
+} rnc_rnode_window;
+void rnc_rnode_window_init(rnc_rnode_window *w);
+/* One byte from the host during the window. Returns 1 when the line "rnc-config" has just
+ * been completed (by LF or CR); that line is not among the bytes kept. */
+int rnc_rnode_window_feed(rnc_rnode_window *w, uint8_t byte);
+/* Moves up to `capacity` kept bytes, oldest first, to `out`; returns how many. */
+size_t rnc_rnode_window_take(rnc_rnode_window *w, uint8_t *out, size_t capacity);
+
 #ifdef __cplusplus
 }
 #endif

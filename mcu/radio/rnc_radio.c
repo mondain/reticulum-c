@@ -2,6 +2,31 @@
 #include "rnc_radio.h"
 #include <string.h>
 
+int rnc_radio_prepare_host(rnc_radio *r, const rnc_board *board, const rnc_radio_hal *hal,
+                           uint32_t airtime_hundredths, uint32_t (*random32)(void *context),
+                           void *context) {
+  memset(r, 0, sizeof(*r));
+  r->board = board;
+  if (!board || !board->supported || !hal)
+    return r->status = RNC_RADIO_BOARD_UNSUPPORTED;
+  if (board->chip == RNC_BOARD_SX1276) {
+    rnc_sx127x_board b;
+    b.pa_boost = board->pa_boost;
+    rnc_sx127x_attach(&r->d127, hal, &b);
+    rnc_lora_if_init(&r->li, &r->d127.base, hal, random32, context, airtime_hundredths);
+  } else {
+    rnc_sx126x_attach(&r->d126, hal, &board->sx126x);
+    rnc_lora_if_init(&r->li, &r->d126.base, hal, random32, context, airtime_hundredths);
+  }
+  r->status = RNC_RADIO_OFF; /* prepared, not started: the host decides */
+  return RNC_RADIO_OK;
+}
+
+void rnc_radio_limits(const rnc_board *board, uint8_t *sf_min, int8_t *txp_max_dbm) {
+  *sf_min = board && board->chip == RNC_BOARD_SX1276 ? 7u : 5u;
+  *txp_max_dbm = board ? board->max_txp_dbm : 0;
+}
+
 const char *rnc_radio_status_text(int status) {
   switch (status) {
   case RNC_RADIO_OK: return "radio running";
