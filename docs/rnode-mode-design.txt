@@ -108,13 +108,12 @@ C. A KISS shim over the existing on-board node: the host would not own the radio
   - Serial must carry only KISS frames: no log text, as the serial mode already does.
   - The boot-time setup window stays exactly as today (a short window after every boot in
     which the line "rnc-config" opens the setup console), so a board in rnode mode can
-    always be switched back without reflashing. The window matches only that exact line;
-    KISS bytes never match it. Bytes that arrive during the window and are not part of
-    that line are kept (bounded buffer) and replayed to the KISS parser when the window
-    ends, so a host whose first DETECT arrives right after a USB-triggered reset is not
-    ignored. A host that sends DETECT earlier than the window ends therefore sees its
-    reply at most the window length (2 s) late; the reference and the project's own host
-    adapter both retry detection, and a test covers this. (Design call, not agreed.)
+    always be switched back without reflashing. The window matches only that exact line
+    (a KISS frame boundary resets the match). Every byte also goes to the RNode module as
+    usual and its replies are written at once, so a host that resets the board by opening
+    the port and gives up on DETECT after a fraction of a second is still answered;
+    identity commands cannot start the radio. (Design call, changed after the review: the
+    first draft buffered the bytes and replayed them after the window.)
   - On boards with a BOOT button the existing press-to-enter gesture also works.
   - The browser flasher's setup form gains the "rnode" host connection choice for boards
     that have a radio. The boards' hardware-tested flags are unchanged.
@@ -161,7 +160,7 @@ C. A KISS shim over the existing on-board node: the host would not own the radio
 
 8a. Calls made by the author after the builder check
 ----------------------------------------------------
-- Boot window behaviour and bytes replayed to the KISS parser (6.5).
+- Boot window behaviour: bytes go to the module live during the window (6.5).
 - Operator-set Bluetooth PIN, Bluetooth off until set (6.6). The earlier draft said the
   PIN would be shown over serial; that contradicted 6.5 and is withdrawn.
 - The reference for command lists is RNS 1.5.5 as pinned in PROVENANCE.md.

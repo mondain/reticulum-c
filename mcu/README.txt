@@ -192,8 +192,10 @@ use. Go back with  set mode serial  (the line  rnc-config  within two seconds af
 reset still opens the setup console, in every mode).
 
 Regulatory behaviour: nothing is transmitted until the host has set all five settings
-and the radio state, and every new host starts from nothing (a host that leaves or the
-board resetting turns the radio off and clears the settings). The airtime budget stays
+and the radio state. A host that says it is leaving (LEAVE) or asks for a restart (RESET), or
+a board reset, turns the radio off and clears the settings. A host that disappears without
+saying so (a crash, unplugging the cable) does not: the radio keeps its settings until the
+board is reset. The airtime budget stays
 active: 1 percent of every hour by default; the host may change it with the airtime lock
 commands, within 0.01 to 100 percent, and the smaller of the short and long lock values
 is used. You are responsible for what the host configures.

@@ -63,3 +63,10 @@ export function parseSettings(reply) {
  }
  return values;
 }
+// What the board's mode is after the commands of buildCommands(values) were saved; keeps the
+// page's idea of the current mode right for a second save in the same session.
+export function modeAfterSave(v, currentMode) {
+ if (v.runMode === 'rnode') return 'rnode';
+ if (v.applyWifi) return v.transport === 'wifi' ? 'wifi' : 'serial';
+ return currentMode === 'rnode' ? 'serial' : currentMode;
+}

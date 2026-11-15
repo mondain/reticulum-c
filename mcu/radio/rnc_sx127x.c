@@ -134,17 +134,27 @@ int rnc_sx127x_set_header_mode(rnc_sx127x *d, int implicit, unsigned payload_len
 }
 
 /* ---- modem operations ------------------------------------------------------------------ */
+static int sx_check(rnc_modem *m, const rnc_lora_params *p) {
+  rnc_sx127x *d = (rnc_sx127x *)m;
+  uint8_t pa, dac, ocp;
+  /* SF6 only works with implicit headers, which the Reticulum air format does not use */
+  if (rnc_lora_params_check(p, 7u) != 0 || p->freq_hz < 137000000u || p->freq_hz > 1020000000u)
+    return -2;
+  if (rnc_sx127x_pa(d->board.pa_boost, p->txp_dbm, &pa, &dac, &ocp) != 0)
+    return -3;
+  return 0;
+}
+
 static int sx_init(rnc_modem *m, const rnc_lora_params *p) {
   rnc_sx127x *d = (rnc_sx127x *)m;
   uint8_t version = 0, pa, dac, ocp, v;
   uint32_t frf;
   int bw;
   unsigned preamble;
-  /* SF6 only works with implicit headers, which the Reticulum air format does not use */
-  if (rnc_lora_params_check(p, 7u) != 0 || p->freq_hz < 137000000u || p->freq_hz > 1020000000u)
-    return -2;
-  if (rnc_sx127x_pa(d->board.pa_boost, p->txp_dbm, &pa, &dac, &ocp) != 0)
-    return -3;
+  int rc = sx_check(m, p);
+  if (rc != 0)
+    return rc;
+  (void)rnc_sx127x_pa(d->board.pa_boost, p->txp_dbm, &pa, &dac, &ocp);
   bw = rnc_sx127x_bw_code(p->bw_hz);
   d->params = *p;
   preamble = p->preamble_symbols ? p->preamble_symbols
@@ -358,7 +368,7 @@ static void sx_sleep(rnc_modem *m) {
 
 static const rnc_modem_ops SX_OPS = {sx_init,     sx_start_rx, sx_poll_rx,  sx_start_tx,
                                      sx_poll_tx,  sx_carrier,  sx_rssi,     sx_start_cad,
-                                     sx_poll_cad, sx_standby,  sx_sleep};
+                                     sx_poll_cad, sx_standby,  sx_sleep, sx_check};
 
 void rnc_sx127x_attach(rnc_sx127x *d, const rnc_radio_hal *hal, const rnc_sx127x_board *board) {
   memset(d, 0, sizeof(*d));

@@ -252,7 +252,7 @@ static uint64_t platform_now_ms(void *) {
 #define RNC_RNODE_MCU 0x71
 #endif
 #define RNC_RNODE_BOARD_ID 0xFF // no stock board id
-static rnc_rnode_window g_window; // bytes seen during the boot window
+static rnc_rnode_window g_window; // watches the boot window for the console line
 static rnc_rnode g_rnode;
 
 static void restart_board(void) {
@@ -266,9 +266,6 @@ static void restart_board(void) {
 static void rnode_task(void *) {
   uint8_t buf[256];
   size_t n;
-  // what a host sent while the boot window was open goes to the parser first
-  while ((n = rnc_rnode_window_take(&g_window, buf, sizeof(buf))) > 0)
-    rnc_rnode_feed(&g_rnode, buf, n, platform_now_ms(NULL) * 1000u);
   for (;;) {
     uint64_t now_us = platform_now_ms(NULL) * 1000u;
     n = 0;
@@ -293,7 +290,8 @@ static void rnode_task(void *) {
   }
 }
 
-static void rnode_start(void) {
+// Prepares the radio (not started) and the module; the boot window feeds the module live.
+static void rnode_prepare(void) {
   const rnc_board *board = rnc_board_find(RNC_MCU_FIRMWARE_BOARD);
   rnc_lora_if *li = NULL;
   uint8_t sf_min = 5;
@@ -307,6 +305,9 @@ static void rnode_start(void) {
   // without a usable radio the board still answers DETECT but can never turn the radio on
   rnc_rnode_init(&g_rnode, li, RNC_RNODE_PLATFORM, RNC_RNODE_MCU, RNC_RNODE_BOARD_ID);
   rnc_rnode_set_limits(&g_rnode, sf_min, txp_max);
+}
+
+static void rnode_start(void) {
   xTaskCreate(rnode_task, "rnode", STACK_DEPTH(RNC_MCU_STACK_BYTES), NULL, 2, NULL);
 }
 
@@ -374,7 +375,10 @@ void setup() {
 #endif
   bool rnode_mode = rnc_mcu_cfg_rnode_mode(&cfg);
   rnc_rnode_window_init(&g_window);
-  if (rnc_provision_requested(RNC_MCU_PROVISION_WINDOW_MS, rnode_mode ? &g_window : NULL))
+  if (rnode_mode)
+    rnode_prepare(); // so the window can answer a host that is already talking
+  if (rnc_provision_requested(RNC_MCU_PROVISION_WINDOW_MS, rnode_mode ? &g_window : NULL,
+                              rnode_mode ? &g_rnode : NULL))
     rnc_provision_console(&cfg, "Requested at boot.");
   if (rnode_mode) {
 #if defined(ARDUINO_ARCH_ESP32)

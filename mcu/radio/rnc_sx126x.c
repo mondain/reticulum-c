@@ -235,16 +235,28 @@ static int modulation_params(rnc_sx126x *d) {
 }
 
 /* ---- modem operations ------------------------------------------------------------ */
-static int sx_init(rnc_modem *m, const rnc_lora_params *p) {
+static int sx_check(rnc_modem *m, const rnc_lora_params *p) {
   rnc_sx126x *d = (rnc_sx126x *)m;
-  uint8_t b[4], pa[4], img[2], sw_hi = 0, sw_lo = 0;
+  uint8_t pa[4], img[2];
   int8_t txp;
-  uint32_t frf;
   if (rnc_lora_params_check(p, 5u) != 0 || rnc_sx126x_image_band(p->freq_hz, img) != 0 ||
       p->freq_hz < 150000000u || p->freq_hz > 960000000u)
     return -2;
   if (rnc_sx126x_pa(d->board.chip, p->txp_dbm, pa, &txp) != 0)
     return -3;
+  return 0;
+}
+
+static int sx_init(rnc_modem *m, const rnc_lora_params *p) {
+  rnc_sx126x *d = (rnc_sx126x *)m;
+  uint8_t b[4], pa[4], img[2], sw_hi = 0, sw_lo = 0;
+  int8_t txp;
+  uint32_t frf;
+  int rc = sx_check(m, p);
+  if (rc != 0)
+    return rc;
+  (void)rnc_sx126x_image_band(p->freq_hz, img);
+  (void)rnc_sx126x_pa(d->board.chip, p->txp_dbm, pa, &txp);
   d->params = *p;
   if (!d->params.preamble_symbols)
     d->params.preamble_symbols = (uint16_t)rnc_lora_default_preamble(p->bw_hz, p->sf, p->cr);
@@ -537,7 +549,7 @@ static void sx_sleep(rnc_modem *m) {
 
 static const rnc_modem_ops SX_OPS = {sx_init,      sx_start_rx, sx_poll_rx,  sx_start_tx,
                                      sx_poll_tx,   sx_carrier,  sx_rssi,     sx_start_cad,
-                                     sx_poll_cad,  sx_standby,  sx_sleep};
+                                     sx_poll_cad,  sx_standby,  sx_sleep, sx_check};
 
 void rnc_sx126x_attach(rnc_sx126x *d, const rnc_radio_hal *hal, const rnc_sx126x_board *board) {
   memset(d, 0, sizeof(*d));

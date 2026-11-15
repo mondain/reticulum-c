@@ -102,15 +102,15 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
   return InternalFS.rename(SETTINGS_TEMP, SETTINGS_FILE);
 }
 
-bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *keep) {
+bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *window, rnc_rnode *rn) {
   static const char entry[] = "rnc-config";
   char line[24];
   size_t length = 0;
   for (unsigned elapsed = 0; elapsed < window_ms; elapsed += 10) {
     while (Serial.available() > 0) {
       int c = Serial.read();
-      if (keep) {
-        if (c >= 0 && rnc_rnode_window_feed(keep, (uint8_t)c))
+      if (window) {
+        if (c >= 0 && rnc_rnode_window_feed(window, rn, (uint8_t)c, (uint64_t)millis() * 1000u))
           return true;
         continue;
       }
@@ -124,6 +124,12 @@ bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *keep) {
       } else {
         length = 0;
       }
+    }
+    if (window && rn) { // the module's replies go out at once
+      uint8_t reply[64];
+      size_t n;
+      while ((n = rnc_rnode_pull(rn, reply, sizeof(reply))) > 0)
+        Serial.write(reply, n);
     }
     delay(10);
   }

@@ -87,14 +87,48 @@ static uint32_t get32(const uint8_t *d) {
 }
 
 /* Starts, reconfigures or stops the radio to match what the host has set. The radio is
- * only ever started here, and only with every setting made and the state on. */
-static void apply_radio(rnc_rnode *rn) {
+ * only ever started here, and only with every setting made and the state on. Returns 0, or
+ * what the chip refused with (the radio is then off and nothing restarts it by itself). */
+static int apply_radio(rnc_rnode *rn) {
+  int rc = 0;
   if (!rn->li)
-    return;
+    return 0;
   if (rn->on && rn->set == SET_ALL)
-    (void)rnc_lora_if_reconfigure(rn->li, &rn->p);
-  else if (rnc_lora_if_up(rn->li))
-    rnc_lora_if_stop(rn->li);
+    rc = rnc_lora_if_reconfigure(rn->li, &rn->p);
+  if (rc != 0 || !(rn->on && rn->set == SET_ALL))
+    rnc_lora_if_stop(rn->li); /* also cancels the interface's own retry after a failed start */
+  return rc;
+}
+
+static void send_state(rnc_rnode *rn) {
+  uint8_t v = (uint8_t)rnc_rnode_radio_on(rn);
+  put_frame(rn, CMD_RADIO_STATE, &v, 1);
+}
+
+/* the chip's own rules for a candidate setting, with safe stand-ins for settings not made yet */
+static int chip_accepts(const rnc_rnode *rn, const rnc_lora_params *candidate) {
+  rnc_lora_params p = *candidate;
+  if (!rn->li || !rn->li->modem->ops->check)
+    return 1;
+  if (!(rn->set & SET_FREQ) && p.freq_hz == 0u)
+    p.freq_hz = 915000000u;
+  if (!(rn->set & SET_BW) && p.bw_hz == 0u)
+    p.bw_hz = 125000u;
+  if (!(rn->set & SET_SF) && p.sf == 0u)
+    p.sf = rn->sf_min > 7u ? rn->sf_min : 7u;
+  if (!(rn->set & SET_CR) && p.cr == 0u)
+    p.cr = 5u;
+  if (!(rn->set & SET_TXP) && p.txp_dbm == 0)
+    p.txp_dbm = rn->txp_max < 10 ? rn->txp_max : 10; /* a power every chip variant takes */
+  return rn->li->modem->ops->check(rn->li->modem, &p) == 0;
+}
+
+/* a setting changed while the radio is on: apply it, and tell the host if the chip refused */
+static void settings_changed(rnc_rnode *rn) {
+  if (rn->on && apply_radio(rn) != 0) {
+    rn->on = 0;
+    send_state(rn);
+  }
 }
 
 static void apply_airtime(rnc_rnode *rn) {
@@ -125,10 +159,13 @@ static void handle(rnc_rnode *rn, uint8_t cmd, const uint8_t *data, size_t size,
     }
     if (rnc_lora_if_send(rn->li, data, size, now_us) != 0) {
       rn->stats.drops_queue++;
+      rn->ready_owed = 1;
       break;
     }
     if (rn->li->q_count < RNC_LORA_TXQ)
       send_ready(rn); /* room for another */
+    else
+      rn->ready_owed = 1; /* full: READY follows when a slot is free again, whatever frees it */
     break;
   case CMD_LEAVE: /* the host exits: the radio goes off and nothing is left configured */
     if (size == 1u && data[0] == 0xFFu)
@@ -163,13 +200,16 @@ static void handle(rnc_rnode *rn, uint8_t cmd, const uint8_t *data, size_t size,
   case CMD_FREQUENCY:
     if (size == 4u) {
       uint32_t f = get32(data);
+      rnc_lora_params cand = rn->p;
       if (f < 137000000u || f > 1020000000u)
+        break;
+      cand.freq_hz = f;
+      if (!chip_accepts(rn, &cand))
         break;
       rn->p.freq_hz = f;
       rn->set |= SET_FREQ;
       put_frame(rn, cmd, data, 4);
-      if (rn->on)
-        apply_radio(rn);
+      settings_changed(rn);
     }
     break;
   case CMD_BANDWIDTH:
@@ -180,20 +220,22 @@ static void handle(rnc_rnode *rn, uint8_t cmd, const uint8_t *data, size_t size,
       rn->p.bw_hz = bw;
       rn->set |= SET_BW;
       put_frame(rn, cmd, data, 4);
-      if (rn->on)
-        apply_radio(rn);
+      settings_changed(rn);
     }
     break;
   case CMD_TXPOWER:
     if (size == 1u) {
       int8_t dbm = (int8_t)data[0];
+      rnc_lora_params cand = rn->p;
       if (dbm < -9 || dbm > rn->txp_max)
+        break;
+      cand.txp_dbm = dbm;
+      if (!chip_accepts(rn, &cand))
         break;
       rn->p.txp_dbm = dbm;
       rn->set |= SET_TXP;
       put_frame(rn, cmd, data, 1);
-      if (rn->on)
-        apply_radio(rn);
+      settings_changed(rn);
     }
     break;
   case CMD_SF:
@@ -203,8 +245,7 @@ static void handle(rnc_rnode *rn, uint8_t cmd, const uint8_t *data, size_t size,
       rn->p.sf = data[0];
       rn->set |= SET_SF;
       put_frame(rn, cmd, data, 1);
-      if (rn->on)
-        apply_radio(rn);
+      settings_changed(rn);
     }
     break;
   case CMD_CR:
@@ -214,8 +255,7 @@ static void handle(rnc_rnode *rn, uint8_t cmd, const uint8_t *data, size_t size,
       rn->p.cr = data[0];
       rn->set |= SET_CR;
       put_frame(rn, cmd, data, 1);
-      if (rn->on)
-        apply_radio(rn);
+      settings_changed(rn);
     }
     break;
   case CMD_RADIO_STATE:
@@ -225,17 +265,13 @@ static void handle(rnc_rnode *rn, uint8_t cmd, const uint8_t *data, size_t size,
       if (rn->set != SET_ALL)
         break; /* not every setting made: no reply, the chip stays untouched */
       rn->on = 1;
-      apply_radio(rn);
-      if (!rnc_rnode_radio_on(rn)) { /* the chip refused: report it, stay off */
+      if (apply_radio(rn) != 0) /* the chip refused: report it, stay off */
         rn->on = 0;
-        apply_radio(rn);
-      }
     } else if (data[0] == 0u) {
       rn->on = 0;
       apply_radio(rn);
     }
-    v[0] = (uint8_t)rnc_rnode_radio_on(rn); /* the state itself, also for the 0xFF query */
-    put_frame(rn, cmd, v, 1);
+    send_state(rn); /* the state itself, also for the 0xFF query */
     break;
   case CMD_ST_ALOCK:
   case CMD_LT_ALOCK:
@@ -319,10 +355,9 @@ unsigned rnc_rnode_step(rnc_rnode *rn, uint64_t now_us) {
   if (!rn->li)
     return wait;
   wait = rnc_lora_if_step(rn->li, now_us);
-  if (rn->li->stats.tx_packets != rn->last_tx_packets) {
-    rn->last_tx_packets = rn->li->stats.tx_packets;
-    if (rn->li->q_count < RNC_LORA_TXQ)
-      send_ready(rn); /* a transmission finished */
+  if (rn->ready_owed && rn->li->q_count < RNC_LORA_TXQ) {
+    rn->ready_owed = 0;
+    send_ready(rn); /* a slot is free: sent, stale, failed or wiped */
   }
   /* a received packet goes to the host with its signal figures; it waits in the interface
    * until the host side has room for the worst case (every byte escaped) */
@@ -377,6 +412,7 @@ void rnc_rnode_reset(rnc_rnode *rn) {
   rn->out_len = 0;
   /* the next host starts from nothing: no settings, radio off, the default airtime budget */
   rn->set = rn->on = 0;
+  rn->ready_owed = 0;
   memset(&rn->p, 0, sizeof(rn->p));
   rn->lock_short = rn->lock_long = 0;
   if (rn->li) {
@@ -390,33 +426,20 @@ static const char CONSOLE_LINE[] = "rnc-config";
 
 void rnc_rnode_window_init(rnc_rnode_window *w) { memset(w, 0, sizeof(*w)); }
 
-int rnc_rnode_window_feed(rnc_rnode_window *w, uint8_t byte) {
+int rnc_rnode_window_feed(rnc_rnode_window *w, rnc_rnode *rn, uint8_t byte, uint64_t now_us) {
   const size_t want = sizeof(CONSOLE_LINE) - 1u;
-  if (w->keep_len == RNC_RNODE_WINDOW_KEEP) { /* full: the oldest byte goes */
-    memmove(w->keep, w->keep + 1, RNC_RNODE_WINDOW_KEEP - 1u);
-    w->keep_len--;
+  if (rn)
+    rnc_rnode_feed(rn, &byte, 1, now_us);
+  if (byte == 0xC0u) { /* a KISS frame boundary is never part of the console line */
+    w->line_len = 0;
+    return 0;
   }
-  w->keep[w->keep_len++] = byte;
   if (byte == '\n' || byte == '\r') {
     int match = w->line_len == want && !memcmp(w->line, CONSOLE_LINE, want);
     w->line_len = 0;
-    if (match) { /* the line and its terminator are not for the KISS parser */
-      w->keep_len = (uint16_t)(w->keep_len - (want + 1u));
-      return 1;
-    }
-    return 0;
+    return match;
   }
   if (w->line_len < sizeof(w->line))
     w->line[w->line_len++] = byte; /* one byte beyond the console line marks "too long" */
   return 0;
-}
-
-size_t rnc_rnode_window_take(rnc_rnode_window *w, uint8_t *out, size_t capacity) {
-  size_t n = w->keep_len < capacity ? w->keep_len : capacity;
-  if (n == 0u)
-    return 0u;
-  memcpy(out, w->keep, n);
-  memmove(w->keep, w->keep + n, (size_t)w->keep_len - n);
-  w->keep_len = (uint16_t)(w->keep_len - n);
-  return n;
 }

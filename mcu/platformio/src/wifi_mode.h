@@ -30,10 +30,11 @@
 bool rnc_settings_load(rnc_mcu_cfg *cfg);
 bool rnc_settings_save(const rnc_mcu_cfg *cfg);
 
-// Waits up to window_ms for "rnc-config" on Serial or the BOOT button. With `keep` (RNode
-// mode, where a host may already be speaking KISS) the bytes that are not that line are kept
-// in the window for replay to the KISS parser (rnc_rnode.h).
-bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *keep = NULL);
+// Waits up to window_ms for "rnc-config" on Serial or the BOOT button. With `window` and `rn`
+// (RNode mode, where a host may already be speaking KISS) every byte also goes to the RNode
+// module and its replies are written back at once, so a host that gives up on DETECT after
+// a fraction of a second is still answered (rnc_rnode.h).
+bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *window = NULL, rnc_rnode *rn = NULL);
 // Runs the console until reboot; does not return.
 void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason);
 

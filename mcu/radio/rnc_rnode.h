@@ -49,11 +49,11 @@ typedef struct rnc_rnode {
   /* what the host has set; the radio runs only when all five are set and the state is on */
   rnc_lora_params p;
   uint8_t set, on;
-  uint8_t sf_min;      /* lowest spreading factor the chip takes (5, or 6 for an SX127x) */
+  uint8_t sf_min;      /* lowest spreading factor the chip takes (5, or 7 for an SX127x) */
   int8_t txp_max;      /* highest output power the board accepts, dBm */
   uint16_t lock_short, lock_long; /* airtime locks, hundredths of a percent; 0 = not set */
   uint32_t default_budget_ms;     /* the budget the owner prepared; restored by _reset */
-  uint32_t last_tx_packets;       /* to notice a finished transmission (READY) */
+  uint8_t ready_owed;             /* the queue was full: READY is sent when it has room again */
   uint8_t reset_requested;        /* the host sent RESET (0x55, 0xf8) */
   /* parser */
   uint8_t in[RNC_RNODE_IN_MAX];
@@ -94,21 +94,17 @@ void rnc_rnode_reset(rnc_rnode *rn);
  * In rnode mode the serial port carries KISS frames only, but every boot still opens the
  * short setup window in which the line "rnc-config" starts the setup console (so a board
  * can always be switched back without reflashing). A host may start talking at once after
- * a USB-triggered reset, so the bytes seen during the window that are not that line are
- * kept (the newest RNC_RNODE_WINDOW_KEEP) and replayed to rnc_rnode_feed afterwards. */
-#define RNC_RNODE_WINDOW_KEEP 256u
+ * a USB-triggered reset and gives up on DETECT after a fraction of a second, so during the
+ * window every byte also goes to the module as usual (identity commands cannot start the
+ * radio); the window only watches for the console line. */
 typedef struct rnc_rnode_window {
-  uint8_t keep[RNC_RNODE_WINDOW_KEEP];
-  uint16_t keep_len;
   uint8_t line[11]; /* the current line, up to one byte more than the console line */
   uint8_t line_len;
 } rnc_rnode_window;
 void rnc_rnode_window_init(rnc_rnode_window *w);
-/* One byte from the host during the window. Returns 1 when the line "rnc-config" has just
- * been completed (by LF or CR); that line is not among the bytes kept. */
-int rnc_rnode_window_feed(rnc_rnode_window *w, uint8_t byte);
-/* Moves up to `capacity` kept bytes, oldest first, to `out`; returns how many. */
-size_t rnc_rnode_window_take(rnc_rnode_window *w, uint8_t *out, size_t capacity);
+/* One byte from the host during the window: passed to `rn` (may be NULL) and watched for
+ * the line "rnc-config". Returns 1 when that line has just been completed (by LF or CR). */
+int rnc_rnode_window_feed(rnc_rnode_window *w, rnc_rnode *rn, uint8_t byte, uint64_t now_us);
 
 #ifdef __cplusplus
 }

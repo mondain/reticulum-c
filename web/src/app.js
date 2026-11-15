@@ -1,6 +1,6 @@
 import './style.css';
 import { flashEsp, flashNrf, enterDfu } from './flash.js';
-import { buildCommands, parseSettings } from './config.js';
+import { buildCommands, parseSettings, modeAfterSave } from './config.js';
 import { waitForPort, deviceWarning } from './ports.js';
 import { connectConsole } from './provision.js';
 const $=id=>document.getElementById(id), catalogueUrl=new URL('./firmware/catalog.json',document.baseURI);
@@ -140,7 +140,7 @@ $('connect-settings').addEventListener('click',async()=>{
 });
 $('config-form').addEventListener('submit',async event=>{
  event.preventDefault();if(!settings?.inConsole||busy)return;
- try{const f=new FormData(event.currentTarget),values=Object.fromEntries(f);values.applyWifi=f.has('applyWifi');values.openNetwork=f.has('openNetwork');values.keepExistingPassword=currentPasswordSet;values.currentMode=currentMode;const commands=buildCommands(values,selected);busy=true;syncActions();configStatus('Writing validated settings…');for(const c of commands)await settings.command(c);if(values.applyWifi&&values.transport==='wifi')currentPasswordSet=!!values.password||(!values.openNetwork&&currentPasswordSet);$('config-form').elements.namedItem('password').value='';configStatus('Settings saved. Press Reboot & run to apply them.','success');}
+ try{const f=new FormData(event.currentTarget),values=Object.fromEntries(f);values.applyWifi=f.has('applyWifi');values.openNetwork=f.has('openNetwork');values.keepExistingPassword=currentPasswordSet;values.currentMode=currentMode;const commands=buildCommands(values,selected);busy=true;syncActions();configStatus('Writing validated settings…');for(const c of commands)await settings.command(c);if(values.applyWifi&&values.transport==='wifi')currentPasswordSet=!!values.password||(!values.openNetwork&&currentPasswordSet);$('config-form').elements.namedItem('password').value='';currentMode=modeAfterSave(values,currentMode);configStatus('Settings saved. Press Reboot & run to apply them.','success');}
  catch(e){configStatus(`Settings were not confirmed saved: ${e.message||String(e)}. Read them again before retrying.`,'error');log(e.message||e);}finally{busy=false;syncActions();}
 });
 $('reboot').addEventListener('click',async()=>{

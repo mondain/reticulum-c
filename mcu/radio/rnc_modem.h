@@ -54,6 +54,9 @@ typedef struct rnc_modem_ops {
   /* Standby / sleep (lowest power, configuration lost on some chips: init again). */
   void (*standby)(rnc_modem *m);
   void (*sleep)(rnc_modem *m);
+  /* Whether init would accept `p` (band, bandwidth, spreading factor, power table): 0, or the
+   * negative code init would return. Does not touch the chip; may be NULL. */
+  int (*check)(rnc_modem *m, const rnc_lora_params *p);
 } rnc_modem_ops;
 
 struct rnc_modem {

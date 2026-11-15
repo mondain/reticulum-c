@@ -260,12 +260,14 @@ static void test_invalid_values(void) {
   CHECK_EQ(f.a.li.params.txp_dbm, 10);
   CHECK(rnc_rnode_radio_on(&f.rn));
   /* an SX127x board: spreading factor 5 is not available, the board's power limit is lower */
-  fixture_init(&f, 1276, 6, 20);
+  fixture_init(&f, 1276, 7, 20);
   CHECK(silent(&f.rn, 4, (const uint8_t[]){5}, 1));
-  CHECK(set_u8(&f.rn, 4, 6));
+  CHECK(silent(&f.rn, 4, (const uint8_t[]){6}, 1)); /* SF6 needs implicit headers: not offered */
+  CHECK(set_u8(&f.rn, 4, 7));
   CHECK(silent(&f.rn, 3, (const uint8_t[]){21}, 1));
   CHECK(set_u8(&f.rn, 3, 20));
-  CHECK(set_u8(&f.rn, 3, (uint8_t)-9));
+  CHECK(silent(&f.rn, 3, (const uint8_t[]){0xF7}, 1)); /* -9 dBm: the chip's power table starts higher */
+  CHECK(set_u8(&f.rn, 3, 2));
 }
 
 static void test_airtime_locks(void) {
@@ -523,43 +525,37 @@ static void test_flow_control(void) {
 
 static void test_boot_window(void) {
   rnc_rnode_window window;
-  uint8_t out[512];
+  rnc_rnode rn;
+  uint8_t out[64];
   size_t i, n;
   const uint8_t detect[] = {FEND, 0x08, 0x73, FEND};
+  rnc_rnode_init(&rn, NULL, 0x70, 0x71, 0x42);
   rnc_rnode_window_init(&window);
-  /* a host's DETECT during the window is not a console request and is kept for replay */
+  /* a host's DETECT during the window is answered at once (a host that resets the board by
+   * opening the port gives up after a fraction of a second) and is not a console request */
   for (i = 0; i < sizeof(detect); i++)
-    CHECK_EQ(rnc_rnode_window_feed(&window, detect[i]), 0);
-  n = rnc_rnode_window_take(&window, out, sizeof(out));
-  CHECK_EQ(n, sizeof(detect));
-  CHECK(n == sizeof(detect) && !memcmp(out, detect, n));
-  CHECK_EQ(rnc_rnode_window_take(&window, out, sizeof(out)), 0); /* taken once */
-  /* the console line is recognised and not replayed; the lines before it are kept */
-  rnc_rnode_window_init(&window);
-  CHECK_EQ(rnc_rnode_window_feed(&window, 'Z'), 0);
-  CHECK_EQ(rnc_rnode_window_feed(&window, '\n'), 0);
+    CHECK_EQ(rnc_rnode_window_feed(&window, &rn, detect[i], 1000), 0);
+  n = rnc_rnode_pull(&rn, out, sizeof(out));
+  CHECK_BYTES(out, n, FEND, 0x08, 0x46, FEND);
+  /* the console line is recognised by its terminator; the module has seen only noise */
   for (i = 0; i < 10; i++)
-    CHECK_EQ(rnc_rnode_window_feed(&window, (uint8_t)"rnc-config"[i]), 0);
-  CHECK_EQ(rnc_rnode_window_feed(&window, '\n'), 1);
-  n = rnc_rnode_window_take(&window, out, sizeof(out));
-  CHECK_EQ(n, 2);
-  CHECK(n == 2 && out[0] == 'Z' && out[1] == '\n');
-  /* a CR LF terminated line works too, and a near miss does not */
+    CHECK_EQ(rnc_rnode_window_feed(&window, &rn, (uint8_t)"rnc-config"[i], 1000), 0);
+  CHECK_EQ(rnc_rnode_window_feed(&window, &rn, '\n', 1000), 1);
+  CHECK_EQ(rn.stats.frames_bad, 0);
+  n = EXCHANGE(&rn, out, FEND, 0x08, 0x73, FEND); /* and still answers a clean frame */
+  CHECK_BYTES(out, n, FEND, 0x08, 0x46, FEND);
+  /* a CR terminated line works too, a near miss and a too long line do not */
   rnc_rnode_window_init(&window);
   for (i = 0; i < 10; i++)
-    (void)rnc_rnode_window_feed(&window, (uint8_t)"rnc-config"[i]);
-  CHECK_EQ(rnc_rnode_window_feed(&window, '\r'), 1);
+    (void)rnc_rnode_window_feed(&window, NULL, (uint8_t)"rnc-config"[i], 0);
+  CHECK_EQ(rnc_rnode_window_feed(&window, NULL, '\r', 0), 1);
   rnc_rnode_window_init(&window);
   for (i = 0; i < 9; i++)
-    (void)rnc_rnode_window_feed(&window, (uint8_t)"rnc-confi"[i]);
-  CHECK_EQ(rnc_rnode_window_feed(&window, '\n'), 0);
-  /* a long stream keeps only the newest bytes */
-  rnc_rnode_window_init(&window);
-  for (i = 0; i < 300; i++)
-    (void)rnc_rnode_window_feed(&window, (uint8_t)i);
-  n = rnc_rnode_window_take(&window, out, sizeof(out));
-  CHECK_EQ(n, 256);
-  CHECK(n == 256 && out[0] == (uint8_t)44 && out[255] == (uint8_t)299);
+    (void)rnc_rnode_window_feed(&window, NULL, (uint8_t)"rnc-confi"[i], 0);
+  CHECK_EQ(rnc_rnode_window_feed(&window, NULL, '\n', 0), 0);
+  for (i = 0; i < 30; i++)
+    (void)rnc_rnode_window_feed(&window, NULL, (uint8_t)"rnc-config"[i % 10], 0);
+  CHECK_EQ(rnc_rnode_window_feed(&window, NULL, '\n', 0), 0);
 }
 
 static void test_prepare_for_host(void) {
@@ -629,6 +625,73 @@ static void test_two_transports(void) {
   CHECK_EQ(rnc_rnode_pump(&rn, &iob, 3000), 0); /* idle */
 }
 
+/* Review fix 1: a radio the host was told is off never starts again by itself */
+static void test_no_restart_after_refusal(void) {
+  fixture f;
+  uint8_t reply[64];
+  size_t n;
+  unsigned t;
+  fixture_init(&f, 1262, 5, 22);
+  configure_all(&f);
+  f.a.m126.absent = 1; /* the chip does not answer */
+  n = send_cmd(&f.rn, 6, (const uint8_t[]){1}, 1, reply, sizeof(reply));
+  CHECK_BYTES(reply, n, FEND, 6, 0, FEND);
+  f.a.m126.absent = 0; /* it comes back; nothing may restart the radio */
+  for (t = 0; t < 20000; t += 10) {
+    f.med.now_us += 10000u;
+    sim_medium_advance(&f.med);
+    rnc_rnode_step(&f.rn, f.med.now_us);
+  }
+  CHECK(!rnc_lora_if_up(&f.a.li));
+  CHECK(!rnc_rnode_radio_on(&f.rn));
+  /* the same while running: a change the chip refuses turns the radio off and says so */
+  configure_all(&f);
+  CHECK(set_u8(&f.rn, 6, 1));
+  CHECK(rnc_rnode_radio_on(&f.rn));
+  f.a.m126.absent = 1;
+  n = send_cmd(&f.rn, 4, (const uint8_t[]){9}, 1, reply, sizeof(reply));
+  CHECK_BYTES(reply, n, FEND, 4, 9, FEND, FEND, 6, 0, FEND);
+  f.a.m126.absent = 0;
+  for (t = 0; t < 20000; t += 10) {
+    f.med.now_us += 10000u;
+    sim_medium_advance(&f.med);
+    rnc_rnode_step(&f.rn, f.med.now_us);
+  }
+  CHECK(!rnc_lora_if_up(&f.a.li));
+  CHECK(!rnc_rnode_radio_on(&f.rn));
+}
+
+/* Review fix 5: a value the chip cannot do is not echoed */
+static void test_chip_limits(void) {
+  fixture f;
+  uint8_t b[4];
+  fixture_init(&f, 1262, 5, 22);
+  put32(b, 140000000u); /* inside the generic band, below the SX1262's 150 MHz */
+  CHECK(silent(&f.rn, 1, b, 4));
+  put32(b, 970000000u); /* above its 960 MHz */
+  CHECK(silent(&f.rn, 1, b, 4));
+  CHECK(set_u32(&f.rn, 1, 868100000u));
+  fixture_init(&f, 1276, 7, 20);
+  CHECK(set_u32(&f.rn, 1, 140000000u)); /* an SX1276 takes the whole band */
+}
+
+/* Review fix 2: READY is owed whenever a full queue gets room again, whatever freed it */
+static void test_ready_after_queue_wipe(void) {
+  static duo d;
+  uint8_t pkt[100];
+  unsigned i;
+  duo_init(&d);
+  fill_pattern(pkt, sizeof(pkt));
+  for (i = 0; i < RNC_LORA_TXQ; i++)
+    host_sends_packet(&d, pkt, sizeof(pkt));
+  d.host_out_len = rnc_rnode_pull(&d.f.rn, d.host_out, sizeof(d.host_out));
+  CHECK_EQ(count_ready(d.host_out, d.host_out_len), RNC_LORA_TXQ - 1u); /* the queue is full */
+  CHECK(set_u8(&d.f.rn, 4, 9)); /* a new setting wipes the queue: it did not go out */
+  d.host_out_len = 0;
+  duo_run(&d, 20);
+  CHECK_EQ(count_ready(d.host_out, d.host_out_len), 1);
+}
+
 int main(void) {
   test_identity_commands();
   test_escaping();
@@ -645,6 +708,9 @@ int main(void) {
   test_boot_window();
   test_prepare_for_host();
   test_two_transports();
+  test_no_restart_after_refusal();
+  test_chip_limits();
+  test_ready_after_queue_wipe();
   if (failures) {
     fprintf(stderr, "test_rnode: %d failure(s)\n", failures);
     return 1;
