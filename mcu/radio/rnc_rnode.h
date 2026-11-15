@@ -53,6 +53,7 @@ typedef struct rnc_rnode {
   uint16_t lock_short, lock_long; /* airtime locks, hundredths of a percent; 0 = not set */
   uint32_t default_budget_ms;     /* the budget the owner prepared; restored by _reset */
   uint32_t last_tx_packets;       /* to notice a finished transmission (READY) */
+  uint8_t reset_requested;        /* the host sent RESET (0x55, 0xf8) */
   /* parser */
   uint8_t in[RNC_RNODE_IN_MAX];
   uint16_t in_len;
@@ -77,6 +78,9 @@ void rnc_rnode_feed(rnc_rnode *rn, const uint8_t *bytes, size_t size, uint64_t n
 size_t rnc_rnode_pull(rnc_rnode *rn, uint8_t *out, size_t capacity);
 /* One pass of the work; returns the milliseconds after which it wants to be called again. */
 unsigned rnc_rnode_step(rnc_rnode *rn, uint64_t now_us);
+/* 1 once after the host asked for a restart (RESET, 0x55 0xf8): the owner reboots the board.
+ * The radio is already off and the settings are cleared. */
+int rnc_rnode_reset_requested(rnc_rnode *rn);
 /* The host is gone (disconnect, reset): clears the parser and the pending output. */
 void rnc_rnode_reset(rnc_rnode *rn);
 

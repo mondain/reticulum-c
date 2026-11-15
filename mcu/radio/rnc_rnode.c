@@ -13,6 +13,8 @@
 #define CMD_DETECT 0x08u
 #define DETECT_REQ 0x73u
 #define DETECT_RESP 0x46u
+#define CMD_LEAVE 0x0Au
+#define CMD_RESET 0x55u
 #define CMD_DATA 0x00u
 #define CMD_READY 0x0Fu
 #define CMD_STAT_RSSI 0x23u
@@ -127,6 +129,16 @@ static void handle(rnc_rnode *rn, uint8_t cmd, const uint8_t *data, size_t size,
     }
     if (rn->li->q_count < RNC_LORA_TXQ)
       send_ready(rn); /* room for another */
+    break;
+  case CMD_LEAVE: /* the host exits: the radio goes off and nothing is left configured */
+    if (size == 1u && data[0] == 0xFFu)
+      rnc_rnode_reset(rn);
+    break;
+  case CMD_RESET:
+    if (size == 1u && data[0] == 0xF8u) {
+      rnc_rnode_reset(rn);
+      rn->reset_requested = 1;
+    }
     break;
   case CMD_DETECT:
     if (size == 1u && data[0] == DETECT_REQ) {
@@ -329,6 +341,12 @@ unsigned rnc_rnode_step(rnc_rnode *rn, uint64_t now_us) {
     }
   }
   return wait;
+}
+
+int rnc_rnode_reset_requested(rnc_rnode *rn) {
+  int r = rn->reset_requested;
+  rn->reset_requested = 0;
+  return r;
 }
 
 void rnc_rnode_reset(rnc_rnode *rn) {

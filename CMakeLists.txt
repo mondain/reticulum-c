@@ -638,6 +638,23 @@ if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE
         add_executable(echo_client mcu/tests/echo_client.c)
         target_link_libraries(echo_client PRIVATE reticulum_c_host OpenSSL::Crypto)
         target_compile_options(echo_client PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        # the RNode device side against this project's host RNode adapter over a pty, with a
+        # simulated LoRa peer; the radio sources are portable C, so no mcu profile is needed
+        file(GLOB RNC_MCU_RADIO_SRCS ${CMAKE_SOURCE_DIR}/mcu/radio/*.c)
+        add_executable(test_rnode_host mcu/tests/test_rnode_host.c ${RNC_MCU_RADIO_SRCS}
+            mcu/tests/radio/lora_sim.c mcu/tests/radio/sx126x_model.c mcu/tests/radio/sx127x_model.c
+            mcu/tests/radio/sim_board.c)
+        target_include_directories(test_rnode_host PRIVATE mcu/radio mcu/tests)
+        target_link_libraries(test_rnode_host PRIVATE reticulum_c_host OpenSSL::Crypto m)
+        target_compile_options(test_rnode_host PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        add_executable(rnode_pty_device mcu/tests/rnode_pty_device.c ${RNC_MCU_RADIO_SRCS}
+            mcu/tests/radio/lora_sim.c mcu/tests/radio/sx126x_model.c mcu/tests/radio/sx127x_model.c
+            mcu/tests/radio/sim_board.c)
+        target_include_directories(rnode_pty_device PRIVATE mcu/radio mcu/tests)
+        target_link_libraries(rnode_pty_device PRIVATE m)
+        target_compile_options(rnode_pty_device PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        add_test(NAME reticulum_mcu_rnode_host COMMAND test_rnode_host)
+        set_tests_properties(reticulum_mcu_rnode_host PROPERTIES LABELS "mcu;pty" TIMEOUT 300)
         add_test(NAME reticulum_mcu_host COMMAND ${RNC_BASH_MCU} ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_host.sh
             ${CMAKE_SOURCE_DIR} $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>)
         set_tests_properties(reticulum_mcu_host PROPERTIES LABELS "mcu;network;pty" TIMEOUT 600)
@@ -687,6 +704,12 @@ if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE
             set_tests_properties(reticulum_mcu_tcp_reference PROPERTIES
                 ENVIRONMENT "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                 LABELS "mcu;reticulum_interop;network" TIMEOUT 600)
+            add_test(NAME reticulum_mcu_rnode_reference COMMAND ${RNC_BASH_MCU}
+                ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_rnode_reference.sh $<TARGET_FILE:rnode_pty_device>
+                ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR} ${CMAKE_SOURCE_DIR}/mcu/tests/ref_rnode_driver.py)
+            set_tests_properties(reticulum_mcu_rnode_reference PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                SKIP_RETURN_CODE 77 LABELS "mcu;reticulum_interop;pty" TIMEOUT 120)
             add_test(NAME reticulum_mcu_host_reference COMMAND ${RNC_BASH_MCU}
                 ${CMAKE_SOURCE_DIR}/mcu/tests/mcu_host.sh ${CMAKE_SOURCE_DIR}
                 $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:echo_client>

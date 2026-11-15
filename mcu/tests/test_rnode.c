@@ -462,6 +462,30 @@ static void test_reset_restores_default_budget(void) {
   CHECK_EQ(f.a.li.budget.budget_ms, 36000);
 }
 
+/* the reference sends LEAVE (0x0a, 0xff) when it exits and RESET (0x55, 0xf8) to restart the device */
+static void test_leave_and_reset(void) {
+  fixture f;
+  fixture_init(&f, 1262, 5, 22);
+  configure_all(&f);
+  CHECK(set_u8(&f.rn, 6, 1));
+  CHECK(rnc_rnode_radio_on(&f.rn));
+  CHECK(silent(&f.rn, 0x0A, (const uint8_t[]){0x00}, 1)); /* wrong payload: ignored */
+  CHECK(rnc_rnode_radio_on(&f.rn));
+  CHECK(silent(&f.rn, 0x0A, (const uint8_t[]){0xFF}, 1)); /* the host left: radio off, settings gone */
+  CHECK(!rnc_rnode_radio_on(&f.rn));
+  CHECK(!rnc_lora_if_up(&f.a.li));
+  CHECK(silent(&f.rn, 6, (const uint8_t[]){1}, 1));
+  configure_all(&f);
+  CHECK(set_u8(&f.rn, 6, 1));
+  CHECK(silent(&f.rn, 0x55, (const uint8_t[]){0x00}, 1));
+  CHECK(rnc_rnode_radio_on(&f.rn));
+  CHECK_EQ(rnc_rnode_reset_requested(&f.rn), 0);
+  CHECK(silent(&f.rn, 0x55, (const uint8_t[]){0xF8}, 1)); /* restart the device */
+  CHECK(!rnc_rnode_radio_on(&f.rn));
+  CHECK_EQ(rnc_rnode_reset_requested(&f.rn), 1); /* the owner reboots the board */
+  CHECK_EQ(rnc_rnode_reset_requested(&f.rn), 0); /* reported once */
+}
+
 static size_t count_ready(const uint8_t *buf, size_t len) {
   size_t pos = 0, plen, count = 0;
   uint8_t cmd, payload[600];
@@ -506,6 +530,7 @@ int main(void) {
   test_reset_drops_everything();
   test_flow_control();
   test_reset_restores_default_budget();
+  test_leave_and_reset();
   if (failures) {
     fprintf(stderr, "test_rnode: %d failure(s)\n", failures);
     return 1;
