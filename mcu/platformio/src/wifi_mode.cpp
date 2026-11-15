@@ -39,6 +39,11 @@ bool rnc_settings_load(rnc_mcu_cfg *cfg) {
     copy_string(cfg->ssid, sizeof(cfg->ssid), prefs.getString("ssid", ""));
     copy_string(cfg->password, sizeof(cfg->password), prefs.getString("password", ""));
     copy_string(cfg->host, sizeof(cfg->host), prefs.getString("host", ""));
+    {
+      String pin = prefs.getString("ble_pin", ""); // checked like the console does
+      if (pin.length() == 6)
+        (void)rnc_mcu_cfg_set(cfg, "ble.pin", pin.c_str());
+    }
     uint16_t port = prefs.getUShort("port", 0);
     if (port != 0)
       cfg->port = port;
@@ -105,6 +110,10 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
   ok = (prefs.putString("password", cfg->password) > 0 || !cfg->password[0]) && ok;
   ok = (prefs.putString("host", cfg->host) > 0 || !cfg->host[0]) && ok;
   ok = prefs.putUShort("port", cfg->port) == 2 && ok;
+  if (cfg->ble_pin[0])
+    ok = prefs.putString("ble_pin", cfg->ble_pin) > 0 && ok;
+  else
+    prefs.remove("ble_pin"); // no PIN: Bluetooth stays off
   ok = prefs.putString("lora_mode", cfg->lora.mode == RNC_LORA_MODE_LEAF      ? "leaf"
                                     : cfg->lora.mode == RNC_LORA_MODE_GATEWAY ? "gateway"
                                                                                : "off") > 0 && ok;

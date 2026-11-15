@@ -2,7 +2,7 @@
 // the Adafruit bootloader keeps in place). See ble_mode.h.
 #include "ble_mode.h"
 
-#if RNC_HAVE_BLE
+#if RNC_HAVE_BLE && (defined(ARDUINO_ARCH_NRF52) || defined(NRF52840_XXAA))
 #include <Arduino.h>
 #include <bluefruit.h>
 

@@ -200,7 +200,7 @@ active: 1 percent of every hour by default; the host may change it with the airt
 commands, within 0.01 to 100 percent, and the smaller of the short and long lock values
 is used. You are responsible for what the host configures.
 
-Bluetooth LE (nRF52840 boards: T-Echo, RAK4631, T114): in rnode mode the board can also be
+Bluetooth LE (all PlatformIO boards): in rnode mode the board can also be
 driven over Bluetooth, as a stock RNode is. It is off, and does not advertise, until you
 set a six digit PIN:  set ble.pin 123456  (console or the setup tools; it is never printed,
 get shows only (set) or (empty), and an empty value turns Bluetooth off again). The board
@@ -208,12 +208,15 @@ then advertises as "RNode XXXX" (XXXX: the last 16 bits of its address) with the
 service; a phone or computer pairs with the PIN (passkey entry) and uses the same KISS
 stream over the two UART characteristics. Without pairing there is no access: notifications
 cannot be enabled and writes are refused. USB keeps working alongside; the module answers
-the transport that last sent bytes. ESP32 boards have no Bluetooth transport yet.
+the transport that last sent bytes. nRF52840 boards use the Adafruit Bluefruit stack; the ESP32
+and ESP32-S3 boards use NimBLE-Arduino (pinned in platformio.ini; it adds about 5 percent of
+a 3.3 MB flash partition, and on the boards with a 1.3 MB partition the image is now 86
+percent full on the T-Beam v1.0/1.1 and 74 percent on the T3-S3). On ESP32 the link must be
+authenticated before any byte is accepted or sent.
 
 Not included: stock RNode EEPROM provisioning, signing and firmware-update flows
 (rnodeconf cannot flash or provision this firmware), the display, battery and temperature
-reports, and Bluetooth on ESP32 boards. The generic ESP-IDF image has no radio selection
-and ignores this mode.
+reports. The generic ESP-IDF image has no Bluetooth or radio selection and ignores this mode.
 
 Evidence: the protocol logic is unit tested, and tested against this project's own host
 RNode adapter over a pseudo terminal with a simulated LoRa peer. On 2026-11-14 a T-Echo
@@ -236,7 +239,8 @@ Bluetooth evidence (T-Echo, 2026-11-14): from a Linux PC (BlueZ) the board adver
 "RNode 23B8", pairing with the PIN succeeded, notifications could be enabled, and writing
 DETECT and the version request to the UART characteristic returned c0 08 46 c0 c0 50 01 4a c0
 (detect OK, firmware 1.74) as notifications. Unpaired, notifications stayed off and a write
-request was refused. NOT verified: Sideband or any phone, a full radio exchange over
+request was refused. The ESP32 Bluetooth transport was only compiled (all five ESP32
+environments), never run on hardware. NOT verified: Sideband or any phone, a full radio exchange over
 Bluetooth, many connect/disconnect cycles, and the range.
 
 Provisioning
