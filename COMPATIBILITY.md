@@ -325,7 +325,7 @@ announce. Native: two-daemon listening (stored, restart, stamp requirement,
 authorised sources, encryption with and without the key) and auto-connect with
 bootstrap teardown and fallback.
 
-Not implemented: Weave announcements, path gravity, and announcements for I2P interfaces.
+I2P and Weave interfaces announce too, and `gravity`, `default_gravity`, `autoconnect_interface_gravity` and `autoconnect_announces_to_internal` take effect (the same announce heard on an interface of higher gravity moves the path there). Checked by unit tests and a reading of `Discovery.py` and `Transport.py` at the pinned commit, not against a live reference node.
 
 ## Logging hook (`feature/logging-hook`)
 

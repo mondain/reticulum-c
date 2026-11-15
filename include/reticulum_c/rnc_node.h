@@ -133,6 +133,9 @@ typedef struct rnc_interface_policy {
    * INTERNAL interface. An interface with announces_to_internal set lets its announces go to
    * INTERNAL interfaces even from a BOUNDARY one. */
   int no_announces_from_internal, announces_to_internal;
+  /* Reference `gravity` (default 0): the same announce heard later on an interface of higher
+   * gravity, with no more hops, moves the path there. */
+  int gravity;
   rnc_ingress_policy ingress;
 } rnc_interface_policy;
 rnc_result rnc_node_interface_policy(rnc_node *node, uint32_t interface_id,

@@ -628,6 +628,53 @@ static void announce_hop_limit(void) {
     rnc_node_free(n);
   }
 }
+/* Interface gravity: the same announce heard later on an interface of higher gravity moves the path
+ * there (Transport.inbound, RNS 1.5.5); equal or lower gravity, or more hops, keep the path. */
+static void set_gravity(rnc_node *n, uint32_t id, int gravity) {
+  rnc_interface_policy pol;
+  memset(&pol, 0, sizeof(pol));
+  pol.announce_cap_permille = 20;
+  pol.gravity = gravity;
+  CHECK(rnc_node_interface_policy(n, id, &pol) == RNC_OK);
+}
+static void gravity(void) {
+  rnc_identity src = identity(), self = identity();
+  rnc_packet announce, far;
+  rnc_route route;
+  rnc_node *n = rnc_node_new(&self, 0, rng, NULL);
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK &&
+        rnc_node_add_interface(n, 2, 1000000) == RNC_OK &&
+        rnc_node_add_interface(n, 3, 1000000) == RNC_OK);
+  set_gravity(n, 1, 0);
+  set_gravity(n, 2, 5);
+  set_gravity(n, 3, 5);
+  CHECK(rnc_announce_create(&src, "gravity.test", NULL, 0, 1000, rng, NULL, &announce) == RNC_OK);
+  CHECK(rnc_node_input(n, 1, &announce, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_lookup(n, announce.destination, 0, &route) == RNC_OK && route.interface_id == 1);
+  /* the same announce on a higher-gravity interface takes the path over */
+  CHECK(rnc_node_input(n, 2, &announce, 1000, 10) == RNC_OK);
+  CHECK(rnc_node_lookup(n, announce.destination, 10, &route) == RNC_OK && route.interface_id == 2 &&
+        route.hops == 1);
+  /* equal gravity does not */
+  CHECK(rnc_node_input(n, 3, &announce, 1000, 20) == RNC_OK);
+  CHECK(rnc_node_lookup(n, announce.destination, 20, &route) == RNC_OK && route.interface_id == 2);
+  /* lower gravity does not */
+  CHECK(rnc_node_input(n, 1, &announce, 1000, 30) == RNC_OK);
+  CHECK(rnc_node_lookup(n, announce.destination, 30, &route) == RNC_OK && route.interface_id == 2);
+  rnc_node_free(n);
+  /* a longer path on the higher-gravity interface does not replace a shorter one */
+  n = rnc_node_new(&self, 0, rng, NULL);
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK &&
+        rnc_node_add_interface(n, 2, 1000000) == RNC_OK);
+  set_gravity(n, 2, 5);
+  far = announce;
+  far.hops = 3;
+  CHECK(rnc_node_input(n, 1, &announce, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_input(n, 2, &far, 1000, 10) == RNC_OK);
+  CHECK(rnc_node_lookup(n, announce.destination, 10, &route) == RNC_OK && route.interface_id == 1 &&
+        route.hops == 1);
+  rnc_node_free(n);
+}
 /* Destination.accepts_links: link requests to a destination that does not
  * accept them are dropped before the application sees them. */
 static void accepts_links(void) {
@@ -691,6 +738,8 @@ int main(int argc, char **argv) {
     hops_to();
   else if (!strcmp(argv[1], "announce_hop_limit"))
     announce_hop_limit();
+  else if (!strcmp(argv[1], "gravity"))
+    gravity();
   else if (!strcmp(argv[1], "accepts_links"))
     accepts_links();
   else if (!strcmp(argv[1], "destination_data"))

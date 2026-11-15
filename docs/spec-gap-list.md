@@ -16,7 +16,7 @@ Concrete remaining gaps include:
 
 1. Announce propagation: pending path responses are not cancelled by a neighbour's rebroadcast the way the reference's shared announce table does (section 2).
 2. Host interface options: Auto device lists/multiple NICs and scope selection, UDP multiple targets, TCP device binding/`i2p_tunneled`, serial locking/hardware flow control, and the I2P/RNode Multi/Weave options listed in section 4.
-3. Management and discovery details: the RPC rate table is empty; two discovery auto-connect options are accepted without effect; I2P/Weave discovery announcements are absent.
+3. Management and discovery details: the remote-management `rates` query is absent. Done: gravity, `autoconnect_announces_to_internal`, and I2P/Weave discovery announcements (2026-11-15).
 4. API differences: no resend convenience method or per-link physical-signal tracking; event APIs replace Python callbacks. Bounded tables and queues differ from the reference's capacities.
 5. CLI feature subsets and stand-alone protocol examples (sections 5 and 6). The C `rnodeconf` tool does not flash firmware; the separate browser flasher under `web/` targets this project's MCU firmware.
 
@@ -174,7 +174,7 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 | AX.25 KISS | IMPL | `AX25KISSInterface`: UI frames (APZRNS to callsign-SSID), TNC preamble/txtail/persistence/slottime, flow control with 5s unlock |
 | Discoverable interfaces (8.14) | IMPL | `discoverable`, `discovery_name`, `announce_interval`, `discovery_stamp_value`, `discovery_encrypt`, `reachable_on` (or an executable), `publish_ifac`, `latitude` / `longitude` / `height` or `location_cmd`, `discovery_lxmf_address`, `discovery_frequency` / `bandwidth` / `modulation`; announced for Backbone, TCP server, RNode, KISS and kiss-framed TCP client interfaces |
 | Discoverable interfaces (8.14) | IMPL | Listening (`discover_interfaces`, `required_discovery_value`, `interface_discovery_sources`) and auto-connect of Backbone announcements (`autoconnect_discovered_interfaces`, `autoconnect_unverified_implementations`, `autoconnect_interface_mode`, `bootstrap_only`) |
-| Discoverable interfaces (8.14) | MISS | I2P and Weave announcements; `autoconnect_interface_gravity` and `autoconnect_announces_to_internal` are accepted but have no effect |
+| Discoverable interfaces (8.14) | IMPL | I2P announcements (type `I2PInterface`, `reachable_on` the b32 address when `connectable` and the router has given one) and Weave announcements (frequency, bandwidth and integer modulation from `discovery_*`; the channel is nil, as the reference never sets it). `gravity` and `default_gravity` per interface: the same announce heard later on an interface of higher gravity, with no more hops, takes the path over, and the management stats report it. `autoconnect_interface_gravity` and `autoconnect_announces_to_internal` apply to auto-connected interfaces. Not covered: the takeover does not pass the announce on again, and no check ran against a live reference node |
 | Custom interfaces (8.1) | PART | No plugin API, but hosts can call `rnc_node_add_interface` directly |
 
 ### Common options and policy (8.15-8.20)
@@ -241,5 +241,5 @@ The original Phase A library list (proofs/receipts, policy/rate controls, recall
 
 1. Done on 2026-11-15: hop limit, `MODE_INTERNAL`, path-response grace and the RPC rate table (section 2). Open: cancelling a pending path response when a neighbour rebroadcasts, and the remote-management `rates` query.
 2. Fill the host options in section 4, including Auto device selection, UDP multiple targets and serial/TCP gaps; retain separate validation for emulator-backed host adapters and real hardware.
-3. Implement or reject the two no-effect discovery options, then cover I2P/Weave discovery announcements.
+3. Done on 2026-11-15: the two discovery options and I2P/Weave discovery announcements (section 6).
 4. Extend the CLI subsets and add runnable stand-alone protocol examples. Keep browser MCU firmware installation distinct from reference `rnodeconf` parity.

@@ -170,14 +170,13 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
                                 "outgoing_pr_frequency",
                                 "txdrb",
                                 "packet_filter_hits",
-                                "gravity",
                                 "burst_count",
                                 "pr_burst_count"};
   static const char *nils[] = {"announce_rate_target", "announce_rate_grace",
                                "announce_rate_penalty", "burst_activated",
                                "pr_burst_activated"};
   size_t i;
-  (void)rnc_rpc_write_map(w, 24u + sizeof(zeros) / sizeof(*zeros) +
+  (void)rnc_rpc_write_map(w, 25u + sizeof(zeros) / sizeof(*zeros) +
                                  sizeof(nils) / sizeof(*nils) + 4u + 3u);
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
@@ -235,7 +234,8 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
   key_bool(w, "txstalled", 0);
   key_bool(w, "burst_active", 0);
   key_bool(w, "pr_burst_active", 0);
-  key_bool(w, "announces_to_internal", s->local);
+  key_int(w, "gravity", s->gravity);
+  key_bool(w, "announces_to_internal", s->announces_to_internal);
 }
 static void all_stats(rnc_rpc_writer *w, rnc_host *h, const config *c,
                       const rnc_identity *id, uint64_t uptime) {

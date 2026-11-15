@@ -55,6 +55,69 @@ static void internal_mode_config_test(void) {
   CHECK(!read_config(path, &c));
   CHECK(!unlink(path) && !rmdir(dir));
 }
+static void gravity_config_test(void) {
+  char dir[] = "/tmp/rnc-config-gravity-XXXXXX", path[256];
+  config c;
+  CHECK(mkdtemp(dir) && snprintf(path, sizeof(path), "%s/config", dir) > 0);
+  config_file(path,
+              "[reticulum]\ndefault_gravity=3\nautoconnect_interface_gravity=7\n"
+              "autoconnect_announces_to_internal=Yes\n"
+              "[interfaces]\n[[A]]\ntype=TCPClientInterface\ntarget_host=127.0.0.1\ntarget_port=7001\ngravity=9\n"
+              "[[B]]\ntype=SerialInterface\nport=/dev/null\n[[C]]\ntype=SerialInterface\nport=/dev/null\ngravity=-2\n");
+  CHECK(read_config(path, &c));
+  CHECK(c.interfaces[0].host.gravity == 9 && c.interfaces[1].host.gravity == 3 &&
+        c.interfaces[2].host.gravity == -2); /* default_gravity applies where an interface sets none */
+  CHECK(c.autoconnect_gravity == 7 && c.autoconnect_announces_to_internal == 1);
+  config_file(path, "[reticulum]\nautoconnect_interface_gravity=high\n[interfaces]\n");
+  CHECK(!read_config(path, &c));
+  config_file(path, "[interfaces]\n[[A]]\ntype=SerialInterface\nport=/dev/null\n");
+  CHECK(read_config(path, &c) && c.interfaces[0].host.gravity == 0 && c.autoconnect_gravity == 0 &&
+        c.autoconnect_announces_to_internal == 0);
+  CHECK(!unlink(path) && !rmdir(dir));
+}
+/* Discovery announcements for I2P and Weave interfaces (Discovery.py: reachable_on is the b32 of a connectable
+ * I2P interface; a Weave interface announces frequency, bandwidth, channel and modulation). */
+static void discovery_types_test(void) {
+  char dir[] = "/tmp/rnc-config-disctypes-XXXXXX", path[256];
+  config c;
+  rnc_identity id;
+  uint8_t private_key[64] = {5};
+  rnc_discovery_info info;
+  CHECK(mkdtemp(dir) && snprintf(path, sizeof(path), "%s/config", dir) > 0);
+  config_file(path,
+              "[interfaces]\n[[W]]\ntype=WeaveInterface\nport=/dev/null\ndiscoverable=Yes\n"
+              "discovery_frequency=868000000\ndiscovery_bandwidth=125000\ndiscovery_modulation=2\n"
+              "[[I]]\ntype=I2PInterface\nconnectable=Yes\ndiscoverable=Yes\n");
+  CHECK(read_config(path, &c));
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK);
+  mgmt.identity = &id;
+  mgmt.settings = c;
+  CHECK(discovery_describe(&c.interfaces[0], &info));
+  CHECK(!strcmp(info.type, "WeaveInterface") && info.has_frequency && info.frequency == 868000000u &&
+        info.has_bandwidth && info.bandwidth == 125000u && info.has_modulation &&
+        !strcmp(info.modulation, "2") && !info.has_channel && !info.reachable_on[0]);
+  {
+    uint8_t packed[512];
+    size_t used;
+    CHECK(rnc_discovery_pack(&info, packed, sizeof(packed), &used) == RNC_OK && used > 20);
+  }
+  /* an I2P interface announces its b32 only when it is connectable and has one */
+  memset(&info, 0, sizeof(info));
+  i2p_publish(&info, 1, "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst");
+  CHECK(!strcmp(info.type, "I2PInterface") &&
+        !strcmp(info.reachable_on, "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst") && !info.has_port);
+  memset(&info, 0, sizeof(info));
+  i2p_publish(&info, 0, "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst");
+  CHECK(!strcmp(info.type, "I2PInterface") && !info.reachable_on[0]);
+  memset(&info, 0, sizeof(info));
+  i2p_publish(&info, 1, "");
+  CHECK(!strcmp(info.type, "I2PInterface") && !info.reachable_on[0]);
+  config_file(path,
+              "[interfaces]\n[[W]]\ntype=WeaveInterface\nport=/dev/null\ndiscoverable=Yes\ndiscovery_modulation=fast\n");
+  CHECK(!read_config(path, &c)); /* the reference reads it as an integer */
+  mgmt.identity = NULL;
+  CHECK(!unlink(path) && !rmdir(dir));
+}
 static void stable_interface_test(void) {
   char dir[] = "/tmp/rnc-config-binding-XXXXXX", path[256];
   config first, reordered, changed;
@@ -218,11 +281,14 @@ int main(void) {
   rnc_rpc_writer_init(&w, out, sizeof(out));
   interface_stats(&w, host, &status);
   CHECK(rnc_rpc_writer_finish(&w, &size) == RNC_OK && size > 50);
+  CHECK(has(out, size, "gravity", 7) && has(out, size, "announces_to_internal", 21));
   rnc_host_free(host);
   rnc_node_free(node);
   checkpoint_retry_test();
   stable_interface_test();
   internal_mode_config_test();
+  gravity_config_test();
+  discovery_types_test();
   puts("node RPC response tests passed");
   return 0;
 }
