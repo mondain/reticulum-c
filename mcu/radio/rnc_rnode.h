@@ -36,6 +36,8 @@ typedef struct rnc_rnode_stats {
   uint32_t frames_ok;     /* complete frames handled */
   uint32_t frames_bad;    /* frames dropped: bad escape or longer than RNC_RNODE_IN_MAX */
   uint32_t out_dropped;   /* replies dropped because the host side was not draining */
+  uint32_t drops_radio_off; /* host packets dropped because the radio was not on */
+  uint32_t drops_queue;   /* host packets the transmit queue could not take */
   uint8_t last_cmd;       /* the command of the last complete frame */
   uint16_t last_len;      /* its payload size */
 } rnc_rnode_stats;
@@ -49,6 +51,8 @@ typedef struct rnc_rnode {
   uint8_t sf_min;      /* lowest spreading factor the chip takes (5, or 6 for an SX127x) */
   int8_t txp_max;      /* highest output power the board accepts, dBm */
   uint16_t lock_short, lock_long; /* airtime locks, hundredths of a percent; 0 = not set */
+  uint32_t default_budget_ms;     /* the budget the owner prepared; restored by _reset */
+  uint32_t last_tx_packets;       /* to notice a finished transmission (READY) */
   /* parser */
   uint8_t in[RNC_RNODE_IN_MAX];
   uint16_t in_len;

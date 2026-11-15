@@ -294,6 +294,206 @@ static void test_airtime_locks(void) {
   CHECK_EQ(f.a.li.budget.budget_ms, 36000);
 }
 
+/* ---- data path, flow control, signal reports (Task 4) ------------------------------ */
+
+/* two boards on one medium: `f.a` is driven through the RNode module, `peer` is a plain
+ * LoRa interface */
+typedef struct duo {
+  fixture f;
+  sim_board peer;
+  uint8_t host_out[8192]; /* everything the module has said to the host */
+  size_t host_out_len;
+} duo;
+static void duo_init(duo *d) {
+  rnc_lora_params p = {0};
+  fixture_init(&d->f, 1262, 5, 22);
+  sim_board_init(&d->peer, &d->f.med, 1276, 2, 10000);
+  sim_link_all(&d->f.med, 100);
+  p.freq_hz = 915000000u;
+  p.bw_hz = 125000u;
+  p.sf = 8;
+  p.cr = 5;
+  p.txp_dbm = 10;
+  CHECK_EQ(sim_board_start(&d->peer, &p), 0);
+  d->host_out_len = 0;
+  configure_all(&d->f);
+  CHECK(set_u8(&d->f.rn, 6, 1));
+  CHECK(rnc_rnode_radio_on(&d->f.rn));
+}
+static void duo_run(duo *d, unsigned ms) {
+  unsigned t;
+  for (t = 0; t < ms; t += 4) {
+    d->f.med.now_us += 4000u;
+    sim_medium_advance(&d->f.med);
+    rnc_lora_if_step(&d->peer.li, d->f.med.now_us);
+    rnc_rnode_step(&d->f.rn, d->f.med.now_us);
+    d->host_out_len += rnc_rnode_pull(&d->f.rn, d->host_out + d->host_out_len, sizeof(d->host_out) - d->host_out_len);
+  }
+}
+/* sends a data frame (command 0) to the module */
+static void host_sends_packet(duo *d, const uint8_t *pkt, size_t n) {
+  uint8_t frame[2048];
+  size_t k = kiss(frame, 0x00, pkt, n);
+  rnc_rnode_feed(&d->f.rn, frame, k, d->f.med.now_us);
+}
+/* the next KISS frame in `buf` from `*pos`: its command, and its unescaped payload */
+static int next_frame(const uint8_t *buf, size_t len, size_t *pos, uint8_t *cmd, uint8_t *payload, size_t *plen) {
+  size_t i = *pos, k = 0;
+  int esc = 0;
+  while (i < len && buf[i] != FEND)
+    i++;
+  while (i < len && buf[i] == FEND) /* the closing delimiter of one frame, the opening of the next */
+    i++;
+  if (i >= len)
+    return 0;
+  *cmd = buf[i++];
+  for (; i < len && buf[i] != FEND; i++) {
+    uint8_t b = buf[i];
+    if (esc) {
+      b = b == TFEND ? FEND : FESC;
+      esc = 0;
+    } else if (b == FESC) {
+      esc = 1;
+      continue;
+    }
+    payload[k++] = b;
+  }
+  if (i >= len)
+    return 0;
+  *plen = k;
+  *pos = i; /* the closing delimiter is the next frame's opening one */
+  return 1;
+}
+static void fill_pattern(uint8_t *p, size_t n) {
+  size_t i;
+  for (i = 0; i < n; i++)
+    p[i] = (uint8_t)(i * 7u + 3u);
+  p[5] = FEND; /* bytes that need escaping in both directions */
+  p[6] = FESC;
+  p[n - 1] = FEND;
+}
+
+static void test_data_path(void) {
+  static duo d;
+  uint8_t pkt[500], got[508], payload[600], cmd;
+  size_t pos = 0, plen, n;
+  int seen_rssi = 0, seen_snr = 0, seen_data = 0;
+  duo_init(&d);
+  /* host to air */
+  fill_pattern(pkt, sizeof(pkt));
+  host_sends_packet(&d, pkt, sizeof(pkt));
+  duo_run(&d, 3000);
+  n = rnc_lora_if_recv(&d.peer.li, got, sizeof(got));
+  CHECK_EQ(n, 500);
+  CHECK(n == 500 && !memcmp(got, pkt, 500));
+  /* air to host: the signal figures first, then the packet */
+  d.host_out_len = 0;
+  fill_pattern(pkt, 300);
+  CHECK_EQ(rnc_lora_if_send(&d.peer.li, pkt, 300, d.f.med.now_us), 0);
+  duo_run(&d, 3000);
+  while (next_frame(d.host_out, d.host_out_len, &pos, &cmd, payload, &plen)) {
+    if (cmd == 0x23) {
+      CHECK(!seen_snr && !seen_data);
+      CHECK_EQ(plen, 1);
+      CHECK_EQ(payload[0], d.f.a.li.stats.last_rssi_dbm + 157);
+      seen_rssi = 1;
+    } else if (cmd == 0x24) {
+      CHECK(seen_rssi && !seen_data);
+      CHECK_EQ(plen, 1);
+      CHECK_EQ((int8_t)payload[0], d.f.a.li.stats.last_snr_quarter_db);
+      seen_snr = 1;
+    } else if (cmd == 0x00) {
+      CHECK(seen_rssi && seen_snr);
+      CHECK_EQ(plen, 300);
+      CHECK(plen == 300 && !memcmp(payload, pkt, 300));
+      seen_data = 1;
+    }
+  }
+  CHECK(seen_rssi && seen_snr && seen_data);
+}
+
+/* Review Focus 1 */
+static void test_data_before_radio_on(void) {
+  static duo d;
+  uint8_t pkt[100];
+  fixture_init(&d.f, 1262, 5, 22);
+  sim_board_init(&d.peer, &d.f.med, 1276, 2, 10000);
+  sim_link_all(&d.f.med, 100);
+  d.host_out_len = 0;
+  fill_pattern(pkt, sizeof(pkt));
+  host_sends_packet(&d, pkt, sizeof(pkt)); /* nothing configured */
+  configure_all(&d.f);                     /* settings made, state still off */
+  host_sends_packet(&d, pkt, sizeof(pkt));
+  duo_run(&d, 10000);
+  CHECK_EQ(d.f.rn.stats.drops_radio_off, 2);
+  CHECK_EQ(d.f.med.air_us[d.f.a.radio_id], 0);
+  CHECK(!rnc_lora_if_up(&d.f.a.li));
+}
+
+/* Review Focus 4 */
+static void test_reset_drops_everything(void) {
+  static duo d;
+  uint8_t pkt[100], out[64];
+  size_t n;
+  duo_init(&d);
+  fill_pattern(pkt, sizeof(pkt));
+  host_sends_packet(&d, pkt, sizeof(pkt));
+  host_sends_packet(&d, pkt, sizeof(pkt));
+  host_sends_packet(&d, pkt, sizeof(pkt));
+  rnc_rnode_feed(&d.f.rn, (const uint8_t[]){FEND, 0x08, 0x73}, 3, 0); /* half a frame */
+  rnc_rnode_reset(&d.f.rn);
+  CHECK(!rnc_rnode_radio_on(&d.f.rn)); /* the radio is off until the next host configures it */
+  CHECK(!rnc_lora_if_up(&d.f.a.li));
+  duo_run(&d, 10000);
+  CHECK_EQ(d.f.med.air_us[d.f.a.radio_id], 0);
+  d.host_out_len = 0;
+  n = EXCHANGE(&d.f.rn, out, FEND, 0x08, 0x73, FEND);
+  CHECK_BYTES(out, n, FEND, 0x08, 0x46, FEND);
+  /* the next host starts from scratch: settings are gone, state on is refused */
+  CHECK(silent(&d.f.rn, 6, (const uint8_t[]){1}, 1));
+}
+
+static void test_reset_restores_default_budget(void) {
+  fixture f;
+  fixture_init(&f, 1262, 5, 22);
+  CHECK(echoed(&f.rn, 0x0c, (const uint8_t[]){0x27, 0x10}, 2)); /* a host raises it to 100 percent */
+  CHECK_EQ(f.a.li.budget.budget_ms, 3600000);
+  rnc_rnode_reset(&f.rn); /* the next host starts from the 1 percent default */
+  CHECK_EQ(f.a.li.budget.budget_ms, 36000);
+}
+
+static size_t count_ready(const uint8_t *buf, size_t len) {
+  size_t pos = 0, plen, count = 0;
+  uint8_t cmd, payload[600];
+  while (next_frame(buf, len, &pos, &cmd, payload, &plen))
+    if (cmd == 0x0F)
+      count++;
+  return count;
+}
+static void test_flow_control(void) {
+  static duo d;
+  uint8_t pkt[100];
+  unsigned i;
+  size_t ready_before;
+  duo_init(&d);
+  d.host_out_len = 0;
+  fill_pattern(pkt, sizeof(pkt));
+  /* the queue takes RNC_LORA_TXQ packets; READY follows each one that leaves room */
+  for (i = 0; i < RNC_LORA_TXQ; i++)
+    host_sends_packet(&d, pkt, sizeof(pkt));
+  d.host_out_len += rnc_rnode_pull(&d.f.rn, d.host_out, sizeof(d.host_out));
+  CHECK_EQ(count_ready(d.host_out, d.host_out_len), RNC_LORA_TXQ - 1u);
+  /* a packet beyond the queue is dropped and counted, with no READY */
+  ready_before = count_ready(d.host_out, d.host_out_len);
+  host_sends_packet(&d, pkt, sizeof(pkt));
+  d.host_out_len += rnc_rnode_pull(&d.f.rn, d.host_out + d.host_out_len, sizeof(d.host_out) - d.host_out_len);
+  CHECK_EQ(count_ready(d.host_out, d.host_out_len), ready_before);
+  CHECK_EQ(d.f.rn.stats.drops_queue, 1);
+  /* once one has gone out, READY comes */
+  duo_run(&d, 3000);
+  CHECK(count_ready(d.host_out, d.host_out_len) > ready_before);
+}
+
 int main(void) {
   test_identity_commands();
   test_escaping();
@@ -301,6 +501,11 @@ int main(void) {
   test_settings_and_state();
   test_invalid_values();
   test_airtime_locks();
+  test_data_path();
+  test_data_before_radio_on();
+  test_reset_drops_everything();
+  test_flow_control();
+  test_reset_restores_default_budget();
   if (failures) {
     fprintf(stderr, "test_rnode: %d failure(s)\n", failures);
     return 1;

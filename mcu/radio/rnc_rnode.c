@@ -13,6 +13,10 @@
 #define CMD_DETECT 0x08u
 #define DETECT_REQ 0x73u
 #define DETECT_RESP 0x46u
+#define CMD_DATA 0x00u
+#define CMD_READY 0x0Fu
+#define CMD_STAT_RSSI 0x23u
+#define CMD_STAT_SNR 0x24u
 #define CMD_FREQUENCY 0x01u
 #define CMD_BANDWIDTH 0x02u
 #define CMD_TXPOWER 0x03u
@@ -37,6 +41,8 @@ void rnc_rnode_init(rnc_rnode *rn, rnc_lora_if *li, uint8_t platform, uint8_t mc
   rn->board = board;
   rn->sf_min = 5;
   rn->txp_max = 22;
+  if (li)
+    rn->default_budget_ms = li->budget.budget_ms;
 }
 
 void rnc_rnode_set_limits(rnc_rnode *rn, uint8_t sf_min, int8_t txp_max_dbm) {
@@ -100,10 +106,28 @@ static void apply_airtime(rnc_rnode *rn) {
     rnc_airtime_set_limit(&rn->li->budget, v);
 }
 
+static void send_ready(rnc_rnode *rn) {
+  static const uint8_t one = 1;
+  put_frame(rn, CMD_READY, &one, 1);
+}
+
 static void handle(rnc_rnode *rn, uint8_t cmd, const uint8_t *data, size_t size, uint64_t now_us) {
   uint8_t v[2];
-  (void)now_us;
   switch (cmd) {
+  case CMD_DATA:
+    if (size == 0u)
+      break;
+    if (!rnc_rnode_radio_on(rn)) {
+      rn->stats.drops_radio_off++; /* never transmit before the host has configured the radio */
+      break;
+    }
+    if (rnc_lora_if_send(rn->li, data, size, now_us) != 0) {
+      rn->stats.drops_queue++;
+      break;
+    }
+    if (rn->li->q_count < RNC_LORA_TXQ)
+      send_ready(rn); /* room for another */
+    break;
   case CMD_DETECT:
     if (size == 1u && data[0] == DETECT_REQ) {
       v[0] = DETECT_RESP;
@@ -279,13 +303,44 @@ size_t rnc_rnode_pull(rnc_rnode *rn, uint8_t *out, size_t capacity) {
 }
 
 unsigned rnc_rnode_step(rnc_rnode *rn, uint64_t now_us) {
-  if (rn->li)
-    return rnc_lora_if_step(rn->li, now_us);
-  return 100u;
+  unsigned wait = 100u;
+  if (!rn->li)
+    return wait;
+  wait = rnc_lora_if_step(rn->li, now_us);
+  if (rn->li->stats.tx_packets != rn->last_tx_packets) {
+    rn->last_tx_packets = rn->li->stats.tx_packets;
+    if (rn->li->q_count < RNC_LORA_TXQ)
+      send_ready(rn); /* a transmission finished */
+  }
+  /* a received packet goes to the host with its signal figures; it waits in the interface
+   * until the host side has room for the worst case (every byte escaped) */
+  if (RNC_RNODE_OUT_MAX - rn->out_len >= 2u * RNC_AIR_PACKET_MAX + 16u) {
+    uint8_t pkt[RNC_AIR_PACKET_MAX], v;
+    int rssi, snr;
+    size_t n = rnc_lora_if_recv(rn->li, pkt, sizeof(pkt));
+    if (n) {
+      rssi = rn->li->stats.last_rssi_dbm + 157;
+      snr = rn->li->stats.last_snr_quarter_db;
+      v = (uint8_t)(rssi < 0 ? 0 : rssi > 255 ? 255 : rssi);
+      put_frame(rn, CMD_STAT_RSSI, &v, 1);
+      v = (uint8_t)(int8_t)(snr < -128 ? -128 : snr > 127 ? 127 : snr);
+      put_frame(rn, CMD_STAT_SNR, &v, 1);
+      put_frame(rn, CMD_DATA, pkt, n);
+    }
+  }
+  return wait;
 }
 
 void rnc_rnode_reset(rnc_rnode *rn) {
   rn->in_len = 0;
   rn->in_frame = rn->in_escaped = rn->in_discard = 0;
   rn->out_len = 0;
+  /* the next host starts from nothing: no settings, radio off, the default airtime budget */
+  rn->set = rn->on = 0;
+  memset(&rn->p, 0, sizeof(rn->p));
+  rn->lock_short = rn->lock_long = 0;
+  if (rn->li) {
+    rnc_lora_if_stop(rn->li);
+    rn->li->budget.budget_ms = rn->default_budget_ms;
+  }
 }
