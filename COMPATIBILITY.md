@@ -1172,10 +1172,14 @@ A script for the unmodified reference `RNodeInterface` exists but has not been r
 2026-11-14 a T-Echo in rnode mode, driven over USB by the same host adapter, exchanged
 announces both ways over the air with a T-Beam Supreme running this project's gateway
 firmware (915 MHz, 125 kHz, SF8, 0 dBm, close range; RSSI about -31 dBm, SNR 12 to 14 dB).
-Sideband, rnsd, a stock RNode on the other end, range and load are unverified.
+Sideband connected over Bluetooth LE on 2026-11-15 (see below); rnsd, a stock RNode on the other end, range and load are unverified.
 
 Bluetooth LE for rnode mode (nRF52840 boards: Bluefruit; ESP32 boards: NimBLE-Arduino, compiled only): Nordic UART service, name "RNode XXXX", passkey
 pairing with an operator-set six digit PIN (off until set). Checked once from a Linux PC
 (BlueZ) on a T-Echo: pairing, notifications, detect and version over the UART characteristics,
-and no access without pairing. Sideband, phones, a radio exchange over Bluetooth and any
-run of the ESP32 transport on hardware are not covered.
+and no access without pairing. On 2026-11-15 Android Sideband connected to the T-Echo over
+BLE after the phone was paired with the PIN (Sideband needs "Connect using Bluetooth" and
+"Device requires BLE" on, then a restart). With the Supreme gateway as the other station
+(915 MHz, 125 kHz, SF8, 0 dBm, close range) the T-Echo counted RX 2 and TX 2, RSSI -46 dBm,
+SNR 12.5 dB, read from its status screen. Not covered: what Sideband itself displayed, other
+phones, range and load, and any run of the ESP32 transport on hardware.
