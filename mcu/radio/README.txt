@@ -16,7 +16,7 @@ are authored from the same datasheets as the drivers and can share mistakes.
 
 RNode mode (added after that bench run): rnc_rnode.* is the device side of the RNode
 KISS protocol on top of the same rnc_lora_if; see mcu/README.txt "RNode mode". It has
-no hardware evidence yet. The radio is started only by the module, only after the host
+one short hardware check (T-Echo, USB, this project's host adapter: detect, configure, an announce sent; nobody confirmed hearing it); see mcu/README.txt. The radio is started only by the module, only after the host
 has set every transmit setting and the radio state; the airtime budget stays active.
 
 What is here

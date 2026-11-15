@@ -1165,5 +1165,7 @@ temperature reports, Bluetooth.
 Evidence: unit tests of the framer, every command and the failure cases; this project's
 host RNode adapter over a pseudo terminal against the module with a simulated radio and
 a simulated peer (detect, configuration, announce out, announce in with signal figures).
-A script for the unmodified reference `RNodeInterface` exists but has not been run, and
-nothing has been run on hardware.
+A script for the unmodified reference `RNodeInterface` exists but has not been run. On
+2026-11-14 a T-Echo in rnode mode was driven over USB by the same host adapter (detect,
+radio configured, one 167 byte announce sent); reception by another station, Sideband,
+rnsd and range are unverified.

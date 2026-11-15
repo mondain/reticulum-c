@@ -1,7 +1,8 @@
 RNode mode for the reticulum-c microcontroller firmware: design
 ================================================================
 
-Status: draft for approval, 2026-11-14. Nothing is built yet.
+Status: approved 2026-11-14. USB stage implemented and bench-checked once on a T-Echo
+(see mcu/README.txt); Bluetooth stage not built.
 
 1. Intent
 ---------

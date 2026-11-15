@@ -206,9 +206,15 @@ reports, and Bluetooth (planned, see docs/rnode-mode-plan.txt). The generic ESP-
 has no radio selection and ignores this mode.
 
 Evidence: the protocol logic is unit tested, and tested against this project's own host
-RNode adapter over a pseudo terminal with a simulated LoRa peer. A script that does the
-same against the unmodified reference RNodeInterface exists (mcu/tests/mcu_rnode_reference.sh)
-but needs pyserial and has not been run. NOT TESTED ON HARDWARE YET.
+RNode adapter over a pseudo terminal with a simulated LoRa peer. On 2026-11-14 a T-Echo
+running this firmware in rnode mode was driven over USB by that host adapter (915 MHz,
+125 kHz, SF8, CR 4/5, 0 dBm): the board was detected, the radio settings were
+acknowledged (radio_ready), and an announce of 167 bytes was handed to it and counted as
+sent. NOT verified: that another station heard it (no second radio was in use), anything
+with the unmodified reference RNodeInterface, Sideband or rnsd (a script for the reference,
+mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and has not been run),
+rnodeconf (it needs the EEPROM commands, which are not implemented), receiving, range and
+load. Other boards build only.
 
 Provisioning
 ------------
