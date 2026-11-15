@@ -39,7 +39,7 @@ not the current feature inventory or a new certification claim.
 ## Original SDK expansion scope
 
 [PR #2](https://github.com/mondain/reticulum-c/pull/2) adds a bounded C11 SDK
-with a sans-I/O protocol core and a separate optional POSIX host. Version 0.2.0
+with a sans-I/O protocol core and a separate optional POSIX host. Version 0.2.1
 uses shared ABI 1 because public packet/events support MTUs up to 4096.
 Default MTU remains 500 and the default Channel TX window remains two messages.
 OpenSSL 3 is required; BZip2 compression is enabled by default and can be disabled.

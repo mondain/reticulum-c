@@ -1,4 +1,4 @@
-version: "0.2.0"
+version: "0.2.1"
 description: "Reticulum protocol core (C11, sans-I/O) for ESP32 and ESP32-S3: mcu capacity profile, portable crypto"
 url: "https://github.com/mondain/reticulum-c"
 license: "MIT"
