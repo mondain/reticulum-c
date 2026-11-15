@@ -46,6 +46,22 @@ int rnc_lora_if_start(rnc_lora_if *li, const rnc_lora_params *params) {
 
 int rnc_lora_if_up(const rnc_lora_if *li) { return li->state != S_DOWN; }
 
+void rnc_lora_if_stop(rnc_lora_if *li) {
+  if (li->state != S_DOWN && li->modem->ops->standby)
+    li->modem->ops->standby(li->modem);
+  li->state = S_DOWN;
+  li->retry_us = 0; /* 0: no automatic restart */
+  li->q_head = li->q_count = 0;
+  li->rx_size = 0;
+  li->budget_waiting = 0;
+  li->last_seq = 0xFFu;
+}
+
+int rnc_lora_if_reconfigure(rnc_lora_if *li, const rnc_lora_params *params) {
+  rnc_lora_if_stop(li);
+  return rnc_lora_if_start(li, params);
+}
+
 uint32_t rnc_lora_if_bitrate(const rnc_lora_if *li) { return rnc_lora_bitrate(&li->params); }
 
 int rnc_lora_if_send(rnc_lora_if *li, const uint8_t *packet, size_t size, uint64_t now_us) {

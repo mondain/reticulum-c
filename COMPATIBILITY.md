@@ -1151,3 +1151,28 @@ No range test, sustained-load/soak test or over-the-air qualification against
 stock RNode firmware has been completed. Other boards remain covered by builds
 and models. Supreme LR1121 variants and the original T-Beam v1.2 are unsupported;
 the Supreme environment targets the SX1262 variant.
+
+## RNode mode of the microcontroller firmware (`feature/rnode-mode`)
+
+The PlatformIO firmware can run as the device side of the RNode KISS protocol
+(`mode rnode`), so that a host's own Reticulum drives the board's LoRa radio. The command
+set is the one this project's host adapter and RNS 1.5.5 `RNodeInterface` use (detect,
+firmware 1.74, platform, MCU, board, frequency, bandwidth, power, spreading factor,
+coding rate, radio state, airtime locks, ready, data, RSSI and SNR reports, leave, reset).
+Not implemented: EEPROM, signing and firmware-update flows, display, battery and
+temperature reports, Bluetooth.
+
+Evidence: unit tests of the framer, every command and the failure cases; this project's
+host RNode adapter over a pseudo terminal against the module with a simulated radio and
+a simulated peer (detect, configuration, announce out, announce in with signal figures).
+A script for the unmodified reference `RNodeInterface` exists but has not been run. On
+2026-11-14 a T-Echo in rnode mode, driven over USB by the same host adapter, exchanged
+announces both ways over the air with a T-Beam Supreme running this project's gateway
+firmware (915 MHz, 125 kHz, SF8, 0 dBm, close range; RSSI about -31 dBm, SNR 12 to 14 dB).
+Sideband, rnsd, a stock RNode on the other end, range and load are unverified.
+
+Bluetooth LE for rnode mode (nRF52840 boards: Bluefruit; ESP32 boards: NimBLE-Arduino, compiled only): Nordic UART service, name "RNode XXXX", passkey
+pairing with an operator-set six digit PIN (off until set). Checked once from a Linux PC
+(BlueZ) on a T-Echo: pairing, notifications, detect and version over the UART characteristics,
+and no access without pairing. Sideband, phones, a radio exchange over Bluetooth and any
+run of the ESP32 transport on hardware are not covered.

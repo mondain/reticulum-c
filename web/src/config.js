@@ -14,6 +14,11 @@ function text(value, name, min, max) {
  return s;
 }
 export function buildCommands(v, board) {
+ if (v.runMode === 'rnode') {
+  // an RNode modem: the host sets frequency, power and the rest; nothing radio-related is stored
+  if (!board?.radio) throw new Error('RNode mode needs a board with a LoRa radio.');
+  return ['set mode rnode', 'save'];
+ }
  if (!['off','leaf','gateway'].includes(v.role)) throw new Error('Choose a radio mode.');
  const commands = [];
  if (v.role !== 'off') {
@@ -46,6 +51,7 @@ export function buildCommands(v, board) {
   }
   commands.push(`set mode ${v.transport}`);
  }
+ if (v.currentMode === 'rnode' && !v.applyWifi) commands.push('set mode serial'); // leaving RNode mode
  commands.push('save');
  return commands;
 }
@@ -56,4 +62,11 @@ export function parseSettings(reply) {
   if (m && m[1] !== 'password') values[m[1]]=m[2];
  }
  return values;
+}
+// What the board's mode is after the commands of buildCommands(values) were saved; keeps the
+// page's idea of the current mode right for a second save in the same session.
+export function modeAfterSave(v, currentMode) {
+ if (v.runMode === 'rnode') return 'rnode';
+ if (v.applyWifi) return v.transport === 'wifi' ? 'wifi' : 'serial';
+ return currentMode === 'rnode' ? 'serial' : currentMode;
 }

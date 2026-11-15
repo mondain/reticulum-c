@@ -40,6 +40,8 @@ typedef struct rnc_airtime {
 /* `percent_hundredths`: 100 = 1.00 %. Values of 0 are treated as the minimum 1 (0.01 %),
  * never as "unlimited". */
 void rnc_airtime_init(rnc_airtime *a, uint32_t percent_hundredths);
+/* Changes the budget (same rules as _init) and keeps what was already booked. */
+void rnc_airtime_set_limit(rnc_airtime *a, uint32_t percent_hundredths);
 /* Airtime booked in the window ending at now_ms, in milliseconds. */
 uint32_t rnc_airtime_used(const rnc_airtime *a, uint64_t now_ms);
 /* 1 when `toa_ms` more fits in the budget now. A packet longer than the whole budget

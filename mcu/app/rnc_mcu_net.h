@@ -104,13 +104,15 @@ static inline void rnc_mcu_txq_clear(rnc_mcu_txq *q) { q->head = q->size = 0; }
 /* ---- provisioning settings ------------------------------------------------ */
 #define RNC_MCU_MODE_SERIAL "serial"
 #define RNC_MCU_MODE_WIFI "wifi"
+#define RNC_MCU_MODE_RNODE "rnode" /* a LoRa modem for a host (mcu/radio/rnc_rnode.h) */
 #define RNC_MCU_DEFAULT_PORT 4242 /* the Reticulum TCPServerInterface default */
 
 typedef struct rnc_mcu_cfg {
-  char mode[8];       /* "serial" (the default) or "wifi" */
+  char mode[8];       /* "serial" (the default), "wifi" or "rnode" */
   char ssid[33];      /* 1..32 bytes */
   char password[65];  /* empty (open network) or 8..63 characters */
   char host[64];      /* the node's name or address */
+  char ble_pin[7];    /* RNode mode over Bluetooth: six digits, or empty (Bluetooth off) */
   uint16_t port;
   rnc_lora_cfg lora;  /* the radio: off until explicitly configured (rnc_lora_cfg.h) */
 } rnc_mcu_cfg;
@@ -123,6 +125,11 @@ static inline void rnc_mcu_cfg_init(rnc_mcu_cfg *c) {
 }
 static inline int rnc_mcu_cfg_wifi_mode(const rnc_mcu_cfg *c) {
   return !strcmp(c->mode, RNC_MCU_MODE_WIFI);
+}
+/* 1 when a Bluetooth PIN is set: there is no default PIN and Bluetooth stays off without one. */
+static inline int rnc_mcu_cfg_ble_ready(const rnc_mcu_cfg *c) { return strlen(c->ble_pin) == 6u; }
+static inline int rnc_mcu_cfg_rnode_mode(const rnc_mcu_cfg *c) {
+  return !strcmp(c->mode, RNC_MCU_MODE_RNODE);
 }
 /* 1 when the settings can start a Wi-Fi connection (the mode is not looked at). */
 static inline int rnc_mcu_cfg_wifi_ready(const rnc_mcu_cfg *c) {
@@ -137,8 +144,20 @@ static inline int rnc_mcu_cfg_set(rnc_mcu_cfg *c, const char *key, const char *v
       return -1;
     return 0;
   }
+  if (!strcmp(key, "ble.pin")) {
+    size_t i;
+    if (n != 0u && n != 6u)
+      return -1;
+    for (i = 0; i < n; i++)
+      if (value[i] < '0' || value[i] > '9')
+        return -1;
+    memset(c->ble_pin, 0, sizeof(c->ble_pin));
+    memcpy(c->ble_pin, value, n);
+    return 0;
+  }
   if (!strcmp(key, "mode")) {
-    if (strcmp(value, RNC_MCU_MODE_SERIAL) && strcmp(value, RNC_MCU_MODE_WIFI))
+    if (strcmp(value, RNC_MCU_MODE_SERIAL) && strcmp(value, RNC_MCU_MODE_WIFI) &&
+        strcmp(value, RNC_MCU_MODE_RNODE))
       return -1;
     memset(c->mode, 0, sizeof(c->mode));
     memcpy(c->mode, value, n);
@@ -206,12 +225,14 @@ static inline void rnc_mcu_console_get(const rnc_mcu_cfg *cfg, const char *key, 
     (void)snprintf(tmp, sizeof(tmp), "mode=%s\nssid=%s\npassword=%s\nhost=%s\nport=%u", cfg->mode,
                    cfg->ssid, cfg->password[0] ? "(set)" : "(empty)", cfg->host,
                    (unsigned)cfg->port);
-    (void)snprintf(out, size, "%s\n%s", tmp, lora);
+    (void)snprintf(out, size, "%s\nble.pin=%s\n%s", tmp, cfg->ble_pin[0] ? "(set)" : "(empty)", lora);
     return;
   } else if (!strcmp(key, "mode")) {
     (void)snprintf(tmp, sizeof(tmp), "mode=%s", cfg->mode);
   } else if (!strcmp(key, "ssid")) {
     (void)snprintf(tmp, sizeof(tmp), "ssid=%s", cfg->ssid);
+  } else if (!strcmp(key, "ble.pin")) { /* never the value */
+    (void)snprintf(tmp, sizeof(tmp), "ble.pin=%s", cfg->ble_pin[0] ? "(set)" : "(empty)");
   } else if (!strcmp(key, "password")) { /* never the value */
     (void)snprintf(tmp, sizeof(tmp), "password=%s", cfg->password[0] ? "(set)" : "(empty)");
   } else if (!strcmp(key, "host")) {
@@ -244,7 +265,7 @@ static inline unsigned rnc_mcu_console_line(rnc_mcu_console *c, rnc_mcu_cfg *cfg
   } else if (!strcmp(cmd, "help")) {
     (void)snprintf(reply, reply_size,
                    "commands: get [key] | set key value | clear | save | reboot\n"
-                   "keys: mode (serial|wifi) ssid password host port\n"
+                   "keys: mode (serial|wifi|rnode) ssid password host port ble.pin (six digits)\n"
                    "LoRa: lora.mode (off|leaf|gateway) lora.freq lora.bw lora.sf lora.cr lora.txp\n"
                    "lora.airtime; the radio stays off until mode, freq, bw, sf, cr and txp are set\n"
                    "set mode wifi, fill in the rest, then save and reboot");

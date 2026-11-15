@@ -106,6 +106,39 @@ int main(void) {
   CHECK(cfg.port == 4965 && strstr(reply, "error"));
   type(&con, &cfg, "set mode radio", reply, sizeof(reply));
   CHECK(!strcmp(cfg.mode, "wifi") && strstr(reply, "error"));
+  /* the Bluetooth PIN: six digits, set by the operator, never printed, off until set */
+  CHECK(!rnc_mcu_cfg_ble_ready(&cfg));
+  type(&con, &cfg, "get ble.pin", reply, sizeof(reply));
+  CHECK(strstr(reply, "ble.pin=(empty)"));
+  type(&con, &cfg, "set ble.pin 123456", reply, sizeof(reply));
+  CHECK(!strstr(reply, "error") && !strcmp(cfg.ble_pin, "123456") && rnc_mcu_cfg_ble_ready(&cfg));
+  type(&con, &cfg, "get ble.pin", reply, sizeof(reply));
+  CHECK(strstr(reply, "ble.pin=(set)") && !strstr(reply, "123456"));
+  type(&con, &cfg, "get", reply, sizeof(reply));
+  CHECK(strstr(reply, "ble.pin=(set)") && !strstr(reply, "123456"));
+  {
+    static const char *bad[] = {"set ble.pin 12345", "set ble.pin 1234567", "set ble.pin 12a456",
+                                "set ble.pin 12 456", "set ble.pin -12345"};
+    unsigned i;
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      type(&con, &cfg, bad[i], reply, sizeof(reply));
+      CHECK(strstr(reply, "error") && !strcmp(cfg.ble_pin, "123456"));
+    }
+  }
+  type(&con, &cfg, "set ble.pin", reply, sizeof(reply)); /* an empty value turns Bluetooth off */
+  CHECK(!rnc_mcu_cfg_ble_ready(&cfg) && cfg.ble_pin[0] == 0);
+  type(&con, &cfg, "set ble.pin 654321", reply, sizeof(reply));
+  CHECK(rnc_mcu_cfg_ble_ready(&cfg));
+  /* the RNode modem mode */
+  type(&con, &cfg, "set mode rnode", reply, sizeof(reply));
+  CHECK(!strcmp(cfg.mode, "rnode") && rnc_mcu_cfg_rnode_mode(&cfg) && !rnc_mcu_cfg_wifi_mode(&cfg));
+  CHECK(!strstr(reply, "error"));
+  type(&con, &cfg, "get mode", reply, sizeof(reply));
+  CHECK(strstr(reply, "mode=rnode"));
+  type(&con, &cfg, "set mode xyz", reply, sizeof(reply));
+  CHECK(!strcmp(cfg.mode, "rnode") && strstr(reply, "error"));
+  type(&con, &cfg, "set mode wifi", reply, sizeof(reply));
+  CHECK(!strcmp(cfg.mode, "wifi") && !rnc_mcu_cfg_rnode_mode(&cfg));
   type(&con, &cfg, "set password short", reply, sizeof(reply)); /* WPA needs 8..63 */
   CHECK(!strcmp(cfg.password, "correct horse") && strstr(reply, "error"));
   type(&con, &cfg, "set colour red", reply, sizeof(reply));
@@ -138,6 +171,7 @@ int main(void) {
   }
   type(&con, &cfg, "clear", reply, sizeof(reply));
   CHECK(!strcmp(cfg.mode, "serial") && cfg.ssid[0] == 0 && cfg.host[0] == 0);
+  CHECK(cfg.ble_pin[0] == 0 && !rnc_mcu_cfg_ble_ready(&cfg)); /* clear removes the PIN too */
 
   /* ---- the radio settings: nothing is set after a clear, and the radio stays off until
    * every transmit setting is given */

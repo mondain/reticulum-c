@@ -15,6 +15,12 @@ void rnc_airtime_init(rnc_airtime *a, uint32_t percent_hundredths) {
   a->budget_ms = (uint32_t)ms;
 }
 
+void rnc_airtime_set_limit(rnc_airtime *a, uint32_t percent_hundredths) {
+  rnc_airtime fresh;
+  rnc_airtime_init(&fresh, percent_hundredths);
+  a->budget_ms = fresh.budget_ms;
+}
+
 uint32_t rnc_airtime_used(const rnc_airtime *a, uint64_t now_ms) {
   uint64_t minute = now_ms / RNC_AIRTIME_BIN_MS, sum = 0;
   unsigned i;

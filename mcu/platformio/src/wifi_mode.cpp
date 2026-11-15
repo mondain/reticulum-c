@@ -39,6 +39,11 @@ bool rnc_settings_load(rnc_mcu_cfg *cfg) {
     copy_string(cfg->ssid, sizeof(cfg->ssid), prefs.getString("ssid", ""));
     copy_string(cfg->password, sizeof(cfg->password), prefs.getString("password", ""));
     copy_string(cfg->host, sizeof(cfg->host), prefs.getString("host", ""));
+    {
+      String pin = prefs.getString("ble_pin", ""); // checked like the console does
+      if (pin.length() == 6)
+        (void)rnc_mcu_cfg_set(cfg, "ble.pin", pin.c_str());
+    }
     uint16_t port = prefs.getUShort("port", 0);
     if (port != 0)
       cfg->port = port;
@@ -105,6 +110,10 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
   ok = (prefs.putString("password", cfg->password) > 0 || !cfg->password[0]) && ok;
   ok = (prefs.putString("host", cfg->host) > 0 || !cfg->host[0]) && ok;
   ok = prefs.putUShort("port", cfg->port) == 2 && ok;
+  if (cfg->ble_pin[0])
+    ok = prefs.putString("ble_pin", cfg->ble_pin) > 0 && ok;
+  else
+    prefs.remove("ble_pin"); // no PIN: Bluetooth stays off
   ok = prefs.putString("lora_mode", cfg->lora.mode == RNC_LORA_MODE_LEAF      ? "leaf"
                                     : cfg->lora.mode == RNC_LORA_MODE_GATEWAY ? "gateway"
                                                                                : "off") > 0 && ok;
@@ -125,7 +134,7 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
 }
 
 // ---- provisioning -----------------------------------------------------------
-bool rnc_provision_requested(unsigned window_ms) {
+bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *window, rnc_rnode *rn) {
   static const char entry[] = "rnc-config";
   char line[24];
   size_t length = 0;
@@ -138,6 +147,11 @@ bool rnc_provision_requested(unsigned window_ms) {
   for (unsigned elapsed = 0; elapsed < window_ms; elapsed += 10) {
     while (Serial.available() > 0) {
       int c = Serial.read();
+      if (window) {
+        if (c >= 0 && rnc_rnode_window_feed(window, rn, (uint8_t)c, (uint64_t)millis() * 1000u))
+          return true;
+        continue;
+      }
       if (c == '\r' || c == '\n') {
         line[length] = 0;
         if (length == sizeof(entry) - 1 && !memcmp(line, entry, length))
@@ -154,6 +168,12 @@ bool rnc_provision_requested(unsigned window_ms) {
     if (low_ms >= 300)
       return true;
 #endif
+    if (window && rn) { // the module's replies go out at once
+      uint8_t reply[64];
+      size_t n;
+      while ((n = rnc_rnode_pull(rn, reply, sizeof(reply))) > 0)
+        Serial.write(reply, n);
+    }
     delay(10);
   }
   (void)low_ms;
@@ -206,7 +226,8 @@ void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
         print("rnc> ");
     } else {
       size_t before = con.length;
-      bool hide = con.length >= 12 && !strncmp(con.line, "set password", 12);
+      bool hide = (con.length >= 12 && !strncmp(con.line, "set password", 12)) ||
+                  (con.length >= 11 && !strncmp(con.line, "set ble.pin", 11));
       reply[0] = 0;
       (void)rnc_mcu_console_feed(&con, cfg, byte, reply, sizeof(reply));
       if (con.length > before) // accepted: echo it (the password as *)

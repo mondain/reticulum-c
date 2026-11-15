@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCommands, parseSettings } from '../src/config.js';
+import { buildCommands, parseSettings, modeAfterSave } from '../src/config.js';
 const board = { family: 'esp32', radio: 'SX1262' };
 const radio = { role:'gateway', frequency:'915', bandwidth:'125', sf:'8', cr:'5', power:'0', airtime:'1' };
 test('requires explicit frequency and power for an enabled radio', () => {
@@ -37,4 +37,28 @@ test('changing Wi-Fi host preserves an existing password unless explicitly repla
  assert.ok(!buildCommands(v,board).some(c=>c.startsWith('set password')));
  assert.ok(buildCommands({...v,openNetwork:true},board).includes('set password '));
  assert.throws(()=>buildCommands({...v,keepExistingPassword:false},board),/password|open network/i);
+});
+test('rnode mode sends only the mode: the host sets the radio', () => {
+ assert.deepEqual(buildCommands({runMode:'rnode'},board),['set mode rnode','save']);
+ assert.deepEqual(buildCommands({runMode:'rnode',...radio,applyWifi:true,transport:'wifi'},board),['set mode rnode','save']);
+ assert.throws(()=>buildCommands({runMode:'rnode'},{family:'esp32'}),/radio/i);
+});
+test('leaving rnode mode restores the serial node', () => {
+ assert.deepEqual(buildCommands({runMode:'node',currentMode:'rnode',role:'off'},board),['set lora.mode off','set mode serial','save']);
+ assert.ok(!buildCommands({runMode:'node',role:'off'},board).includes('set mode serial'));
+ const wifi={role:'off',runMode:'node',currentMode:'rnode',applyWifi:true,transport:'serial'};
+ assert.equal(buildCommands(wifi,board).filter(c=>c.startsWith('set mode')).length,1);
+});
+test('the reported rnode mode is parsed', () => {
+ assert.equal(parseSettings('mode=rnode\r\nlora.mode=off\r\nrnc> ').mode,'rnode');
+});
+test('the mode after a save follows what was saved, so a second save in the same session is right', () => {
+ assert.equal(modeAfterSave({runMode:'rnode'},'serial'),'rnode');
+ assert.equal(modeAfterSave({runMode:'node'},'rnode'),'serial');
+ assert.equal(modeAfterSave({runMode:'node',applyWifi:true,transport:'wifi'},'rnode'),'wifi');
+ assert.equal(modeAfterSave({runMode:'node',applyWifi:true,transport:'serial'},'wifi'),'serial');
+ assert.equal(modeAfterSave({runMode:'node'},'wifi'),'wifi');
+ // rnode, save, back to node, save: the second save must send the mode back
+ let mode=modeAfterSave({runMode:'rnode'},'serial');
+ assert.ok(buildCommands({runMode:'node',role:'off',currentMode:mode},board).includes('set mode serial'));
 });

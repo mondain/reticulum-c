@@ -32,9 +32,9 @@ echo "no LoRa transmit setting is compiled into the firmware configuration or so
 
 cmake -S "$SRC" -B "$D/build" -DRNC_PROFILE=mcu -DRNC_CRYPTO=portable -DBUILD_TESTING=OFF \
   -DRNC_MCU_UNIT_TESTS=ON > "$D/cmake.log" 2>&1 || fail "configure"
-cmake --build "$D/build" --target test_mcu_radio_core test_mcu_radio_drivers test_mcu_radio_sim \
+cmake --build "$D/build" --target test_mcu_radio_core test_mcu_radio_drivers test_mcu_radio_sim test_mcu_rnode \
   test_mcu_radio_app -j4 > "$D/build.log" 2>&1 || fail "build"
-for t in radio_core radio_drivers radio_sim radio_app; do
+for t in radio_core radio_drivers radio_sim radio_app rnode; do
   "$D/build/mcu/test_mcu_$t" > "$D/run_$t.log" 2>&1 || { cat "$D/run_$t.log" >&2; fail "test_mcu_$t"; }
   cat "$D/run_$t.log"
 done

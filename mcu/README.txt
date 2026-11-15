@@ -179,6 +179,70 @@ and does not announce until the link is up again. Output goes through a 4096 byt
 a frame that does not fit is dropped whole (Reticulum tolerates lost frames; a half frame
 would cost two), after the queue was given a chance to drain.
 
+RNode mode (host-driven LoRa modem)
+-----------------------------------
+Besides the Reticulum node, the PlatformIO firmware can be a LoRa modem that a host
+drives, the role of a stock RNode: set  mode rnode  in the setup console (or the browser
+setup form, "Run as: RNode modem"; tools/wifi-config.sh --mode rnode on ESP32) and reboot.
+The board then runs no Reticulum node. The serial port carries KISS frames only, in the
+RNode protocol: a host (Sideband, rnsd, this project's RNode interface) detects the board,
+sets the frequency, bandwidth, spreading factor, coding rate and power, switches the radio
+on, and exchanges raw packets. The over-the-air format is the one the node modes already
+use. Go back with  set mode serial  (the line  rnc-config  within two seconds after a
+reset still opens the setup console, in every mode).
+
+Regulatory behaviour: nothing is transmitted until the host has set all five settings
+and the radio state. A host that says it is leaving (LEAVE) or asks for a restart (RESET), or
+a board reset, turns the radio off and clears the settings. A host that disappears without
+saying so (a crash, unplugging the cable) does not: the radio keeps its settings until the
+board is reset. The airtime budget stays
+active: 1 percent of every hour by default; the host may change it with the airtime lock
+commands, within 0.01 to 100 percent, and the smaller of the short and long lock values
+is used. You are responsible for what the host configures.
+
+Bluetooth LE (all PlatformIO boards): in rnode mode the board can also be
+driven over Bluetooth, as a stock RNode is. It is off, and does not advertise, until you
+set a six digit PIN:  set ble.pin 123456  (console or the setup tools; it is never printed,
+get shows only (set) or (empty), and an empty value turns Bluetooth off again). The board
+then advertises as "RNode XXXX" (XXXX: the last 16 bits of its address) with the Nordic UART
+service; a phone or computer pairs with the PIN (passkey entry) and uses the same KISS
+stream over the two UART characteristics. Without pairing there is no access: notifications
+cannot be enabled and writes are refused. USB keeps working alongside; the module answers
+the transport that last sent bytes. nRF52840 boards use the Adafruit Bluefruit stack; the ESP32
+and ESP32-S3 boards use NimBLE-Arduino (pinned in platformio.ini; it adds about 5 percent of
+a 3.3 MB flash partition, and on the boards with a 1.3 MB partition the image is now 86
+percent full on the T-Beam v1.0/1.1 and 74 percent on the T3-S3). On ESP32 the link must be
+authenticated before any byte is accepted or sent.
+
+Not included: stock RNode EEPROM provisioning, signing and firmware-update flows
+(rnodeconf cannot flash or provision this firmware), the display, battery and temperature
+reports. The generic ESP-IDF image has no Bluetooth or radio selection and ignores this mode.
+
+Evidence: the protocol logic is unit tested, and tested against this project's own host
+RNode adapter over a pseudo terminal with a simulated LoRa peer. On 2026-11-14 a T-Echo
+running this firmware in rnode mode was driven over USB by that host adapter (915 MHz,
+125 kHz, SF8, CR 4/5, 0 dBm), with a T-Beam Supreme running the earlier gateway firmware
+(same settings, close by) as the other station:
+  - the board was detected and its radio settings acknowledged (radio_ready);
+  - an announce of 167 bytes sent through the T-Echo was received by the Supreme and
+    delivered to its serial host (announce counted);
+  - announces transmitted by the Supreme arrived at the host through the T-Echo as valid
+    announces (two of 167 bytes) with RSSI -31 dBm and SNR 12.75 and 14.25 dB.
+NOT verified: anything with the unmodified reference RNodeInterface, Sideband or rnsd (a
+script for the reference, mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and
+has not been run), a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,
+which are not implemented), range, sustained load, and the flow-control path with a real
+host. A host program that opens the Supreme's USB port resets it (ESP32-S3 USB serial),
+which is a property of that board, not of rnode mode. Other boards build only.
+
+Bluetooth evidence (T-Echo, 2026-11-14): from a Linux PC (BlueZ) the board advertised as
+"RNode 23B8", pairing with the PIN succeeded, notifications could be enabled, and writing
+DETECT and the version request to the UART characteristic returned c0 08 46 c0 c0 50 01 4a c0
+(detect OK, firmware 1.74) as notifications. Unpaired, notifications stayed off and a write
+request was refused. The ESP32 Bluetooth transport was only compiled (all five ESP32
+environments), never run on hardware. NOT verified: Sideband or any phone, a full radio exchange over
+Bluetooth, many connect/disconnect cycles, and the range.
+
 Provisioning
 ------------
 The Wi-Fi settings are NEVER compiled into a release image. They live in NVS and are

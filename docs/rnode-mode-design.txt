@@ -1,0 +1,173 @@
+RNode mode for the reticulum-c microcontroller firmware: design
+================================================================
+
+Status: approved 2026-11-14. USB stage implemented and bench-checked once on a T-Echo
+(see mcu/README.txt); Bluetooth stage not built.
+
+1. Intent
+---------
+Let a phone or computer that runs Reticulum (for example Sideband on Android, or the
+reference rnsd) use a board running this firmware as an RNode: a LoRa modem that the
+host's own Reticulum node drives. Today the firmware only runs a Reticulum node on the
+board (serial HDLC, Wi-Fi TCP or LoRa). That cannot serve a host that wants to own the
+radio, and it cannot be selected in RNode-aware tools. The owner of this project treats
+RNode support as a requirement for full Reticulum support.
+
+2. Goals
+--------
+- A new run mode "rnode": the board is a KISS modem. It takes radio settings and raw
+  frames from the host over a byte stream and returns received frames with signal
+  figures. No Reticulum node runs on the board in this mode.
+- The reference Reticulum RNodeInterface and this project's own host RNode interface
+  (src/host_posix.c, RNC_HOST_RNODE) both detect the board, accept its firmware version
+  and drive its radio.
+- Reuses the existing radio stack unchanged in behaviour: drivers (rnc_sx126x,
+  rnc_sx127x), air framing (rnc_lora_air), channel access and airtime budget
+  (rnc_lora_mac), board table (rnc_boards).
+- Selected at run time from the existing setup console and browser flasher (set mode
+  rnode), in the same image as the other modes. No second firmware image.
+- The protocol logic is portable C in mcu/radio (no platform headers), unit-tested on
+  the host against an emulated host side and, when the reference is available, against
+  the unmodified reference RNodeInterface.
+- Transport, in two stages: (1) USB serial (the board's existing Serial/CDC port),
+  (2) Bluetooth LE using the Nordic UART service, as stock RNodes do.
+
+3. Non-goals
+------------
+- Not byte-for-byte the stock RNode firmware: no EEPROM provisioning flow, signing keys,
+  bootloader-to-firmware hash chain, display or battery pages. Tools that insist on a
+  signed, provisioned device (rnodeconf --info checks, firmware update flows) are out of
+  scope for the first release.
+- No RNode Multi (several radios) and no Wi-Fi RNode transport in the first release.
+- No change to the existing serial, Wi-Fi, leaf and gateway modes.
+- No new radio chips or boards.
+
+4. Anti-goals (a technically working result that would still be a failure)
+-----------------------------------------------------------------------------
+- A board that transmits before the operator has chosen frequency, bandwidth, spreading
+  factor, coding rate and power. The project's regulatory rule stands (mcu/radio/README.txt).
+- A mode that works only against this project's own host code and fails against the
+  reference Reticulum.
+- Breaking existing images, release archives or the browser installer.
+
+5. Approaches considered
+------------------------
+A. rnode as a run mode of the existing firmware, USB first, Bluetooth second. CHOSEN.
+B. A separate RNode-only image per board: simpler boot, doubles the 8-board image, release
+   and flasher matrix.
+C. A KISS shim over the existing on-board node: the host would not own the radio, so it is
+   not an RNode.
+
+6. Design
+---------
+6.1 New portable module mcu/radio/rnc_rnode.{h,c}
+  - KISS framer and parser (FEND/FESC escaping, one command byte, payload) with bounded
+    buffers sized for a 508 byte packet.
+  - Command handler for the set the project's host side uses (src/host_posix.c) and the
+    reference RNodeInterface needs: DETECT (0x08, answer 0x46), firmware version (0x50),
+    platform (0x48), MCU (0x49), board (0x47), frequency (1), bandwidth (2), tx power (3),
+    spreading factor (4), coding rate (5), radio state (6), airtime locks (0x0b, 0x0c),
+    ready (0x0f), data (0x00), reset (0x55), statistics and RSSI/SNR reports (0x21 to
+    0x29, 0x23, 0x24). Every setting command is echoed back with the applied value, which
+    is how the host confirms it. The exact list is fixed from the reference RNodeInterface
+    at the commit pinned in PROVENANCE.md and the host code; this design does not copy it
+    from memory.
+  - Reports a firmware version that satisfies the host check (at least 1.74, the highest
+    check the host adapter applies, so the Multi check does not matter for a single radio).
+  - Owns no hardware: it is given a rnc_lora_if (below) and a byte sink/source.
+
+6.2 Runtime radio reconfiguration
+  rnc_lora_if is built from fixed parameters at start. The module needs to apply a new
+  frequency, bandwidth, spreading factor, coding rate and power while running, and to
+  switch the radio on and off with RADIO_STATE. A small, tested change adds a
+  "reconfigure" entry point to rnc_lora_if that stops the radio, replaces rnc_lora_params,
+  and restarts it. The airtime budget and CSMA state survive a reconfigure.
+
+6.3 Data path
+  - Host to air: a KISS data frame (a whole Reticulum packet up to 500 bytes) goes to
+    rnc_lora_if_send(); the existing air framing adds the header byte and splits it.
+  - Air to host: rnc_lora_if_recv() returns a reassembled packet; the module sends the
+    RSSI and SNR reports (0x23, 0x24) and then the data frame, in the order the reference
+    expects.
+  - Flow control: the module answers READY (0x0f) when the transmit queue can take
+    another packet, so the host cannot overrun RNC_LORA_TXQ.
+
+6.4 Regulatory behaviour in rnode mode (my proposal, to be confirmed)
+  - The radio stays off until the host has set all of frequency, bandwidth, spreading
+    factor, coding rate and power and has set the radio state to on. The host's
+    configuration counts as the operator's choice.
+  - The airtime budget stays active as a hard cap (default 1 percent of every hour,
+    changeable by the host through the airtime lock commands within the existing limits
+    in rnc_lora_cfg.h). Frames that exceed it are dropped and counted, as today.
+  - There are no defaults for any transmit parameter.
+
+6.5 Run-mode wiring (mcu/platformio/src, mcu/app)
+  - New configuration value mode=rnode, accepted by the setup console and by
+    tools/wifi-config.sh, persisted like the other modes.
+  - In rnode mode main.cpp does not create the Reticulum node (rnc_mcu_app). It runs a
+    task that pumps the byte stream into rnc_rnode and calls rnc_lora_if_step().
+  - Serial must carry only KISS frames: no log text, as the serial mode already does.
+  - The boot-time setup window stays exactly as today (a short window after every boot in
+    which the line "rnc-config" opens the setup console), so a board in rnode mode can
+    always be switched back without reflashing. The window matches only that exact line
+    (a KISS frame boundary resets the match). Every byte also goes to the RNode module as
+    usual and its replies are written at once, so a host that resets the board by opening
+    the port and gives up on DETECT after a fraction of a second is still answered;
+    identity commands cannot start the radio. (Design call, changed after the review: the
+    first draft buffered the bytes and replayed them after the window.)
+  - On boards with a BOOT button the existing press-to-enter gesture also works.
+  - The browser flasher's setup form gains the "rnode" host connection choice for boards
+    that have a radio. The boards' hardware-tested flags are unchanged.
+
+6.6 Bluetooth LE (stage 2)
+  - nRF52840 boards: the Adafruit Bluefruit stack in the existing Arduino core (the
+    SoftDevice stays under the Adafruit bootloader). ESP32 boards: NimBLE in the arduino-esp32
+    core. One Nordic UART service, device name "RNode XXXX" (the last bytes of the
+    identifier), with passkey pairing.
+  - PIN (design call, not agreed): the operator sets a six digit PIN in the setup console
+    (set ble.pin 123456; also in tools/wifi-config.sh and the browser setup form) and it is
+    stored with the other settings. Bluetooth stays off, and does not advertise, until a
+    PIN is set; there is no default PIN, in line with "no defaults" for the radio. Nothing
+    is printed on serial in rnode mode (see 6.5). Boards with a display may later show the
+    PIN, but that is not part of this design. The stock RNode flow of a generated PIN shown
+    on a display or sent as a KISS notice is left out because several target boards have
+    no display.
+  - The same rnc_rnode module sits behind either transport through a small byte
+    sink/source interface. Bluetooth adds no protocol logic.
+  - RAM and flash budgets are checked on nRF52840 and on the ESP32 boards before the
+    stage is accepted; if an ESP32 board cannot fit it with its other modes, Bluetooth
+    is offered only where it fits and the limit is documented.
+
+7. Testing and evidence
+-----------------------
+- Host unit tests for the framer, each command, flow control and the reconfigure entry
+  point in mcu/tests, in the style of test_radio_core.c.
+- An emulated device test: this project's host RNode adapter (RNC_HOST_RNODE) drives
+  rnc_rnode through a pseudo terminal and completes detection, configuration and a
+  frame exchange.
+- With RNC_INTEROP_TESTS: the unmodified reference RNodeInterface does the same.
+- A bench run on the T-Echo (USB first): Sideband or rnsd on a computer detects the
+  board, configures it and exchanges packets with a second node on the same settings.
+  Until that has been done, documentation states that rnode mode is build- and
+  emulator-tested only, like the other unverified items.
+- All existing tests, the release archives and the browser installer keep passing.
+
+8. Left to the builder
+----------------------
+- The final command list and exact reply formats (from the reference at the pinned
+  commit and the host code).
+- Names, file layout beyond 6.1, Kconfig and PlatformIO environment details.
+- How to split the work into stages and tests.
+
+8a. Calls made by the author after the builder check
+----------------------------------------------------
+- Boot window behaviour: bytes go to the module live during the window (6.5).
+- Operator-set Bluetooth PIN, Bluetooth off until set (6.6). The earlier draft said the
+  PIN would be shown over serial; that contradicted 6.5 and is withdrawn.
+- The reference for command lists is RNS 1.5.5 as pinned in PROVENANCE.md.
+
+9. Open decisions for the project owner
+---------------------------------------
+- Confirm 6.4 (airtime cap stays as a hard cap in rnode mode).
+- Confirm that EEPROM, signing and rnodeconf firmware flows are out of scope for the
+  first release (section 3).

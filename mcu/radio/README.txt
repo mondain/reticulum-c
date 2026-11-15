@@ -14,6 +14,11 @@ This does not establish range, sustained-load reliability, other board pin maps,
 or on-air interoperability with stock RNode firmware. The additional chip models
 are authored from the same datasheets as the drivers and can share mistakes.
 
+RNode mode (added after that bench run): rnc_rnode.* is the device side of the RNode
+KISS protocol on top of the same rnc_lora_if; see mcu/README.txt "RNode mode". It has
+a short two-radio hardware check (T-Echo in rnode mode on USB with this project's host adapter, a Supreme gateway as the other station, 915 MHz, both directions); see mcu/README.txt. The radio is started only by the module, only after the host
+has set every transmit setting and the radio state; the airtime budget stays active.
+
 What is here
 ------------
 Portable C (C11), no platform headers, no dependency on the protocol core:
@@ -33,6 +38,7 @@ Portable C (C11), no platform headers, no dependency on the protocol core:
   rnc_sx127x.*      SX1276 / SX1277 / SX1278 / SX1279 driver.
   rnc_lora_if.*     the interface adapter: a radio plus framing, CSMA and budget, exchanging
                     whole Reticulum packets (MTU 500) with the application.
+  rnc_rnode.*       the RNode KISS device side (host-driven modem), with the boot window helper
   rnc_lora_cfg.h    the radio settings (lora.mode, .freq, .bw, .sf, .cr, .txp, .airtime):
                     parsing, validation, printing.
   rnc_boards.*      the board table: chip variant, pins, TCXO, antenna switch, PMU.

@@ -31,9 +31,46 @@ static uint32_t get32(const uint8_t *p) {
   return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
+#define BLE_FILE "/rnc_ble"
+#define BLE_TEMP "/rnc_ble.tmp"
+
+// The Bluetooth PIN lives in a file of its own: the settings file has no room left and its
+// format stays readable by older firmware.
+static void load_ble_pin(rnc_mcu_cfg *cfg) {
+  char text[8];
+  File file(InternalFS);
+  if (!file.open(BLE_FILE, FILE_O_READ))
+    return;
+  int n = file.read((uint8_t *)text, 6);
+  file.close();
+  if (n == 6) {
+    text[6] = 0;
+    (void)rnc_mcu_cfg_set(cfg, "ble.pin", text); // the same checks as at the console
+  }
+}
+static bool save_ble_pin(const rnc_mcu_cfg *cfg) {
+  if (!cfg->ble_pin[0]) {
+    InternalFS.remove(BLE_FILE);
+    return true;
+  }
+  InternalFS.remove(BLE_TEMP);
+  File file(InternalFS);
+  if (!file.open(BLE_TEMP, FILE_O_WRITE))
+    return false;
+  size_t w = file.write((const uint8_t *)cfg->ble_pin, 6);
+  file.close();
+  if (w != 6) {
+    InternalFS.remove(BLE_TEMP);
+    return false;
+  }
+  InternalFS.remove(BLE_FILE);
+  return InternalFS.rename(BLE_TEMP, BLE_FILE);
+}
+
 bool rnc_settings_load(rnc_mcu_cfg *cfg) {
   uint8_t b[20];
   rnc_mcu_cfg_init(cfg);
+  load_ble_pin(cfg);
   File file(InternalFS);
   if (!file.open(SETTINGS_FILE, FILE_O_READ))
     return false;
@@ -45,6 +82,8 @@ bool rnc_settings_load(rnc_mcu_cfg *cfg) {
   // if it was stored with its "set" bit
   char text[16];
   uint8_t mode = b[4], set = b[5];
+  if (set & 0x80u) // the RNode modem mode, stored in a bit older firmware never looks at
+    (void)rnc_mcu_cfg_set(cfg, "mode", RNC_MCU_MODE_RNODE);
   (void)rnc_lora_cfg_set(&cfg->lora, "mode",
                          mode == RNC_LORA_MODE_LEAF ? "leaf" : mode == RNC_LORA_MODE_GATEWAY ? "gateway" : "off");
   if (set & RNC_LORA_SET_FREQ) {
@@ -79,7 +118,7 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
   memset(b, 0, sizeof(b));
   put32(b, SETTINGS_MAGIC);
   b[4] = cfg->lora.mode;
-  b[5] = cfg->lora.set;
+  b[5] = (uint8_t)(cfg->lora.set | (rnc_mcu_cfg_rnode_mode(cfg) ? 0x80u : 0u));
   b[6] = cfg->lora.sf;
   b[7] = cfg->lora.cr;
   b[8] = (uint8_t)cfg->lora.txp_dbm;
@@ -97,16 +136,22 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
     InternalFS.remove(SETTINGS_TEMP);
     return false;
   }
-  return InternalFS.rename(SETTINGS_TEMP, SETTINGS_FILE);
+  bool saved = InternalFS.rename(SETTINGS_TEMP, SETTINGS_FILE);
+  return save_ble_pin(cfg) && saved;
 }
 
-bool rnc_provision_requested(unsigned window_ms) {
+bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *window, rnc_rnode *rn) {
   static const char entry[] = "rnc-config";
   char line[24];
   size_t length = 0;
   for (unsigned elapsed = 0; elapsed < window_ms; elapsed += 10) {
     while (Serial.available() > 0) {
       int c = Serial.read();
+      if (window) {
+        if (c >= 0 && rnc_rnode_window_feed(window, rn, (uint8_t)c, (uint64_t)millis() * 1000u))
+          return true;
+        continue;
+      }
       if (c == '\r' || c == '\n') {
         line[length] = 0;
         if (length == sizeof(entry) - 1 && !memcmp(line, entry, length))
@@ -117,6 +162,12 @@ bool rnc_provision_requested(unsigned window_ms) {
       } else {
         length = 0;
       }
+    }
+    if (window && rn) { // the module's replies go out at once
+      uint8_t reply[64];
+      size_t n;
+      while ((n = rnc_rnode_pull(rn, reply, sizeof(reply))) > 0)
+        Serial.write(reply, n);
     }
     delay(10);
   }
@@ -138,7 +189,7 @@ void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
   print("\n\nreticulum-c provisioning console\n");
   print(reason);
   print("\nThe Reticulum node is not running. Type help. Settings are stored with save, and "
-        "used after reboot. Only the lora.* keys matter on this board.\n");
+        "used after reboot. Only mode rnode and the lora.* keys matter on this board.\n");
   rnc_mcu_console_get(cfg, NULL, reply, sizeof(reply));
   print(reply);
   print("\nrnc> ");
@@ -169,10 +220,11 @@ void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
         print("rnc> ");
     } else {
       size_t before = con.length;
+      bool hide = con.length >= 11 && !strncmp(con.line, "set ble.pin", 11); // the PIN is echoed as *
       reply[0] = 0;
       (void)rnc_mcu_console_feed(&con, cfg, byte, reply, sizeof(reply));
       if (con.length > before)
-        Serial.write(byte);
+        Serial.write(hide ? (uint8_t)'*' : byte);
       else if (con.length < before)
         print("\b \b");
     }
