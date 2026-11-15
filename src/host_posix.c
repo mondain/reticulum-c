@@ -1343,6 +1343,8 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->policy.announce_rate_grace = c->announce_rate_grace;
   f->policy.announce_rate_penalty = c->announce_rate_penalty;
   f->policy.recursive_path_requests = c->recursive_path_requests;
+  f->policy.no_announces_from_internal = c->no_announces_from_internal;
+  f->policy.announces_to_internal = c->announces_to_internal;
   f->policy.ingress = c->ingress;
   if (!copy_text(f->address, sizeof(f->address), c->address) ||
       !copy_text(f->target, sizeof(f->target), c->target) ||

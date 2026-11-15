@@ -100,7 +100,8 @@ typedef enum rnc_interface_mode {
   RNC_MODE_GATEWAY,
   RNC_MODE_ACCESS_POINT,
   RNC_MODE_ROAMING,
-  RNC_MODE_BOUNDARY
+  RNC_MODE_BOUNDARY,
+  RNC_MODE_INTERNAL /* reference MODE_INTERNAL: joins the nodes of one internal network */
 } rnc_interface_mode;
 /* Ingress/egress control (manual 8.18-8.20), enabled by default. Zero fields
  * select the reference defaults: new_time 7200s, burst_hold 15s, burst_penalty
@@ -127,6 +128,11 @@ typedef struct rnc_interface_policy {
    * other interfaces. GATEWAY, ACCESS_POINT and ROAMING always do; BOUNDARY
    * searches boundary and gateway peers; FULL only when this is set. */
   int recursive_path_requests;
+  /* Reference announces_from_internal (default on) and announces_to_internal (default off).
+   * An interface with no_announces_from_internal set never passes on announces learned on an
+   * INTERNAL interface. An interface with announces_to_internal set lets its announces go to
+   * INTERNAL interfaces even from a BOUNDARY one. */
+  int no_announces_from_internal, announces_to_internal;
   rnc_ingress_policy ingress;
 } rnc_interface_policy;
 rnc_result rnc_node_interface_policy(rnc_node *node, uint32_t interface_id,

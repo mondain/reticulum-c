@@ -181,6 +181,84 @@ static void rate(void) {
         route.announced_at == 1020);
   rnc_node_free(n);
 }
+/* MODE_INTERNAL (reference Interface.MODE_INTERNAL, with announces_from_internal and
+ * announces_to_internal): what an announce learned on one interface may be passed on to. */
+static void internal_mode(void) {
+  rnc_interface_policy in = {0}, out = {0};
+  rnc_identity src;
+  rnc_packet a;
+  rnc_node *n;
+  /* out = INTERNAL: an announce from a BOUNDARY interface is not passed in ... */
+  in.mode = RNC_MODE_BOUNDARY;
+  out.mode = RNC_MODE_INTERNAL;
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  CHECK(rnc_identity_generate(&src, rng, NULL) == RNC_OK);
+  a = announce_from(&src, 1000);
+  CHECK(rnc_node_input(n, 1, &a, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1000, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 0);
+  rnc_node_free(n);
+  /* ... unless that interface announces_to_internal */
+  in.announces_to_internal = 1;
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  a = announce_from(&src, 1001);
+  CHECK(rnc_node_input(n, 1, &a, 1001, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1001, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 1);
+  rnc_node_free(n);
+  /* a plain interface feeds an INTERNAL one */
+  memset(&in, 0, sizeof(in));
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  a = announce_from(&src, 1002);
+  CHECK(rnc_node_input(n, 1, &a, 1002, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1002, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 1);
+  rnc_node_free(n);
+  /* an interface that refuses announces from INTERNAL ones (announces_from_internal off) */
+  memset(&in, 0, sizeof(in));
+  memset(&out, 0, sizeof(out));
+  in.mode = RNC_MODE_INTERNAL;
+  out.no_announces_from_internal = 1;
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  a = announce_from(&src, 1003);
+  CHECK(rnc_node_input(n, 1, &a, 1003, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1003, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 0);
+  rnc_node_free(n);
+  /* default: INTERNAL to a plain interface is passed on */
+  memset(&out, 0, sizeof(out));
+  n = make(1, 0, &in);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  a = announce_from(&src, 1004);
+  CHECK(rnc_node_input(n, 1, &a, 1004, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1004, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 1);
+  rnc_node_free(n);
+}
+/* An INTERNAL interface is not held to the announce bandwidth cap (the reference sends there
+ * outside the queueing branch): a burst goes out together instead of one per interval. */
+static void internal_no_cap(void) {
+  rnc_interface_policy out = {0};
+  rnc_identity src[3];
+  rnc_packet a;
+  rnc_node *n;
+  unsigned i;
+  out.mode = RNC_MODE_INTERNAL;
+  n = make(1, 0, NULL);
+  CHECK(rnc_node_interface_policy(n, 2, &out) == RNC_OK);
+  for (i = 0; i < 3; i++) {
+    CHECK(rnc_identity_generate(&src[i], rng, NULL) == RNC_OK);
+    a = announce_from(&src[i], 1000);
+    CHECK(rnc_node_input(n, 1, &a, 1000, 0) == RNC_OK);
+  }
+  CHECK(rnc_node_tick(n, 1000, 600) == RNC_OK);
+  CHECK(sends_on(n, 2) == 3);
+  rnc_node_free(n);
+}
 /* Locally originated announces are never sent on access-point interfaces. */
 static void access_point(void) {
   rnc_interface_policy policy = {0};
@@ -236,6 +314,10 @@ int main(int argc, char **argv) {
     rate();
   else if (!strcmp(argv[1], "access_point"))
     access_point();
+  else if (!strcmp(argv[1], "internal_mode"))
+    internal_mode();
+  else if (!strcmp(argv[1], "internal_no_cap"))
+    internal_no_cap();
   else
     return 2;
   return 0;

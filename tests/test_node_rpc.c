@@ -37,6 +37,24 @@ static void config_file(const char *path, const char *text) {
   FILE *f = fopen(path, "w");
   CHECK(f && fputs(text, f) >= 0 && !fclose(f));
 }
+static void internal_mode_config_test(void) {
+  char dir[] = "/tmp/rnc-config-internal-XXXXXX", path[256];
+  config c;
+  CHECK(mkdtemp(dir) && snprintf(path, sizeof(path), "%s/config", dir) > 0);
+  config_file(path,
+              "[interfaces]\n[[A]]\ntype=TCPClientInterface\ntarget_host=127.0.0.1\ntarget_port=7001\n"
+              "mode=internal\nannounces_from_internal=No\nannounces_to_internal=Yes\n"
+              "[[B]]\ntype=SerialInterface\nport=/dev/null\n");
+  CHECK(read_config(path, &c));
+  CHECK(c.interfaces[0].host.mode == RNC_MODE_INTERNAL &&
+        c.interfaces[0].host.no_announces_from_internal == 1 &&
+        c.interfaces[0].host.announces_to_internal == 1);
+  CHECK(c.interfaces[1].host.mode == RNC_MODE_FULL && c.interfaces[1].host.no_announces_from_internal == 0 &&
+        c.interfaces[1].host.announces_to_internal == 0); /* the reference defaults */
+  config_file(path, "[interfaces]\n[[A]]\ntype=SerialInterface\nport=/dev/null\nannounces_to_internal=maybe\n");
+  CHECK(!read_config(path, &c));
+  CHECK(!unlink(path) && !rmdir(dir));
+}
 static void stable_interface_test(void) {
   char dir[] = "/tmp/rnc-config-binding-XXXXXX", path[256];
   config first, reordered, changed;
@@ -204,6 +222,7 @@ int main(void) {
   rnc_node_free(node);
   checkpoint_retry_test();
   stable_interface_test();
+  internal_mode_config_test();
   puts("node RPC response tests passed");
   return 0;
 }

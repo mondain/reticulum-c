@@ -146,6 +146,8 @@ static unsigned mode_number(const rnc_host_status *s) {
     return 5u;
   case RNC_MODE_GATEWAY:
     return 6u;
+  case RNC_MODE_INTERNAL:
+    return 7u;
   default:
     return 1u;
   }

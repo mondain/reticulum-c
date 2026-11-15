@@ -400,7 +400,8 @@ static int interface_key(interface_config *f, const char *key,
                  {"accesspoint", RNC_MODE_ACCESS_POINT},
                  {"ap", RNC_MODE_ACCESS_POINT},
                  {"roaming", RNC_MODE_ROAMING},
-                 {"boundary", RNC_MODE_BOUNDARY}};
+                 {"boundary", RNC_MODE_BOUNDARY},
+                 {"internal", RNC_MODE_INTERNAL}};
     size_t k;
     for (k = 0; k < sizeof(modes) / sizeof(*modes); k++)
       if (!strcasecmp(value, modes[k].name)) {
@@ -525,6 +526,18 @@ static int interface_key(interface_config *f, const char *key,
     if (!boolean(value, &b))
       return 0;
     f->host.recursive_path_requests = b;
+    return 1;
+  }
+  if (!strcmp(key, "announces_from_internal")) { /* default on, as in the reference */
+    if (!boolean(value, &b))
+      return 0;
+    f->host.no_announces_from_internal = !b;
+    return 1;
+  }
+  if (!strcmp(key, "announces_to_internal")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->host.announces_to_internal = b;
     return 1;
   }
   {
@@ -1048,7 +1061,8 @@ static int read_config(const char *path, config *c) {
                      {"access_point", RNC_MODE_ACCESS_POINT},
                      {"ap", RNC_MODE_ACCESS_POINT},
                      {"roaming", RNC_MODE_ROAMING},
-                     {"boundary", RNC_MODE_BOUNDARY}};
+                     {"boundary", RNC_MODE_BOUNDARY},
+                     {"internal", RNC_MODE_INTERNAL}};
         size_t k;
         int found = 0;
         for (k = 0; k < sizeof(modes) / sizeof(*modes); k++)
