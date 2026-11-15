@@ -23,6 +23,7 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include "ble_mode.h"
 #include "radio_hal.h"
 #include "rnc_mcu_app.h"
 #include "rnc_radio.h"
@@ -263,35 +264,42 @@ static void restart_board(void) {
 #endif
 }
 
+static int usb_read(void *, uint8_t *buffer, size_t capacity) {
+  size_t n = 0;
+  while (n < capacity && Serial.available() > 0) {
+    int c = Serial.read();
+    if (c < 0)
+      break;
+    buffer[n++] = (uint8_t)c;
+  }
+  return (int)n;
+}
+static int usb_write(void *, const uint8_t *data, size_t size) { return (int)Serial.write(data, size); }
+static const rnc_rnode_io g_usb_io = {usb_read, usb_write, NULL};
+
 static void rnode_task(void *) {
-  uint8_t buf[256];
-  size_t n;
+  // the module talks to one transport at a time: the one that last sent bytes (Bluetooth wins
+  // a tie); replies and received packets go there
+  const rnc_rnode_io *active = &g_usb_io;
   for (;;) {
     uint64_t now_us = platform_now_ms(NULL) * 1000u;
-    n = 0;
-    while (n < sizeof(buf) && Serial.available() > 0) {
-      int c = Serial.read();
-      if (c < 0)
-        break;
-      buf[n++] = (uint8_t)c;
-    }
-    if (n)
-      rnc_rnode_feed(&g_rnode, buf, n, now_us);
-    unsigned wait = rnc_rnode_step(&g_rnode, now_us);
-    while ((n = rnc_rnode_pull(&g_rnode, buf, sizeof(buf))) > 0)
-      Serial.write(buf, n);
+    if (RNC_HAVE_BLE && rnc_ble_available() > 0)
+      active = &rnc_ble_io;
+    else if (Serial.available() > 0)
+      active = &g_usb_io;
+    (void)rnc_rnode_pump(&g_rnode, active, now_us);
     if (rnc_rnode_reset_requested(&g_rnode)) { // the host asked for a restart
       Serial.flush();
       delay(50);
       restart_board();
     }
-    TickType_t ticks = pdMS_TO_TICKS(wait > 5u ? 5u : wait);
+    TickType_t ticks = pdMS_TO_TICKS(5); // the radio wants polling every few milliseconds
     vTaskDelay(ticks ? ticks : 1);
   }
 }
 
 // Prepares the radio (not started) and the module; the boot window feeds the module live.
-static void rnode_prepare(void) {
+static void rnode_prepare(const rnc_mcu_cfg *cfg) {
   const rnc_board *board = rnc_board_find(RNC_MCU_FIRMWARE_BOARD);
   rnc_lora_if *li = NULL;
   uint8_t sf_min = 5;
@@ -305,6 +313,7 @@ static void rnode_prepare(void) {
   // without a usable radio the board still answers DETECT but can never turn the radio on
   rnc_rnode_init(&g_rnode, li, RNC_RNODE_PLATFORM, RNC_RNODE_MCU, RNC_RNODE_BOARD_ID);
   rnc_rnode_set_limits(&g_rnode, sf_min, txp_max);
+  (void)rnc_ble_start(cfg); // Bluetooth only when a PIN is set
 }
 
 static void rnode_start(void) {
@@ -376,7 +385,7 @@ void setup() {
   bool rnode_mode = rnc_mcu_cfg_rnode_mode(&cfg);
   rnc_rnode_window_init(&g_window);
   if (rnode_mode)
-    rnode_prepare(); // so the window can answer a host that is already talking
+    rnode_prepare(&cfg); // so the window can answer a host that is already talking
   if (rnc_provision_requested(RNC_MCU_PROVISION_WINDOW_MS, rnode_mode ? &g_window : NULL,
                               rnode_mode ? &g_rnode : NULL))
     rnc_provision_console(&cfg, "Requested at boot.");

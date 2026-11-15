@@ -31,9 +31,46 @@ static uint32_t get32(const uint8_t *p) {
   return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
+#define BLE_FILE "/rnc_ble"
+#define BLE_TEMP "/rnc_ble.tmp"
+
+// The Bluetooth PIN lives in a file of its own: the settings file has no room left and its
+// format stays readable by older firmware.
+static void load_ble_pin(rnc_mcu_cfg *cfg) {
+  char text[8];
+  File file(InternalFS);
+  if (!file.open(BLE_FILE, FILE_O_READ))
+    return;
+  int n = file.read((uint8_t *)text, 6);
+  file.close();
+  if (n == 6) {
+    text[6] = 0;
+    (void)rnc_mcu_cfg_set(cfg, "ble.pin", text); // the same checks as at the console
+  }
+}
+static bool save_ble_pin(const rnc_mcu_cfg *cfg) {
+  if (!cfg->ble_pin[0]) {
+    InternalFS.remove(BLE_FILE);
+    return true;
+  }
+  InternalFS.remove(BLE_TEMP);
+  File file(InternalFS);
+  if (!file.open(BLE_TEMP, FILE_O_WRITE))
+    return false;
+  size_t w = file.write((const uint8_t *)cfg->ble_pin, 6);
+  file.close();
+  if (w != 6) {
+    InternalFS.remove(BLE_TEMP);
+    return false;
+  }
+  InternalFS.remove(BLE_FILE);
+  return InternalFS.rename(BLE_TEMP, BLE_FILE);
+}
+
 bool rnc_settings_load(rnc_mcu_cfg *cfg) {
   uint8_t b[20];
   rnc_mcu_cfg_init(cfg);
+  load_ble_pin(cfg);
   File file(InternalFS);
   if (!file.open(SETTINGS_FILE, FILE_O_READ))
     return false;
@@ -99,7 +136,8 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
     InternalFS.remove(SETTINGS_TEMP);
     return false;
   }
-  return InternalFS.rename(SETTINGS_TEMP, SETTINGS_FILE);
+  bool saved = InternalFS.rename(SETTINGS_TEMP, SETTINGS_FILE);
+  return save_ble_pin(cfg) && saved;
 }
 
 bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *window, rnc_rnode *rn) {
