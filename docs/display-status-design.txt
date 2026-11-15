@@ -1,7 +1,7 @@
 Status screens for the T-Echo and the T-Beam Supreme: design
 =============================================================
 
-Status: draft for approval, 2026-11-14. Nothing is built yet. Stacked on
+Status: approved 2026-11-14 (with the builder-check calls of section 6.6). Nothing is built yet. Stacked on
 feature/rnode-mode (PR #43): it uses that branch's Bluetooth PIN and RNode module.
 
 1. Intent
@@ -97,6 +97,54 @@ B. Libraries (GxEPD2, Adafruit SH110X, Adafruit GFX, BusIO): quickest to pixels 
   - lib_deps and a build flag only in the lilygo_t_echo and lilygo_t_beam_supreme
     environments; libraries pinned to exact versions. Other environments build without
     them. Flash and RAM use are recorded per environment.
+
+6.6 Calls made after the builder check (answers from the repository, or the author's calls)
+  - Bluetooth state: nRF52840 reports "secured" from the Bluefruit connection
+    (Bluefruit.Connection(handle)->secured() / the secured callback), ESP32 from the
+    existing g_connected and g_secure flags. The UART characteristics refuse access until the
+    link is encrypted and authenticated (SoftDevice and NimBLE attribute permissions;
+    checked on the T-Echo from BlueZ: an unpaired central gets nothing). States: OFF (no PIN
+    set, service not started), ADVERTISING (no central), CONNECTED (a central, not yet
+    authenticated), SECURE. The PIN is visible in ADVERTISING and CONNECTED, hidden in OFF and
+    SECURE. A bonded phone that reconnects is authenticated at once (its stored key encrypts
+    the link), so the PIN does not appear for it; a pairing that is abandoned leaves the state
+    CONNECTED, so the PIN stays visible until the link drops.
+  - Modes: the run mode is "serial", "wifi" or "rnode"; leaf and gateway are the separate
+    lora.mode setting (off, leaf, gateway). The mode line shows RNode, or the transport
+    (USB or WiFi) with the LoRa mode. Bluetooth is only started in rnode mode, so outside it
+    the Bluetooth state is OFF and no PIN is ever shown. The host link is none, USB,
+    Bluetooth or WiFi.
+  - Data: last RSSI and SNR, the rx and tx packet counts and the airtime budget come from
+    the LoRa interface (rnc_lora_if stats and budget, rnc_airtime_used), which is the same
+    object in every mode (g_radio.li). Airtime used is shown as a percentage of the budget.
+    "No signal yet" means no packet received since boot.
+  - Reading: the display task reads these values directly, read-only, as aligned word reads;
+    a snapshot that mixes values from two instants is acceptable for a status screen. It
+    never writes to them. (This replaces the earlier "snapshot handed over" idea.)
+  - Phases: the record has a phase (starting, setup, running). The display task starts early
+    in setup(), shows "reticulum-c VERSION / starting", shows "Setup mode / rnc-config console"
+    while the boot setup console runs, and the status page once the firmware runs. A screen
+    that fails to initialise ends its task silently. An e-paper that shows the last frame
+    while the radio is off is fine.
+  - Version: RNC_MCU_VERSION (the release version, not the 1.74 RNode protocol version).
+  - PIN: the record's PIN field is filled only when the PIN rule says it is visible, and is
+    zeroed otherwise, so the drawing code cannot leak it; the layout is the only code that
+    prints it.
+  - Layouts: two profiles of the same layout code: OLED 21 columns by 8 rows (6 x 8 font),
+    e-paper 16 columns by 12 rows (text size 2 on 200 x 200). The PIN is always on its own
+    line; if rows run out, lower-priority lines are dropped first, never the PIN.
+  - Buses: the T-Echo display uses SPIM0 (the radio uses SPIM2; the RNode firmware uses the
+    same pairing on this board); software SPI only if a conflict appears. The Supreme OLED
+    uses the default Wire on SDA 17 and SCL 18; the AXP2101 is on Wire1 (42/41) in
+    radio_hal.cpp, so the buses are not shared. Whether the OLED needs a power rail is settled
+    on the board, which is connected.
+  - Files and builds: portable code in mcu/app/rnc_status.{h,c}, tests in
+    mcu/tests/test_status.c (added to mcu/CMakeLists.txt and run by mcu/tests/mcu_unit.sh),
+    the file added to the library.json srcFilter so every environment compiles it (the
+    linker drops what is unreferenced; "the other environments are unchanged" means no
+    behaviour change and a size change of a few hundred bytes at most). The display sources
+    compile only when the environment sets RNC_DISPLAY_OLED or RNC_DISPLAY_EPAPER. The CI
+    mcu jobs already build every PlatformIO environment.
 
 7. Testing and evidence
 -----------------------
