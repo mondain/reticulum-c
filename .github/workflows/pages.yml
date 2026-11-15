@@ -2,6 +2,11 @@ name: Firmware flasher Pages
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Publish this existing tag (for example v0.2.1) as a versioned entry; empty publishes main'
+        required: false
+        type: string
   push:
     branches: [main]
     paths:
@@ -36,6 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ inputs.release_tag || github.sha }}
           persist-credentials: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -45,8 +51,8 @@ jobs:
       - name: Build exact board firmware without embedded credentials
         env:
           RNC_RELEASE: '1'
-          RNC_COMMIT: ${{ github.sha }}
         run: |
+          export RNC_COMMIT=$(git rev-parse HEAD)
           sudo apt-get update && sudo apt-get install -y python3-venv
           mcu/build-platformio.sh ${{ matrix.envs }} out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -65,6 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ inputs.release_tag || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -86,9 +93,9 @@ jobs:
           npm run build
       - name: Stage verified firmware
         env:
-          SOURCE_COMMIT: ${{ github.sha }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
+          SOURCE_COMMIT=$(git rev-parse HEAD)
           version="main-${SOURCE_COMMIT:0:12}"
           if [ -n "$RELEASE_TAG" ]; then version="$RELEASE_TAG"; fi
           python3 .github/scripts/build-web-flasher.py --firmware-root firmware \

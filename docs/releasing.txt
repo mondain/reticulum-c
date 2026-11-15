@@ -45,6 +45,9 @@ How a release happens
    every version file agree. Then it builds and tests the Linux archives, builds
    the firmware for the ESP32 and nRF52 boards, packages it, and only then
    publishes the release.
+   The release is created by the workflow's own token, which does not start other
+   workflows, so the browser installer does not list the new version by itself.
+   Publish it with:  gh workflow run pages.yml -f release_tag=v0.2.1
 4. A tag that was pushed by mistake: delete the GitHub release, then the tag
    (git push origin :refs/tags/v0.2.1 and git tag -d v0.2.1).
 
