@@ -1345,6 +1345,9 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->policy.recursive_path_requests = c->recursive_path_requests;
   f->policy.no_announces_from_internal = c->no_announces_from_internal;
   f->policy.announces_to_internal = c->announces_to_internal;
+  f->policy.gravity = c->gravity;
+  f->status.gravity = c->gravity;
+  f->status.announces_to_internal = c->announces_to_internal != 0;
   f->policy.ingress = c->ingress;
   if (!copy_text(f->address, sizeof(f->address), c->address) ||
       !copy_text(f->target, sizeof(f->target), c->target) ||
@@ -1847,6 +1850,8 @@ static void accept_tcp(rnc_host *h, host_interface *parent) {
   f->status.mtu = parent->status.mtu;
   f->status.mode = parent->status.mode;
   f->status.announce_cap_permille = parent->status.announce_cap_permille;
+  f->status.gravity = parent->status.gravity;
+  f->status.announces_to_internal = parent->status.announces_to_internal;
   f->policy = parent->policy;
   f->bitrate = parent->bitrate;
   f->status.bitrate = parent->status.bitrate;
@@ -2178,6 +2183,8 @@ static void i2p_spawn(rnc_host *h, host_interface *c, int role,
   f->status.mtu = c->status.mtu;
   f->status.mode = c->status.mode;
   f->status.announce_cap_permille = c->status.announce_cap_permille;
+  f->status.gravity = c->status.gravity;
+  f->status.announces_to_internal = c->status.announces_to_internal;
   f->policy = c->policy;
   f->bitrate = c->bitrate;
   f->status.bitrate = c->status.bitrate;
@@ -2309,6 +2316,8 @@ static void discovery_input(rnc_host *h, host_interface *parent, int fd,
     f->status.mtu = parent->status.mtu;
     f->status.mode = parent->status.mode;
     f->status.announce_cap_permille = parent->status.announce_cap_permille;
+    f->status.gravity = parent->status.gravity;
+    f->status.announces_to_internal = parent->status.announces_to_internal;
     f->policy = parent->policy;
     f->peer_size = sizeof(source);
     source.sin6_port = htons(parent->data_port);
@@ -2551,6 +2560,8 @@ static void multi_spawn(rnc_host *h, host_interface *dev) {
     c->status.mtu = dev->status.mtu;
     c->status.mode = dev->status.mode;
     c->status.announce_cap_permille = dev->status.announce_cap_permille;
+    c->status.gravity = dev->status.gravity;
+    c->status.announces_to_internal = dev->status.announces_to_internal;
     c->policy = dev->policy;
     c->no_output = s->no_output;
     c->flow_control = s->flow_control;
@@ -2681,6 +2692,8 @@ static host_interface *weave_peer(rnc_host *h, host_interface *dev,
   c->status.mtu = dev->status.mtu;
   c->status.mode = dev->status.mode;
   c->status.announce_cap_permille = dev->status.announce_cap_permille;
+  c->status.gravity = dev->status.gravity;
+  c->status.announces_to_internal = dev->status.announces_to_internal;
   c->status.radio_ready = 1;
   c->policy = dev->policy;
   c->no_output = dev->no_output;

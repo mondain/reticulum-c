@@ -50,6 +50,7 @@ typedef struct node_interface {
   size_t mtu;
   int local;
   rnc_interface_mode mode;
+  int gravity;
   uint32_t cap, rate_target, rate_grace, rate_penalty;
   int recursive, no_from_internal, to_internal;
   rnc_ingress_policy ingress;
@@ -484,6 +485,7 @@ rnc_result rnc_node_interface_policy(rnc_node *n, uint32_t id,
   i->recursive = policy->recursive_path_requests != 0;
   i->no_from_internal = policy->no_announces_from_internal != 0;
   i->to_internal = policy->announces_to_internal != 0;
+  i->gravity = policy->gravity;
   i->ingress = policy->ingress;
   return RNC_OK;
 }
@@ -1354,8 +1356,18 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   known_remember(n, &a, stamp, now);
   route = route_find(n, p->destination, now);
   update = !route || stamp > route->route.announced_at;
-  if (route && !memcmp(a.random_hash, route->route.announce.random_hash, 10))
+  if (route && !memcmp(a.random_hash, route->route.announce.random_hash, 10)) {
+    const node_interface *held = interface(n, route->route.interface_id),
+                         *heard = interface(n, ingress);
     update = 0;
+    /* The same announce, no longer, on an interface of higher gravity takes the path over. */
+    if (held && heard && route->route.interface_id != ingress &&
+        stamp == route->route.announced_at && p->hops <= route->route.hops &&
+        heard->gravity > held->gravity) {
+      update = 1;
+      targets = 0; /* the announce was already passed on */
+    }
+  }
   for (i = 0; i < RNC_NODE_REQUESTS; i++)
     if (n->requests[i].used && n->requests[i].pending &&
         n->requests[i].expiry > now && n->requests[i].ingress != ingress &&

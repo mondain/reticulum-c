@@ -82,6 +82,7 @@ typedef struct interface_config {
   /* interface discovery (announcing); see node_discovery.h */
   char type_name[32], disc_name[64], reachable_on[128], location_cmd[256],
       disc_modulation[32];
+  int has_gravity;
   int discoverable, disc_encrypt, publish_ifac, has_lat, has_lon, has_height,
       has_lxmf, bootstrap_only;
   unsigned announce_interval_s, stamp_value, disc_frequency, disc_bandwidth;
@@ -102,7 +103,7 @@ typedef struct config {
   int discover_interfaces, autoconnect_unverified, has_autoconnect_mode;
   unsigned required_discovery_value, autoconnect_max, discovery_job_interval,
       autoconnect_monitor_seconds, autoconnect_detach_seconds;
-  int autoconnect_allow_local;
+  int autoconnect_allow_local, default_gravity, autoconnect_gravity, autoconnect_announces_to_internal;
   rnc_interface_mode autoconnect_mode;
   uint8_t disc_sources[RNC_SERVICE_ALLOWLIST][16];
   size_t disc_source_count;
@@ -160,6 +161,19 @@ static int number(const char *s, unsigned long max, unsigned long *out) {
   errno = 0;
   value = strtoul(s, &end, 10);
   if (errno || *end || value > max)
+    return 0;
+  *out = value;
+  return 1;
+}
+/* A gravity is a plain signed integer, as the reference's as_int reads it. */
+static int gravity_value(const char *s, long *out) {
+  char *end;
+  long value;
+  if (!*s)
+    return 0;
+  errno = 0;
+  value = strtol(s, &end, 10);
+  if (errno || *end || value < -1000000L || value > 1000000L)
     return 0;
   *out = value;
   return 1;
@@ -534,6 +548,14 @@ static int interface_key(interface_config *f, const char *key,
     f->host.no_announces_from_internal = !b;
     return 1;
   }
+  if (!strcmp(key, "gravity")) {
+    long g;
+    if (!gravity_value(value, &g))
+      return 0;
+    f->host.gravity = (int)g;
+    f->has_gravity = 1;
+    return 1;
+  }
   if (!strcmp(key, "announces_to_internal")) {
     if (!boolean(value, &b))
       return 0;
@@ -815,6 +837,13 @@ static int finish_config(config *c) {
     if (!f->has_type)
       return 0;
     interface_bind(f);
+    if (!f->has_gravity)
+      f->host.gravity = c->default_gravity;
+    if (f->host.kind == RNC_HOST_WEAVE && f->disc_modulation[0]) {
+      unsigned long modulation; /* the reference reads Weave's as an integer */
+      if (!number(f->disc_modulation, UINT32_MAX, &modulation))
+        return 0;
+    }
     if (f->backbone && !f->host.bitrate)
       f->host.bitrate = 100000000u; /* reference BITRATE_GUESS */
     if (!f->enabled)
@@ -1030,14 +1059,16 @@ static int read_config(const char *path, config *c) {
         else
           c->autoconnect_detach_seconds = (unsigned)n;
       } else if (!strcmp(s, "autoconnect_interface_gravity") ||
-                 !strcmp(s, "autoconnect_announces_to_internal")) {
-        /* accepted for compatibility; path gravity is not implemented */
-        char *end;
-        (void)strtod(value, &end);
-        if (end == value || *end) {
+                 !strcmp(s, "default_gravity")) {
+        long g;
+        if (!gravity_value(value, &g)) {
           valid = 0;
           break;
         }
+        if (s[0] == 'a')
+          c->autoconnect_gravity = (int)g;
+        else
+          c->default_gravity = (int)g;
       } else if (!strcmp(s, "required_discovery_value") ||
                  !strcmp(s, "autoconnect_discovered_interfaces") ||
                  !strcmp(s, "discovery_job_interval")) {
@@ -1153,6 +1184,8 @@ static int read_config(const char *path, config *c) {
           c->autoconnect_unverified = b;
         else if (!strcmp(s, "autoconnect_allow_local"))
           c->autoconnect_allow_local = b;
+        else if (!strcmp(s, "autoconnect_announces_to_internal"))
+          c->autoconnect_announces_to_internal = b;
         else {
           valid = 0;
           break;

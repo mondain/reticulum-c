@@ -120,6 +120,13 @@ static int is_executable_file(const char *path) {
   struct stat st;
   return stat(path, &st) == 0 && S_ISREG(st.st_mode) && access(path, X_OK) == 0;
 }
+/* An I2P interface announces its b32 address as reachable_on, but only when other nodes can connect
+ * in and the router has given it an address; otherwise the announce carries no address. */
+static void i2p_publish(rnc_discovery_info *info, int connectable, const char *b32) {
+  (void)snprintf(info->type, sizeof(info->type), "I2PInterface");
+  if (connectable && b32[0])
+    (void)snprintf(info->reachable_on, sizeof(info->reachable_on), "%s", b32);
+}
 /* Fills the announce description for an interface, or returns 0 (and says why
  * on stderr) when it cannot be announced. */
 static int discovery_describe(const interface_config *f, rnc_discovery_info *info) {
@@ -201,6 +208,18 @@ static int discovery_describe(const interface_config *f, rnc_discovery_info *inf
     info->bandwidth = f->host.bandwidth;
     info->spreading_factor = f->host.spreading_factor;
     info->coding_rate = f->host.coding_rate;
+  } else if (f->host.kind == RNC_HOST_I2P) {
+    if (rnc_host_get_status(mgmt.host, f->interface_id, &status) != RNC_OK)
+      status.i2p_b32[0] = 0;
+    i2p_publish(info, f->host.i2p_connectable, status.i2p_b32);
+  } else if (f->host.kind == RNC_HOST_WEAVE) {
+    (void)snprintf(info->type, sizeof(info->type), "WeaveInterface");
+    info->has_frequency = f->disc_frequency != 0;
+    info->has_bandwidth = f->disc_bandwidth != 0;
+    info->frequency = f->disc_frequency;
+    info->bandwidth = f->disc_bandwidth;
+    info->has_modulation = f->disc_modulation[0] != 0;
+    (void)snprintf(info->modulation, sizeof(info->modulation), "%s", f->disc_modulation);
   } else if (f->host.kind == RNC_HOST_KISS ||
              (f->host.kind == RNC_HOST_TCP_CONNECT && f->host.kiss_framing)) {
     (void)snprintf(info->type, sizeof(info->type), "KISSInterface");
@@ -696,6 +715,8 @@ static void autoconnect(const rnc_discovery_record *rec) {
   cfg.mode = c->has_autoconnect_mode ? c->autoconnect_mode
              : c->transport          ? RNC_MODE_GATEWAY
                                      : RNC_MODE_FULL;
+  cfg.gravity = c->autoconnect_gravity;
+  cfg.announces_to_internal = c->autoconnect_announces_to_internal;
   if (info->ifac_netname[0] || info->ifac_netkey[0]) {
     if (rnc_ifac_init(&ifac, info->ifac_netname, strlen(info->ifac_netname),
                       info->ifac_netkey, strlen(info->ifac_netkey), 16) != RNC_OK)
