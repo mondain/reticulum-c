@@ -17,6 +17,7 @@
 #include <stdint.h>
 
 #include "rnc_mcu_net.h"
+#include "rnc_rnode.h"
 
 #ifndef RNC_MCU_PROVISION_WINDOW_MS
 #define RNC_MCU_PROVISION_WINDOW_MS 2000
@@ -29,8 +30,10 @@
 bool rnc_settings_load(rnc_mcu_cfg *cfg);
 bool rnc_settings_save(const rnc_mcu_cfg *cfg);
 
-// Waits up to window_ms for "rnc-config" on Serial or the BOOT button.
-bool rnc_provision_requested(unsigned window_ms);
+// Waits up to window_ms for "rnc-config" on Serial or the BOOT button. With `keep` (RNode
+// mode, where a host may already be speaking KISS) the bytes that are not that line are kept
+// in the window for replay to the KISS parser (rnc_rnode.h).
+bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *keep = NULL);
 // Runs the console until reboot; does not return.
 void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason);
 

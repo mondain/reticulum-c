@@ -26,6 +26,7 @@
 #include "radio_hal.h"
 #include "rnc_mcu_app.h"
 #include "rnc_radio.h"
+#include "rnc_rnode.h"
 #include "wifi_mode.h"
 
 #ifndef RNC_MCU_FIRMWARE_BOARD
@@ -239,6 +240,76 @@ static uint64_t platform_now_ms(void *) {
   return high + now;
 }
 
+// ----------------------------------------------------------- RNode mode ----
+// mode rnode: the board is a LoRa modem for a host (docs/rnode-mode-design.txt). No Reticulum
+// node runs here; Serial carries KISS frames only. The radio is prepared but not started: the
+// RNode module starts it once the host has set every transmit setting and the radio state.
+#if defined(ARDUINO_ARCH_ESP32)
+#define RNC_RNODE_PLATFORM 0x80 // as stock RNodes report them
+#define RNC_RNODE_MCU 0x81
+#else
+#define RNC_RNODE_PLATFORM 0x70
+#define RNC_RNODE_MCU 0x71
+#endif
+#define RNC_RNODE_BOARD_ID 0xFF // no stock board id
+static rnc_rnode_window g_window; // bytes seen during the boot window
+static rnc_rnode g_rnode;
+
+static void restart_board(void) {
+#if defined(ARDUINO_ARCH_ESP32)
+  ESP.restart();
+#else
+  NVIC_SystemReset();
+#endif
+}
+
+static void rnode_task(void *) {
+  uint8_t buf[256];
+  size_t n;
+  // what a host sent while the boot window was open goes to the parser first
+  while ((n = rnc_rnode_window_take(&g_window, buf, sizeof(buf))) > 0)
+    rnc_rnode_feed(&g_rnode, buf, n, platform_now_ms(NULL) * 1000u);
+  for (;;) {
+    uint64_t now_us = platform_now_ms(NULL) * 1000u;
+    n = 0;
+    while (n < sizeof(buf) && Serial.available() > 0) {
+      int c = Serial.read();
+      if (c < 0)
+        break;
+      buf[n++] = (uint8_t)c;
+    }
+    if (n)
+      rnc_rnode_feed(&g_rnode, buf, n, now_us);
+    unsigned wait = rnc_rnode_step(&g_rnode, now_us);
+    while ((n = rnc_rnode_pull(&g_rnode, buf, sizeof(buf))) > 0)
+      Serial.write(buf, n);
+    if (rnc_rnode_reset_requested(&g_rnode)) { // the host asked for a restart
+      Serial.flush();
+      delay(50);
+      restart_board();
+    }
+    TickType_t ticks = pdMS_TO_TICKS(wait > 5u ? 5u : wait);
+    vTaskDelay(ticks ? ticks : 1);
+  }
+}
+
+static void rnode_start(void) {
+  const rnc_board *board = rnc_board_find(RNC_MCU_FIRMWARE_BOARD);
+  rnc_lora_if *li = NULL;
+  uint8_t sf_min = 5;
+  int8_t txp_max = 0;
+  if (board && board->supported && rnc_radio_hal_init(board, &g_radio_hal) == 0 &&
+      rnc_radio_prepare_host(&g_radio, board, &g_radio_hal, RNC_LORA_AIRTIME_DEFAULT, radio_random32,
+                             NULL) == RNC_RADIO_OK) {
+    li = &g_radio.li;
+    rnc_radio_limits(board, &sf_min, &txp_max);
+  }
+  // without a usable radio the board still answers DETECT but can never turn the radio on
+  rnc_rnode_init(&g_rnode, li, RNC_RNODE_PLATFORM, RNC_RNODE_MCU, RNC_RNODE_BOARD_ID);
+  rnc_rnode_set_limits(&g_rnode, sf_min, txp_max);
+  xTaskCreate(rnode_task, "rnode", STACK_DEPTH(RNC_MCU_STACK_BYTES), NULL, 2, NULL);
+}
+
 static void reticulum_task(void *) {
   rnc_mcu_platform platform;
   rnc_mcu_config config;
@@ -301,8 +372,17 @@ void setup() {
   if (rnc_mcu_cfg_wifi_mode(&cfg) && !rnc_mcu_cfg_wifi_ready(&cfg) && !lora_leaf)
     rnc_provision_console(&cfg, "Wi-Fi mode is selected but ssid, password or host are missing or invalid.");
 #endif
-  if (rnc_provision_requested(RNC_MCU_PROVISION_WINDOW_MS))
+  bool rnode_mode = rnc_mcu_cfg_rnode_mode(&cfg);
+  rnc_rnode_window_init(&g_window);
+  if (rnc_provision_requested(RNC_MCU_PROVISION_WINDOW_MS, rnode_mode ? &g_window : NULL))
     rnc_provision_console(&cfg, "Requested at boot.");
+  if (rnode_mode) {
+#if defined(ARDUINO_ARCH_ESP32)
+    bootloader_random_enable();
+#endif
+    rnode_start(); // the host owns the radio; lora.* settings are not used in this mode
+    return;
+  }
   // the radio, if the settings allow it; with it off or incomplete the board is the serial or
   // Wi-Fi leaf it always was
   (void)lora_start(&cfg);

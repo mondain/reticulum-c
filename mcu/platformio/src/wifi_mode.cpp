@@ -125,7 +125,7 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
 }
 
 // ---- provisioning -----------------------------------------------------------
-bool rnc_provision_requested(unsigned window_ms) {
+bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *keep) {
   static const char entry[] = "rnc-config";
   char line[24];
   size_t length = 0;
@@ -138,6 +138,11 @@ bool rnc_provision_requested(unsigned window_ms) {
   for (unsigned elapsed = 0; elapsed < window_ms; elapsed += 10) {
     while (Serial.available() > 0) {
       int c = Serial.read();
+      if (keep) {
+        if (c >= 0 && rnc_rnode_window_feed(keep, (uint8_t)c))
+          return true;
+        continue;
+      }
       if (c == '\r' || c == '\n') {
         line[length] = 0;
         if (length == sizeof(entry) - 1 && !memcmp(line, entry, length))

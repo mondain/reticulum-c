@@ -45,6 +45,8 @@ bool rnc_settings_load(rnc_mcu_cfg *cfg) {
   // if it was stored with its "set" bit
   char text[16];
   uint8_t mode = b[4], set = b[5];
+  if (set & 0x80u) // the RNode modem mode, stored in a bit older firmware never looks at
+    (void)rnc_mcu_cfg_set(cfg, "mode", RNC_MCU_MODE_RNODE);
   (void)rnc_lora_cfg_set(&cfg->lora, "mode",
                          mode == RNC_LORA_MODE_LEAF ? "leaf" : mode == RNC_LORA_MODE_GATEWAY ? "gateway" : "off");
   if (set & RNC_LORA_SET_FREQ) {
@@ -79,7 +81,7 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
   memset(b, 0, sizeof(b));
   put32(b, SETTINGS_MAGIC);
   b[4] = cfg->lora.mode;
-  b[5] = cfg->lora.set;
+  b[5] = (uint8_t)(cfg->lora.set | (rnc_mcu_cfg_rnode_mode(cfg) ? 0x80u : 0u));
   b[6] = cfg->lora.sf;
   b[7] = cfg->lora.cr;
   b[8] = (uint8_t)cfg->lora.txp_dbm;
@@ -100,13 +102,18 @@ bool rnc_settings_save(const rnc_mcu_cfg *cfg) {
   return InternalFS.rename(SETTINGS_TEMP, SETTINGS_FILE);
 }
 
-bool rnc_provision_requested(unsigned window_ms) {
+bool rnc_provision_requested(unsigned window_ms, rnc_rnode_window *keep) {
   static const char entry[] = "rnc-config";
   char line[24];
   size_t length = 0;
   for (unsigned elapsed = 0; elapsed < window_ms; elapsed += 10) {
     while (Serial.available() > 0) {
       int c = Serial.read();
+      if (keep) {
+        if (c >= 0 && rnc_rnode_window_feed(keep, (uint8_t)c))
+          return true;
+        continue;
+      }
       if (c == '\r' || c == '\n') {
         line[length] = 0;
         if (length == sizeof(entry) - 1 && !memcmp(line, entry, length))
@@ -138,7 +145,7 @@ void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
   print("\n\nreticulum-c provisioning console\n");
   print(reason);
   print("\nThe Reticulum node is not running. Type help. Settings are stored with save, and "
-        "used after reboot. Only the lora.* keys matter on this board.\n");
+        "used after reboot. Only mode rnode and the lora.* keys matter on this board.\n");
   rnc_mcu_console_get(cfg, NULL, reply, sizeof(reply));
   print(reply);
   print("\nrnc> ");
