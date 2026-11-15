@@ -83,6 +83,13 @@ void rnc_lora_if_init(rnc_lora_if *li, rnc_modem *modem, const rnc_radio_hal *ha
 int rnc_lora_if_start(rnc_lora_if *li, const rnc_lora_params *params);
 /* 1 when the radio is running. */
 int rnc_lora_if_up(const rnc_lora_if *li);
+/* Puts the radio in standby and takes the interface down: the transmit queue, the packet in
+ * flight and the reassembly are dropped, and nothing restarts it until _start or
+ * _reconfigure is called. The airtime budget and the counters are kept. */
+void rnc_lora_if_stop(rnc_lora_if *li);
+/* _stop, then _start with `params`. The airtime already used stays booked. Returns what
+ * _start returns. */
+int rnc_lora_if_reconfigure(rnc_lora_if *li, const rnc_lora_params *params);
 
 /* Queues a packet: RNC_OK-style 0 when queued, -1 dropped (queue full, too large). */
 int rnc_lora_if_send(rnc_lora_if *li, const uint8_t *packet, size_t size, uint64_t now_us);

@@ -699,6 +699,67 @@ static void test_orphan_timeout_on_the_air(void) {
   CHECK_EQ(sim_board_violations(&a) + sim_board_violations(&b), 0);
 }
 
+/* Task 1 of the RNode plan: the host changes the radio settings at run time. The airtime
+ * already used stays booked, and the interface comes back up with the new modem settings. */
+static void test_reconfigure_keeps_budget(void) {
+  sim_medium med;
+  sim_board a, b;
+  sim_board *bs[2];
+  rnc_lora_params p = prm(125000, 7, 14), p2 = prm(125000, 9, 14);
+  uint8_t pkt[100], got[508];
+  uint32_t used, restarts;
+  uint64_t first_ms, second_ms;
+  sim_medium_init(&med, 61);
+  sim_board_init(&a, &med, 1262, 1, 100);
+  sim_board_init(&b, &med, 1276, 2, 10000);
+  bs[0] = &a;
+  bs[1] = &b;
+  sim_link_all(&med, 100);
+  CHECK_EQ(sim_board_start(&a, &p), 0);
+  CHECK_EQ(sim_board_start(&b, &p), 0);
+  fill(pkt, 100, 3);
+  CHECK(transfer(&med, bs, 2, &a, &b, pkt, 100, got, 3000) == 100);
+  used = rnc_airtime_used(&a.li.budget, med.now_us / 1000u);
+  first_ms = a.li.budget.total_ms;
+  restarts = a.li.stats.restarts;
+  CHECK(used > 0);
+  CHECK_EQ(rnc_lora_if_reconfigure(&a.li, &p2), 0);
+  CHECK_EQ(sim_board_start(&b, &p2), 0);
+  CHECK(rnc_lora_if_up(&a.li));
+  CHECK_EQ(a.li.params.sf, 9);
+  CHECK_EQ(rnc_airtime_used(&a.li.budget, med.now_us / 1000u), used);
+  CHECK_EQ(a.li.stats.restarts, restarts);
+  CHECK(transfer(&med, bs, 2, &a, &b, pkt, 100, got, 5000) == 100);
+  second_ms = a.li.budget.total_ms - first_ms;
+  CHECK(second_ms > first_ms); /* SF9 takes longer on the air than SF7 */
+  CHECK_EQ(sim_board_violations(&a) + sim_board_violations(&b), 0);
+}
+
+static void test_stop_clears_queue(void) {
+  sim_medium med;
+  sim_board a, b;
+  sim_board *bs[2];
+  rnc_lora_params p = prm(125000, 7, 14);
+  uint8_t pkt[100];
+  sim_medium_init(&med, 62);
+  sim_board_init(&a, &med, 1262, 1, 10000);
+  sim_board_init(&b, &med, 1276, 2, 10000);
+  bs[0] = &a;
+  bs[1] = &b;
+  sim_link_all(&med, 100);
+  CHECK_EQ(sim_board_start(&a, &p), 0);
+  CHECK_EQ(sim_board_start(&b, &p), 0);
+  fill(pkt, 100, 4);
+  CHECK_EQ(rnc_lora_if_send(&a.li, pkt, 100, med.now_us), 0);
+  CHECK_EQ(rnc_lora_if_send(&a.li, pkt, 100, med.now_us), 0);
+  rnc_lora_if_stop(&a.li);
+  CHECK(!rnc_lora_if_up(&a.li));
+  CHECK(rnc_lora_if_send(&a.li, pkt, 100, med.now_us) != 0); /* down: refused */
+  pump(&med, bs, 2, 30000, 4);
+  CHECK_EQ(med.air_us[a.radio_id], 0); /* nothing was ever transmitted, nothing restarts it */
+  CHECK(!rnc_lora_if_up(&a.li));
+}
+
 int main(void) {
   test_sizes_between_chips();
   test_other_modem_settings();
@@ -712,6 +773,8 @@ int main(void) {
   test_regulatory_gate();
   test_init_failure_and_retry();
   test_orphan_timeout_on_the_air();
+  test_reconfigure_keeps_budget();
+  test_stop_clears_queue();
   if (failures) {
     fprintf(stderr, "test_radio_sim: %d failure(s)\n", failures);
     return 1;
