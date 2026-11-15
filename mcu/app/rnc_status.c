@@ -156,3 +156,53 @@ unsigned rnc_status_layout(const rnc_status *s, rnc_status_profile p,
   }
   return rows;
 }
+
+void rnc_refresh_init(rnc_refresh *r, unsigned min_ms, unsigned pin_ms, unsigned full_ms) {
+  memset(r, 0, sizeof(*r));
+  r->min_interval_ms = min_ms;
+  r->pin_interval_ms = pin_ms;
+  r->full_interval_ms = full_ms;
+}
+
+rnc_refresh_action rnc_refresh_decide(rnc_refresh *r, int layout_changed, int pin_visible, uint64_t now_ms) {
+  rnc_refresh_action action;
+  int pin_changed = pin_visible != r->last_pin_visible;
+  if (!r->drawn_once) {
+    action = RNC_REFRESH_FULL;
+  } else {
+    uint64_t since = now_ms - r->last_ms;
+    if (pin_changed ? since < r->pin_interval_ms : (!layout_changed || since < r->min_interval_ms))
+      return RNC_REFRESH_NONE;
+    action = r->full_interval_ms != 0u && now_ms - r->last_full_ms >= r->full_interval_ms ? RNC_REFRESH_FULL
+                                                                                          : RNC_REFRESH_PARTIAL;
+  }
+  r->drawn_once = 1;
+  r->last_ms = now_ms;
+  r->last_pin_visible = pin_visible;
+  if (action == RNC_REFRESH_FULL)
+    r->last_full_ms = now_ms;
+  return action;
+}
+
+rnc_refresh_action rnc_display_step(rnc_refresh *r, rnc_display_state *st, const rnc_status *s,
+                                    rnc_status_profile p, int init_ok, uint64_t now_ms,
+                                    char out[RNC_STATUS_MAX_ROWS][RNC_STATUS_MAX_COLS + 1],
+                                    unsigned *rows) {
+  unsigned n, i;
+  int changed;
+  rnc_refresh_action action;
+  if (!init_ok)
+    return RNC_REFRESH_NONE;
+  n = rnc_status_layout(s, p, out);
+  changed = n != st->prev_rows;
+  for (i = 0; !changed && i < n; i++)
+    changed = strcmp(out[i], st->prev[i]) != 0;
+  action = rnc_refresh_decide(r, changed, rnc_status_pin_visible(s->ble, s->pin[0] != 0), now_ms);
+  if (action != RNC_REFRESH_NONE) {
+    for (i = 0; i < n; i++)
+      strcpy(st->prev[i], out[i]);
+    st->prev_rows = n;
+    *rows = n;
+  }
+  return action;
+}

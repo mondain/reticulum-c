@@ -66,6 +66,35 @@ extern const rnc_status_profile rnc_profile_epaper; /* 16 columns x 12 rows (tex
 unsigned rnc_status_layout(const rnc_status *s, rnc_status_profile p,
                            char lines[RNC_STATUS_MAX_ROWS][RNC_STATUS_MAX_COLS + 1]);
 
+/* ---- when to redraw -------------------------------------------------------------------
+ * An e-paper refresh takes seconds and wears the panel, so a redraw happens only when the
+ * layout changed, and not more often than min_interval_ms; a change in whether the PIN is
+ * shown is drawn sooner (pin_interval_ms) because a person is waiting for it. Every
+ * full_interval_ms a full refresh clears ghosting (0: never). The first draw is full. */
+typedef struct rnc_refresh {
+  unsigned min_interval_ms, pin_interval_ms, full_interval_ms;
+  uint64_t last_ms, last_full_ms;
+  int last_pin_visible, drawn_once;
+} rnc_refresh;
+typedef enum { RNC_REFRESH_NONE = 0, RNC_REFRESH_PARTIAL, RNC_REFRESH_FULL } rnc_refresh_action;
+void rnc_refresh_init(rnc_refresh *r, unsigned min_ms, unsigned pin_ms, unsigned full_ms);
+/* `layout_changed`: the layout differs from what is on the screen. Records the draw when it
+ * returns anything but NONE. `now_ms` must not go backwards. */
+rnc_refresh_action rnc_refresh_decide(rnc_refresh *r, int layout_changed, int pin_visible, uint64_t now_ms);
+
+/* The display task's decision logic, so that it is tested on the host: lays the status out,
+ * compares it with what is on the screen and asks the policy. With `init_ok` 0 (the screen did
+ * not start) it never draws. On an action other than NONE, `out` and `*rows` hold the lines
+ * to draw and `st` remembers them. */
+typedef struct rnc_display_state {
+  char prev[RNC_STATUS_MAX_ROWS][RNC_STATUS_MAX_COLS + 1];
+  unsigned prev_rows;
+} rnc_display_state;
+rnc_refresh_action rnc_display_step(rnc_refresh *r, rnc_display_state *st, const rnc_status *s,
+                                    rnc_status_profile p, int init_ok, uint64_t now_ms,
+                                    char out[RNC_STATUS_MAX_ROWS][RNC_STATUS_MAX_COLS + 1],
+                                    unsigned *rows);
+
 #ifdef __cplusplus
 }
 #endif

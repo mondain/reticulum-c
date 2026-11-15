@@ -197,6 +197,78 @@ static void test_phases(void) {
   CHECK(n == 5); /* the title and the console line wrap on the narrower profile */
 }
 
+
+/* ---- refresh policy and the display step (Task 2) ------------------------------------ */
+static void test_refresh_policy(void) {
+  rnc_refresh r;
+  unsigned i, draws = 0;
+  /* the e-paper figures: 15 s between changes, 2 s for the PIN, a full refresh every 5 minutes */
+  rnc_refresh_init(&r, 15000, 2000, 300000);
+  CHECK(rnc_refresh_decide(&r, 0, 0, 0) == RNC_REFRESH_FULL); /* the first draw is always full */
+  CHECK(rnc_refresh_decide(&r, 0, 0, 1000) == RNC_REFRESH_NONE);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 5000) == RNC_REFRESH_NONE);  /* a change waits */
+  CHECK(rnc_refresh_decide(&r, 1, 0, 14000) == RNC_REFRESH_NONE);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 15000) == RNC_REFRESH_PARTIAL);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 16000) == RNC_REFRESH_NONE); /* and again 15 s after that draw */
+  /* a PIN visibility change is prompt, a plain change at the same moment is not */
+  rnc_refresh_init(&r, 15000, 2000, 300000);
+  (void)rnc_refresh_decide(&r, 0, 0, 0);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 1000) == RNC_REFRESH_NONE);  /* a plain change: 15 s */
+  CHECK(rnc_refresh_decide(&r, 1, 1, 1500) == RNC_REFRESH_NONE);  /* the PIN: not before 2 s */
+  CHECK(rnc_refresh_decide(&r, 1, 1, 3000) == RNC_REFRESH_PARTIAL);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 4000) == RNC_REFRESH_NONE);  /* hidden again, 1 s after a draw */
+  CHECK(rnc_refresh_decide(&r, 1, 0, 5000) == RNC_REFRESH_PARTIAL);
+  /* a full refresh once the full interval has passed */
+  rnc_refresh_init(&r, 15000, 2000, 300000);
+  (void)rnc_refresh_decide(&r, 0, 0, 0);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 299000) == RNC_REFRESH_PARTIAL);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 314000) == RNC_REFRESH_FULL); /* 300 s since the last full one */
+  CHECK(rnc_refresh_decide(&r, 1, 0, 329000) == RNC_REFRESH_PARTIAL);
+  /* Review Focus 2: a change every second for ten minutes is at most one draw per 15 s */
+  rnc_refresh_init(&r, 15000, 2000, 300000);
+  for (i = 0; i <= 600; i++)
+    if (rnc_refresh_decide(&r, 1, 0, (uint64_t)i * 1000u) != RNC_REFRESH_NONE)
+      draws++;
+  CHECK(draws <= 41 && draws >= 40);
+  /* the OLED: once a second, never a full refresh */
+  rnc_refresh_init(&r, 1000, 1000, 0);
+  (void)rnc_refresh_decide(&r, 0, 0, 0);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 500) == RNC_REFRESH_NONE);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 1000) == RNC_REFRESH_PARTIAL);
+  CHECK(rnc_refresh_decide(&r, 1, 0, 600000) == RNC_REFRESH_PARTIAL);
+}
+
+static void test_display_step(void) {
+  rnc_refresh r;
+  rnc_display_state st;
+  rnc_status s = sample();
+  screen out, want;
+  unsigned rows = 0, n;
+  memset(&st, 0, sizeof(st));
+  rnc_refresh_init(&r, 15000, 2000, 300000);
+  /* a screen that did not initialise never draws, whatever it is offered */
+  CHECK(rnc_display_step(&r, &st, &s, RNC_PROFILE_EPAPER, 0, 0, out, &rows) == RNC_REFRESH_NONE);
+  CHECK(rnc_display_step(&r, &st, &s, RNC_PROFILE_EPAPER, 0, 100000, out, &rows) == RNC_REFRESH_NONE);
+  /* the first step draws and returns exactly the layout */
+  CHECK(rnc_display_step(&r, &st, &s, RNC_PROFILE_EPAPER, 1, 1000, out, &rows) == RNC_REFRESH_FULL);
+  n = rnc_status_layout(&s, RNC_PROFILE_EPAPER, want);
+  CHECK(rows == n && n > 0);
+  for (unsigned i = 0; i < n; i++)
+    CHECK(!strcmp(out[i], want[i]));
+  /* an unchanged status is quiet, a changed one waits for the interval */
+  CHECK(rnc_display_step(&r, &st, &s, RNC_PROFILE_EPAPER, 1, 2000, out, &rows) == RNC_REFRESH_NONE);
+  s.rx_packets = 13;
+  CHECK(rnc_display_step(&r, &st, &s, RNC_PROFILE_EPAPER, 1, 3000, out, &rows) == RNC_REFRESH_NONE);
+  CHECK(rnc_display_step(&r, &st, &s, RNC_PROFILE_EPAPER, 1, 17000, out, &rows) == RNC_REFRESH_PARTIAL);
+  CHECK(strstr(out[rows - 2], "13") != NULL || strstr(out[rows - 3], "13") != NULL);
+  /* the PIN appearing is drawn promptly and carries the PIN row */
+  s.ble = RNC_BLE_ADVERTISING;
+  strcpy(s.pin, "246810");
+  CHECK(rnc_display_step(&r, &st, &s, RNC_PROFILE_EPAPER, 1, 17500, out, &rows) == RNC_REFRESH_NONE);
+  CHECK(rnc_display_step(&r, &st, &s, RNC_PROFILE_EPAPER, 1, 19000, out, &rows) == RNC_REFRESH_PARTIAL);
+  CHECK(!strcmp(out[rows - 1], "BLE PIN 246810"));
+}
+
 int main(void) {
   test_pin_rule();
   test_running_page_oled();
@@ -205,6 +277,8 @@ int main(void) {
   test_epaper_profile();
   test_extremes();
   test_phases();
+  test_refresh_policy();
+  test_display_step();
   if (failures) {
     fprintf(stderr, "test_status: %d failure(s)\n", failures);
     return 1;
