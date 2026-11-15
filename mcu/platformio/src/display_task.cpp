@@ -41,7 +41,7 @@ static void display_task(void *) {
 }
 
 bool rnc_display_start(void) {
-  xTaskCreate(display_task, "display", DISPLAY_STACK(6144), NULL, 1, NULL);
+  xTaskCreate(display_task, "display", DISPLAY_STACK(12288), NULL, 1, NULL);
   return true;
 }
 #endif

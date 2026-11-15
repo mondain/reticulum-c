@@ -1,5 +1,6 @@
-// The status screen of the T-Echo: a 1.54 inch e-paper (GxEPD2_154_D67) on SPIM0, with CS 30, DC 28,
-// RESET 2, BUSY 3, SCK 31 and MOSI 29 (the radio uses SPIM2). See display_mode.h and
+// The status screen of the T-Echo: a 1.54 inch e-paper (GxEPD2_154_D67) on SPIM3, with CS 30, DC 28,
+// RESET 2, BUSY 3, SCK 31 and MOSI 29. The radio uses SPIM2; SPIM0 and SPIM1 are disabled in the
+// Adafruit nRF52 core (they serve as I2C), and a driver on one of them hangs at its first transfer. See display_mode.h and
 // docs/display-status-design.txt. E-paper refreshes take seconds: this runs in the display task
 // only, and the refresh policy (rnc_refresh) keeps them rare.
 #include "display_mode.h"
@@ -24,7 +25,7 @@ const unsigned display_min_interval_ms = 15000u, display_pin_interval_ms = 2000u
 // entries, so it needs a valid number: the radio's MISO (23) is only ever read, by both.
 #define EPD_MISO_UNUSED 23
 
-static SPIClass g_spi(NRF_SPIM0, EPD_MISO_UNUSED, EPD_SCK, EPD_MOSI);
+static SPIClass g_spi(NRF_SPIM3, EPD_MISO_UNUSED, EPD_SCK, EPD_MOSI);
 static GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> g_display(GxEPD2_154_D67(EPD_CS, EPD_DC, EPD_RESET, EPD_BUSY));
 
 bool display_init(void) {
