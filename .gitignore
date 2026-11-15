@@ -14,3 +14,6 @@ mcu/out/
 /web/test-results/
 /web/playwright-report/
 __pycache__/
+
+# local test identities (private keys)
+/identity.bin
