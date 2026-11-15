@@ -110,7 +110,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev libbz2-dev
           cmake -S . -B build -G Ninja
-          cmake --build build --target reticulum-c-node echo_client
+          cmake --build build --target reticulum-c-node echo_client test_rnode_host
           ctest --test-dir build --output-on-failure -L 'mcu|version'
       - name: ESP-IDF build
         if: matrix.chip != ''
