@@ -1,7 +1,7 @@
 Status screens for the T-Echo and the T-Beam Supreme: design
 =============================================================
 
-Status: approved 2026-11-14 (with the builder-check calls of section 6.6). Nothing is built yet. Stacked on
+Status: approved 2026-11-14 (with the builder-check calls of section 6.6). Built and checked on the T-Echo and the Supreme on 2026-11-15 (see mcu/README.txt). Stacked on
 feature/rnode-mode (PR #43): it uses that branch's Bluetooth PIN and RNode module.
 
 1. Intent
