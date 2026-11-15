@@ -5,7 +5,7 @@ string(REGEX REPLACE ".*VERSION ([0-9.]+).*" "\\1" RNC_VERSION "${RNC_PROJECT_LI
 string(TIMESTAMP RNC_MCU_BUILD_EPOCH "%s" UTC)
 # The LoRa radio support (mcu/radio) is part of the component: portable C with no platform
 # headers; the example's HAL (spi_master, gpio, esp_timer) lives in the example project.
-set(RNC_RADIO_SRCS rnc_lora_phy.c rnc_lora_air.c rnc_lora_mac.c rnc_lora_if.c rnc_sx126x.c
+set(RNC_RADIO_SRCS rnc_lora_phy.c rnc_lora_air.c rnc_lora_mac.c rnc_lora_if.c rnc_rnode.c rnc_sx126x.c
     rnc_sx127x.c rnc_boards.c rnc_radio.c)
 set(RNC_RADIO_LIST "")
 foreach(s ${RNC_RADIO_SRCS})
