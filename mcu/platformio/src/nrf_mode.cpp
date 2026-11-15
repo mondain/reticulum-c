@@ -176,10 +176,11 @@ void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
         print("rnc> ");
     } else {
       size_t before = con.length;
+      bool hide = con.length >= 11 && !strncmp(con.line, "set ble.pin", 11); // the PIN is echoed as *
       reply[0] = 0;
       (void)rnc_mcu_console_feed(&con, cfg, byte, reply, sizeof(reply));
       if (con.length > before)
-        Serial.write(byte);
+        Serial.write(hide ? (uint8_t)'*' : byte);
       else if (con.length < before)
         print("\b \b");
     }

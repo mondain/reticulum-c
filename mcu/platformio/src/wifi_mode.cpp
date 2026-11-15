@@ -211,7 +211,8 @@ void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
         print("rnc> ");
     } else {
       size_t before = con.length;
-      bool hide = con.length >= 12 && !strncmp(con.line, "set password", 12);
+      bool hide = (con.length >= 12 && !strncmp(con.line, "set password", 12)) ||
+                  (con.length >= 11 && !strncmp(con.line, "set ble.pin", 11));
       reply[0] = 0;
       (void)rnc_mcu_console_feed(&con, cfg, byte, reply, sizeof(reply));
       if (con.length > before) // accepted: echo it (the password as *)

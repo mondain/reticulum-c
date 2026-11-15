@@ -349,6 +349,28 @@ int rnc_rnode_reset_requested(rnc_rnode *rn) {
   return r;
 }
 
+size_t rnc_rnode_pump(rnc_rnode *rn, const rnc_rnode_io *io, uint64_t now_us) {
+  uint8_t buf[128];
+  size_t total = 0;
+  int n;
+  while ((n = io->read(io->context, buf, sizeof(buf))) > 0)
+    rnc_rnode_feed(rn, buf, (size_t)n, now_us);
+  (void)rnc_rnode_step(rn, now_us);
+  for (;;) {
+    size_t got = rnc_rnode_pull(rn, buf, sizeof(buf));
+    int w;
+    if (got == 0u)
+      break;
+    w = io->write(io->context, buf, got);
+    if (w < 0)
+      w = 0;
+    if ((size_t)w < got) /* what the transport did not take is dropped */
+      rn->stats.out_dropped += (uint32_t)(got - (size_t)w);
+    total += (size_t)w;
+  }
+  return total;
+}
+
 void rnc_rnode_reset(rnc_rnode *rn) {
   rn->in_len = 0;
   rn->in_frame = rn->in_escaped = rn->in_discard = 0;

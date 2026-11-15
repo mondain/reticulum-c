@@ -15,6 +15,7 @@
  * protocol) and RNodeInterface.py of Reticulum 1.5.5.
  */
 #include "rnc_lora_if.h"
+#include "rnc_rnode_io.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -76,6 +77,11 @@ int rnc_rnode_radio_on(const rnc_rnode *rn);
 void rnc_rnode_feed(rnc_rnode *rn, const uint8_t *bytes, size_t size, uint64_t now_us);
 /* Copies up to `capacity` bytes for the host into `out`; returns how many. */
 size_t rnc_rnode_pull(rnc_rnode *rn, uint8_t *out, size_t capacity);
+/* Moves bytes between the module and one transport: reads what the host sent, steps the
+ * module, writes what the module wants to say. Returns the number of bytes written to the
+ * transport. With several transports the owner calls this for the one that is in use (the
+ * one that last sent bytes), so replies and received packets go to that one. */
+size_t rnc_rnode_pump(rnc_rnode *rn, const rnc_rnode_io *io, uint64_t now_us);
 /* One pass of the work; returns the milliseconds after which it wants to be called again. */
 unsigned rnc_rnode_step(rnc_rnode *rn, uint64_t now_us);
 /* 1 once after the host asked for a restart (RESET, 0x55 0xf8): the owner reboots the board.

@@ -590,6 +590,45 @@ static void test_prepare_for_host(void) {
   }
 }
 
+/* ---- byte transports (Task 9) ------------------------------------------------------ */
+typedef struct stub_io {
+  uint8_t in[256], out[256];
+  size_t in_len, in_pos, out_len;
+} stub_io;
+static int stub_read(void *ctx, uint8_t *buf, size_t cap) {
+  stub_io *s = ctx;
+  size_t n = s->in_len - s->in_pos < cap ? s->in_len - s->in_pos : cap;
+  memcpy(buf, s->in + s->in_pos, n);
+  s->in_pos += n;
+  return (int)n;
+}
+static int stub_write(void *ctx, const uint8_t *data, size_t n) {
+  stub_io *s = ctx;
+  memcpy(s->out + s->out_len, data, n);
+  s->out_len += n;
+  return (int)n;
+}
+static void test_two_transports(void) {
+  rnc_rnode rn;
+  stub_io usb, ble;
+  rnc_rnode_io iou = {stub_read, stub_write, &usb}, iob = {stub_read, stub_write, &ble};
+  const uint8_t detect[] = {FEND, 0x08, 0x73, FEND, FEND, 0x50, 0x00, FEND};
+  memset(&usb, 0, sizeof(usb));
+  memset(&ble, 0, sizeof(ble));
+  rnc_rnode_init(&rn, NULL, 0x70, 0x71, 0x42);
+  memcpy(usb.in, detect, sizeof(detect));
+  usb.in_len = sizeof(detect);
+  CHECK_EQ(rnc_rnode_pump(&rn, &iou, 1000), 9); /* DETECT reply (4) + version reply (5) */
+  CHECK_BYTES(usb.out, usb.out_len, FEND, 0x08, 0x46, FEND, FEND, 0x50, 1, 74, FEND);
+  /* the same module, another transport: the same commands give the same replies, on that one */
+  memcpy(ble.in, detect, sizeof(detect));
+  ble.in_len = sizeof(detect);
+  CHECK_EQ(rnc_rnode_pump(&rn, &iob, 2000), 9);
+  CHECK_BYTES(ble.out, ble.out_len, FEND, 0x08, 0x46, FEND, FEND, 0x50, 1, 74, FEND);
+  CHECK_EQ(usb.out_len, 9); /* nothing more went to the first transport */
+  CHECK_EQ(rnc_rnode_pump(&rn, &iob, 3000), 0); /* idle */
+}
+
 int main(void) {
   test_identity_commands();
   test_escaping();
@@ -605,6 +644,7 @@ int main(void) {
   test_leave_and_reset();
   test_boot_window();
   test_prepare_for_host();
+  test_two_transports();
   if (failures) {
     fprintf(stderr, "test_rnode: %d failure(s)\n", failures);
     return 1;
