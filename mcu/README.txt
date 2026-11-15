@@ -208,13 +208,19 @@ has no radio selection and ignores this mode.
 Evidence: the protocol logic is unit tested, and tested against this project's own host
 RNode adapter over a pseudo terminal with a simulated LoRa peer. On 2026-11-14 a T-Echo
 running this firmware in rnode mode was driven over USB by that host adapter (915 MHz,
-125 kHz, SF8, CR 4/5, 0 dBm): the board was detected, the radio settings were
-acknowledged (radio_ready), and an announce of 167 bytes was handed to it and counted as
-sent. NOT verified: that another station heard it (no second radio was in use), anything
-with the unmodified reference RNodeInterface, Sideband or rnsd (a script for the reference,
-mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and has not been run),
-rnodeconf (it needs the EEPROM commands, which are not implemented), receiving, range and
-load. Other boards build only.
+125 kHz, SF8, CR 4/5, 0 dBm), with a T-Beam Supreme running the earlier gateway firmware
+(same settings, close by) as the other station:
+  - the board was detected and its radio settings acknowledged (radio_ready);
+  - an announce of 167 bytes sent through the T-Echo was received by the Supreme and
+    delivered to its serial host (announce counted);
+  - announces transmitted by the Supreme arrived at the host through the T-Echo as valid
+    announces (two of 167 bytes) with RSSI -31 dBm and SNR 12.75 and 14.25 dB.
+NOT verified: anything with the unmodified reference RNodeInterface, Sideband or rnsd (a
+script for the reference, mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and
+has not been run), a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,
+which are not implemented), range, sustained load, and the flow-control path with a real
+host. A host program that opens the Supreme's USB port resets it (ESP32-S3 USB serial),
+which is a property of that board, not of rnode mode. Other boards build only.
 
 Provisioning
 ------------
