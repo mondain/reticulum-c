@@ -58,6 +58,10 @@ rnc_result rnc_host_frame_feed(rnc_host_framer *state, rnc_host_framing framing,
  * discovery, not identity authentication. Network access is protected by IFAC.
  */
 rnc_result rnc_host_auto_group(const char *group, uint8_t multicast[16]);
+/* The address of a network device as text, as the reference's get_address_for_if reads it: its IPv4 address
+ * (or its broadcast address when `broadcast`), else, or with `prefer_ipv6`, its first IPv6 address (a
+ * link-local one carries "%device"). 0 on success, -1 when the device has none or `out` is too small. */
+int rnc_host_device_address(const char *device, int broadcast, int prefer_ipv6, char *out, size_t capacity);
 /* The multicast group with the reference's type and scope nibbles: `permanent` selects ff0x over
  * ff1x, scope is one of the RNC_AUTO_SCOPE_ values (discovery_scope), else RNC_INVALID. */
 #define RNC_AUTO_SCOPE_LINK 2u
@@ -104,6 +108,9 @@ typedef struct rnc_host_config {
   const char *auto_devices, *auto_ignored_devices;
   int auto_permanent;
   unsigned auto_scope;
+  /* TCP: the link runs over an I2P tunnel, so dead-peer detection uses the I2P timings (reference
+   * `i2p_tunneled`). Connections a listener accepts inherit it. */
+  int i2p_tunneled;
   uint16_t discovery_port, data_port; /* AUTO defaults29716/42671 */
   const rnc_ifac *ifac; /* optional sensitive configuration copied on add */
   uint32_t frequency, bandwidth; /* RNODE required Hz */

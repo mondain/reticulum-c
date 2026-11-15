@@ -138,6 +138,36 @@ static void network(void) {
   rnc_node_free(b);
   puts("host TCP tests passed");
 }
+/* `device` on TCP servers and UDP: the address comes from the named network device (the reference's
+ * get_address_for_if). The loopback device has an address but no broadcast address. */
+static void device_test(void) {
+  char text[64];
+  unsigned rng = 0;
+  uint8_t private_key[64] = {0};
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  CHECK(rnc_host_device_address("lo", 0, 0, text, sizeof(text)) == 0 && !strcmp(text, "127.0.0.1"));
+  CHECK(rnc_host_device_address("lo", 1, 0, text, sizeof(text)) != 0);
+  CHECK(rnc_host_device_address("no-such-device0", 0, 0, text, sizeof(text)) != 0);
+  CHECK(rnc_host_device_address("lo", 0, 0, text, 4) != 0); /* too small for the address */
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  host = node ? rnc_host_new(node) : NULL;
+  CHECK(host);
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.device = "lo"; /* no address: it comes from the device, which wins over one given */
+  cfg.address = "203.0.113.9";
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && status.online && status.bound_port);
+  cfg.device = "no-such-device0";
+  cfg.address = "127.0.0.1";
+  CHECK(rnc_host_add(host, 2, &cfg) != RNC_OK);
+  rnc_host_free(host);
+  rnc_node_free(node);
+}
 static void udp_test(void) {
   struct sockaddr_in address;
   socklen_t address_size = sizeof(address);
@@ -1442,6 +1472,56 @@ static void no_output_test(void) {
   rnc_node_free(node);
   puts("host no output test passed");
 }
+/* `i2p_tunneled`: a TCP interface that runs over an I2P tunnel uses the reference's I2P dead-peer timings
+ * (probe after 10 s idle, every 9 s, 5 times; unacknowledged data aborts after 45 s). */
+static void i2p_tunneled_test(void) {
+  uint8_t key[64] = {0};
+  unsigned rng = 0;
+  uint64_t now = 100;
+  uint16_t port = 0;
+  int listener, accepted, fd, found = 0, value;
+  socklen_t n = sizeof(value);
+  rnc_identity id;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  host = node ? rnc_host_new(node) : NULL;
+  CHECK(host);
+  listener = tcp_listener(AF_INET, &port);
+  CHECK(listener >= 0);
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  cfg.address = "127.0.0.1";
+  cfg.port = port;
+  cfg.i2p_tunneled = 1;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  accepted = accept_within(host, listener, &now, 50);
+  CHECK(accepted >= 0);
+  for (fd = 3; fd < 256; ++fd) {
+    struct sockaddr_in peer;
+    socklen_t peer_size = sizeof(peer);
+    if (fd == listener || fd == accepted ||
+        getpeername(fd, (struct sockaddr *)&peer, &peer_size) != 0 || peer.sin_family != AF_INET ||
+        ntohs(peer.sin_port) != port)
+      continue;
+    found = 1;
+#ifdef __linux__
+    CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &value, &n) == 0 && value == 10);
+    CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &value, &n) == 0 && value == 9);
+    CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &value, &n) == 0 && value == 5);
+    CHECK(getsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &value, &n) == 0 && value == 45000);
+#else
+    (void)value;
+    (void)n;
+#endif
+  }
+  CHECK(found);
+  close(accepted);
+  close(listener);
+  rnc_host_free(host);
+  rnc_node_free(node);
+}
 static void tcp_options_test(void) {
   uint8_t key[64] = {0};
   unsigned rng = 0, i;
@@ -1854,6 +1934,8 @@ int main(int argc, char **argv) {
     identity_files();
   else if (!strcmp(argv[1], "no_output"))
     no_output_test();
+  else if (!strcmp(argv[1], "i2p_tunneled"))
+    i2p_tunneled_test();
   else if (!strcmp(argv[1], "tcp_options"))
     tcp_options_test();
   else if (!strcmp(argv[1], "serial_params"))
@@ -1866,6 +1948,8 @@ int main(int argc, char **argv) {
     tunnel_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
+  else if (!strcmp(argv[1], "device"))
+    device_test();
   else if (!strcmp(argv[1], "udp"))
     udp_test();
   else if (!strcmp(argv[1], "policy"))

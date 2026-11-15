@@ -392,6 +392,12 @@ static int interface_key(interface_config *f, const char *key,
     return text_copy(f->target, sizeof(f->target), value);
   if (!strcmp(key, "device") || !strcmp(key, "interface"))
     return text_copy(f->device, sizeof(f->device), value);
+  if (!strcmp(key, "i2p_tunneled")) {
+    if (!boolean(value, &b))
+      return 0;
+    f->host.i2p_tunneled = b;
+    return 1;
+  }
   if (!strcmp(key, "devices"))
     return text_copy(f->auto_devices, sizeof(f->auto_devices), value);
   if (!strcmp(key, "ignored_devices"))
