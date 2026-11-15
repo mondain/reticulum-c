@@ -179,6 +179,35 @@ and does not announce until the link is up again. Output goes through a 4096 byt
 a frame that does not fit is dropped whole (Reticulum tolerates lost frames; a half frame
 would cost two), after the queue was given a chance to drain.
 
+RNode mode (host-driven LoRa modem)
+-----------------------------------
+Besides the Reticulum node, the PlatformIO firmware can be a LoRa modem that a host
+drives, the role of a stock RNode: set  mode rnode  in the setup console (or the browser
+setup form, "Run as: RNode modem"; tools/wifi-config.sh --mode rnode on ESP32) and reboot.
+The board then runs no Reticulum node. The serial port carries KISS frames only, in the
+RNode protocol: a host (Sideband, rnsd, this project's RNode interface) detects the board,
+sets the frequency, bandwidth, spreading factor, coding rate and power, switches the radio
+on, and exchanges raw packets. The over-the-air format is the one the node modes already
+use. Go back with  set mode serial  (the line  rnc-config  within two seconds after a
+reset still opens the setup console, in every mode).
+
+Regulatory behaviour: nothing is transmitted until the host has set all five settings
+and the radio state, and every new host starts from nothing (a host that leaves or the
+board resetting turns the radio off and clears the settings). The airtime budget stays
+active: 1 percent of every hour by default; the host may change it with the airtime lock
+commands, within 0.01 to 100 percent, and the smaller of the short and long lock values
+is used. You are responsible for what the host configures.
+
+Not included: stock RNode EEPROM provisioning, signing and firmware-update flows
+(rnodeconf cannot flash or provision this firmware), the display, battery and temperature
+reports, and Bluetooth (planned, see docs/rnode-mode-plan.txt). The generic ESP-IDF image
+has no radio selection and ignores this mode.
+
+Evidence: the protocol logic is unit tested, and tested against this project's own host
+RNode adapter over a pseudo terminal with a simulated LoRa peer. A script that does the
+same against the unmodified reference RNodeInterface exists (mcu/tests/mcu_rnode_reference.sh)
+but needs pyserial and has not been run. NOT TESTED ON HARDWARE YET.
+
 Provisioning
 ------------
 The Wi-Fi settings are NEVER compiled into a release image. They live in NVS and are

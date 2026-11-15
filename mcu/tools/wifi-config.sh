@@ -6,7 +6,7 @@
 #
 #   wifi-config.sh --chip esp32|esp32s3 --device /dev/ttyUSB0 --ssid NAME --host HOST
 #                  [--password-stdin | --password SECRET] [--port 4242]
-#                  [--mode wifi|serial] [--partitions partitions.csv]
+#                  [--mode wifi|serial|rnode] [--partitions partitions.csv]
 #                  [--offset 0x190000 --size 0x4000] [--image-only FILE.bin] [--arduino]
 #                  [--docker] [--baud 460800]
 #
@@ -16,6 +16,9 @@
 #                      of them the network is taken to be open.
 #   --mode serial      stores "serial" (and removes the Wi-Fi use): the board goes back
 #                      to the HDLC serial transport.
+#   --mode rnode       stores "rnode": the board is a LoRa modem for a host (Sideband, rnsd)
+#                      that sets the radio itself (docs/rnode-mode-design.txt). No Wi-Fi or
+#                      lora.* setting is needed.
 #   --partitions FILE  the partitions.csv of the firmware (the release zips contain it);
 #                      the offset and size of "rnccfg" are read from it. Default: the
 #                      file next to this script or one directory up (the release zips),
@@ -93,7 +96,7 @@ done
 
 die() { echo "wifi-config: $*" >&2; exit 1; }
 
-case $MODE in wifi|serial) ;; *) die "--mode must be wifi or serial" ;; esac
+case $MODE in wifi|serial|rnode) ;; *) die "--mode must be wifi, serial or rnode" ;; esac
 case $CHIP in esp32|esp32s3|"") ;; *) die "--chip must be esp32 or esp32s3" ;; esac
 if [ -z "$IMAGE_ONLY" ]; then
   [ -n "$CHIP" ] || die "--chip is required"

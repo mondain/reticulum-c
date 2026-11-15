@@ -38,3 +38,17 @@ test('changing Wi-Fi host preserves an existing password unless explicitly repla
  assert.ok(buildCommands({...v,openNetwork:true},board).includes('set password '));
  assert.throws(()=>buildCommands({...v,keepExistingPassword:false},board),/password|open network/i);
 });
+test('rnode mode sends only the mode: the host sets the radio', () => {
+ assert.deepEqual(buildCommands({runMode:'rnode'},board),['set mode rnode','save']);
+ assert.deepEqual(buildCommands({runMode:'rnode',...radio,applyWifi:true,transport:'wifi'},board),['set mode rnode','save']);
+ assert.throws(()=>buildCommands({runMode:'rnode'},{family:'esp32'}),/radio/i);
+});
+test('leaving rnode mode restores the serial node', () => {
+ assert.deepEqual(buildCommands({runMode:'node',currentMode:'rnode',role:'off'},board),['set lora.mode off','set mode serial','save']);
+ assert.ok(!buildCommands({runMode:'node',role:'off'},board).includes('set mode serial'));
+ const wifi={role:'off',runMode:'node',currentMode:'rnode',applyWifi:true,transport:'serial'};
+ assert.equal(buildCommands(wifi,board).filter(c=>c.startsWith('set mode')).length,1);
+});
+test('the reported rnode mode is parsed', () => {
+ assert.equal(parseSettings('mode=rnode\r\nlora.mode=off\r\nrnc> ').mode,'rnode');
+});

@@ -1151,3 +1151,19 @@ No range test, sustained-load/soak test or over-the-air qualification against
 stock RNode firmware has been completed. Other boards remain covered by builds
 and models. Supreme LR1121 variants and the original T-Beam v1.2 are unsupported;
 the Supreme environment targets the SX1262 variant.
+
+## RNode mode of the microcontroller firmware (`feature/rnode-mode`)
+
+The PlatformIO firmware can run as the device side of the RNode KISS protocol
+(`mode rnode`), so that a host's own Reticulum drives the board's LoRa radio. The command
+set is the one this project's host adapter and RNS 1.5.5 `RNodeInterface` use (detect,
+firmware 1.74, platform, MCU, board, frequency, bandwidth, power, spreading factor,
+coding rate, radio state, airtime locks, ready, data, RSSI and SNR reports, leave, reset).
+Not implemented: EEPROM, signing and firmware-update flows, display, battery and
+temperature reports, Bluetooth.
+
+Evidence: unit tests of the framer, every command and the failure cases; this project's
+host RNode adapter over a pseudo terminal against the module with a simulated radio and
+a simulated peer (detect, configuration, announce out, announce in with signal figures).
+A script for the unmodified reference `RNodeInterface` exists but has not been run, and
+nothing has been run on hardware.

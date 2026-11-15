@@ -4,7 +4,7 @@ import { buildCommands, parseSettings } from './config.js';
 import { waitForPort, deviceWarning } from './ports.js';
 import { connectConsole } from './provision.js';
 const $=id=>document.getElementById(id), catalogueUrl=new URL('./firmware/catalog.json',document.baseURI);
-let catalogue,release,selected,filter='all',busy=false,settings,applicationPort,applicationInfo,currentPasswordSet=false,flashAbort,settingsAbort;
+let currentMode='serial',catalogue,release,selected,filter='all',busy=false,settings,applicationPort,applicationInfo,currentPasswordSet=false,flashAbort,settingsAbort;
 window.addEventListener('beforeunload',e=>{if(flashAbort){e.preventDefault();e.returnValue='';}});
 const webSerial=!!navigator.serial&&window.isSecureContext;
 $('browser-notice').hidden=webSerial;
@@ -49,12 +49,13 @@ function drawDownloads(){
  const assets=selected.family==='nrf52'?Object.entries(selected.files):selected.parts.map((v,i)=>[i===0?'Bootloader':v.offset===65536?'Application':`Flash part at 0x${v.offset.toString(16)}`,v]);
  for(const[role,file]of assets){const box=document.createElement('div');box.className='download-item';const a=document.createElement('a');a.href=new URL(file.path,catalogueUrl).href;a.download='';a.textContent=`${role.toUpperCase()} · ${(file.size/1024).toFixed(1)} KB`;box.append(a);const hash=document.createElement('small');hash.textContent=`SHA-256 ${file.sha256}`;box.append(hash);target.append(box);}
 }
-function updateFields(){ $('config-form').elements.namedItem('password').disabled=$('open-network').checked;$('radio-fields').hidden=$('radio-role').value==='off';$('wifi-fields').hidden=!$('apply-wifi').checked;$('wifi-values').hidden=$('transport').value!=='wifi'; }
+function updateFields(){ const rnode=$('run-mode').value==='rnode';$('node-fields').hidden=rnode;$('rnode-help').hidden=!rnode; $('config-form').elements.namedItem('password').disabled=$('open-network').checked;$('radio-fields').hidden=$('radio-role').value==='off';$('wifi-fields').hidden=!$('apply-wifi').checked;$('wifi-values').hidden=$('transport').value!=='wifi'; }
 function loadReportedSettings(reply){
- const v=parseSettings(reply),f=$('config-form').elements;currentPasswordSet=/(?:^|\r?\n)password=\(set\)/.test(reply);
+ const v=parseSettings(reply),f=$('config-form').elements;currentMode=v.mode||'serial';f.namedItem('runMode').value=currentMode==='rnode'?'rnode':'node';currentPasswordSet=/(?:^|\r?\n)password=\(set\)/.test(reply);
  for(const[key,name]of[['lora.mode','role'],['lora.sf','sf'],['lora.cr','cr'],['lora.txp','power'],['lora.airtime','airtime'],['mode','transport'],['ssid','ssid'],['host','host'],['port','port']])if(v[key]!==undefined&&v[key]!=='(not set)')f.namedItem(name).value=v[key];
  if(v['lora.freq']&&v['lora.freq']!=='(not set)')f.namedItem('frequency').value=Number(v['lora.freq'])/1e6;
  if(v['lora.bw']&&v['lora.bw']!=='(not set)')f.namedItem('bandwidth').value=Number(v['lora.bw'])/1000;
+ if(currentMode==='rnode')f.namedItem('transport').value='serial'; // RNode is not a host connection choice
  f.namedItem('password').value='';updateFields();
 }
 function settingsState(s){
@@ -83,7 +84,7 @@ async function openSettings(port,freshBoot=false){
 }
 $('open-network').addEventListener('change',()=>{const p=$('config-form').elements.namedItem('password');p.disabled=$('open-network').checked;if(p.disabled)p.value='';});
 $('confirm-board').addEventListener('change',syncActions);$('clear-log').addEventListener('click',()=>$('log').textContent='');
-for(const id of['radio-role','apply-wifi','transport'])$(id).addEventListener('change',updateFields);
+for(const id of['run-mode','radio-role','apply-wifi','transport'])$(id).addEventListener('change',updateFields);
 document.querySelectorAll('.filter').forEach(b=>b.addEventListener('click',()=>{filter=b.dataset.family;document.querySelectorAll('.filter').forEach(x=>{x.classList.toggle('active',x===b);x.setAttribute('aria-pressed',String(x===b));});drawBoards();}));
 $('version').addEventListener('change',async()=>{
  if(busy)return;
@@ -139,7 +140,7 @@ $('connect-settings').addEventListener('click',async()=>{
 });
 $('config-form').addEventListener('submit',async event=>{
  event.preventDefault();if(!settings?.inConsole||busy)return;
- try{const f=new FormData(event.currentTarget),values=Object.fromEntries(f);values.applyWifi=f.has('applyWifi');values.openNetwork=f.has('openNetwork');values.keepExistingPassword=currentPasswordSet;const commands=buildCommands(values,selected);busy=true;syncActions();configStatus('Writing validated settings…');for(const c of commands)await settings.command(c);if(values.applyWifi&&values.transport==='wifi')currentPasswordSet=!!values.password||(!values.openNetwork&&currentPasswordSet);$('config-form').elements.namedItem('password').value='';configStatus('Settings saved. Press Reboot & run to apply them.','success');}
+ try{const f=new FormData(event.currentTarget),values=Object.fromEntries(f);values.applyWifi=f.has('applyWifi');values.openNetwork=f.has('openNetwork');values.keepExistingPassword=currentPasswordSet;values.currentMode=currentMode;const commands=buildCommands(values,selected);busy=true;syncActions();configStatus('Writing validated settings…');for(const c of commands)await settings.command(c);if(values.applyWifi&&values.transport==='wifi')currentPasswordSet=!!values.password||(!values.openNetwork&&currentPasswordSet);$('config-form').elements.namedItem('password').value='';configStatus('Settings saved. Press Reboot & run to apply them.','success');}
  catch(e){configStatus(`Settings were not confirmed saved: ${e.message||String(e)}. Read them again before retrying.`,'error');log(e.message||e);}finally{busy=false;syncActions();}
 });
 $('reboot').addEventListener('click',async()=>{

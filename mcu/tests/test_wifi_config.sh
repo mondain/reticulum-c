@@ -62,6 +62,9 @@ grep -a -q -F password "$D/open.bin" && fail "an open network image holds a pass
 "$TOOL" $mode --partitions "$PART" --image-only "$D/serial.bin" --mode serial > "$D/o" 2>&1 \
   || { cat "$D/o" >&2; fail "serial mode image failed"; }
 grep -a -q -F serial "$D/serial.bin" || fail "the serial image lacks the mode"
+"$TOOL" $mode --partitions "$PART" --image-only "$D/rnode.bin" --mode rnode > "$D/o" 2>&1 \
+  || { cat "$D/o" >&2; fail "rnode mode image failed"; }
+grep -a -q -F rnode "$D/rnode.bin" || fail "the rnode image lacks the mode"
 # LoRa settings: the keys the firmware reads (lora_mode, lora_set, lora_freq, lora_bw, lora_sf,
 # lora_cr, lora_txp, lora_air); and an image without any radio setting keeps the radio off
 "$TOOL" $mode --partitions "$PART" --image-only "$D/lora.bin" --mode serial --lora-mode gateway \
