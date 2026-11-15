@@ -200,10 +200,20 @@ active: 1 percent of every hour by default; the host may change it with the airt
 commands, within 0.01 to 100 percent, and the smaller of the short and long lock values
 is used. You are responsible for what the host configures.
 
+Bluetooth LE (nRF52840 boards: T-Echo, RAK4631, T114): in rnode mode the board can also be
+driven over Bluetooth, as a stock RNode is. It is off, and does not advertise, until you
+set a six digit PIN:  set ble.pin 123456  (console or the setup tools; it is never printed,
+get shows only (set) or (empty), and an empty value turns Bluetooth off again). The board
+then advertises as "RNode XXXX" (XXXX: the last 16 bits of its address) with the Nordic UART
+service; a phone or computer pairs with the PIN (passkey entry) and uses the same KISS
+stream over the two UART characteristics. Without pairing there is no access: notifications
+cannot be enabled and writes are refused. USB keeps working alongside; the module answers
+the transport that last sent bytes. ESP32 boards have no Bluetooth transport yet.
+
 Not included: stock RNode EEPROM provisioning, signing and firmware-update flows
 (rnodeconf cannot flash or provision this firmware), the display, battery and temperature
-reports, and Bluetooth (planned, see docs/rnode-mode-plan.txt). The generic ESP-IDF image
-has no radio selection and ignores this mode.
+reports, and Bluetooth on ESP32 boards. The generic ESP-IDF image has no radio selection
+and ignores this mode.
 
 Evidence: the protocol logic is unit tested, and tested against this project's own host
 RNode adapter over a pseudo terminal with a simulated LoRa peer. On 2026-11-14 a T-Echo
@@ -221,6 +231,13 @@ has not been run), a stock RNode on the other end, rnodeconf (it needs the EEPRO
 which are not implemented), range, sustained load, and the flow-control path with a real
 host. A host program that opens the Supreme's USB port resets it (ESP32-S3 USB serial),
 which is a property of that board, not of rnode mode. Other boards build only.
+
+Bluetooth evidence (T-Echo, 2026-11-14): from a Linux PC (BlueZ) the board advertised as
+"RNode 23B8", pairing with the PIN succeeded, notifications could be enabled, and writing
+DETECT and the version request to the UART characteristic returned c0 08 46 c0 c0 50 01 4a c0
+(detect OK, firmware 1.74) as notifications. Unpaired, notifications stayed off and a write
+request was refused. NOT verified: Sideband or any phone, a full radio exchange over
+Bluetooth, many connect/disconnect cycles, and the range.
 
 Provisioning
 ------------

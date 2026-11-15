@@ -1170,3 +1170,9 @@ A script for the unmodified reference `RNodeInterface` exists but has not been r
 announces both ways over the air with a T-Beam Supreme running this project's gateway
 firmware (915 MHz, 125 kHz, SF8, 0 dBm, close range; RSSI about -31 dBm, SNR 12 to 14 dB).
 Sideband, rnsd, a stock RNode on the other end, range and load are unverified.
+
+Bluetooth LE for rnode mode (nRF52840 boards): Nordic UART service, name "RNode XXXX", passkey
+pairing with an operator-set six digit PIN (off until set). Checked once from a Linux PC
+(BlueZ) on a T-Echo: pairing, notifications, detect and version over the UART characteristics,
+and no access without pairing. Sideband, phones, a radio exchange over Bluetooth and ESP32
+boards are not covered.
