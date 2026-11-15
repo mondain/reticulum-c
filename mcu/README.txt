@@ -245,7 +245,7 @@ running this firmware in rnode mode was driven over USB by that host adapter (91
     delivered to its serial host (announce counted);
   - announces transmitted by the Supreme arrived at the host through the T-Echo as valid
     announces (two of 167 bytes) with RSSI -31 dBm and SNR 12.75 and 14.25 dB.
-NOT verified: anything with the unmodified reference RNodeInterface, Sideband or rnsd (a
+NOT verified: anything with the unmodified reference RNodeInterface or rnsd, and traffic through Sideband (a
 script for the reference, mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and
 has not been run), a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,
 which are not implemented), range, sustained load, and the flow-control path with a real
@@ -257,8 +257,13 @@ Bluetooth evidence (T-Echo, 2026-11-14): from a Linux PC (BlueZ) the board adver
 DETECT and the version request to the UART characteristic returned c0 08 46 c0 c0 50 01 4a c0
 (detect OK, firmware 1.74) as notifications. Unpaired, notifications stayed off and a write
 request was refused. The ESP32 Bluetooth transport was only compiled (all five ESP32
-environments), never run on hardware. NOT verified: Sideband or any phone, a full radio exchange over
-Bluetooth, many connect/disconnect cycles, and the range.
+environments), never run on hardware.
+Sideband (Android), T-Echo, 2026-11-15: after pairing the phone with the PIN in Android's
+Bluetooth settings, Sideband connected over BLE once "Connect using Bluetooth" and "Device
+requires BLE" were on and Sideband was restarted (its "Bluetooth" without BLE is classic
+Bluetooth and cannot see this board). The board's status screen then showed the frequency
+and the BLE link. NOT verified: packets in either direction through Sideband (the RX and TX
+counts were not checked), many connect/disconnect cycles, the range, and the ESP32 transport.
 
 Provisioning
 ------------
