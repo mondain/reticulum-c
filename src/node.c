@@ -1380,7 +1380,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
                (unsigned)p->hops);
     }
     emit(n, RNC_NODE_ANNOUNCE, ingress, p)->route = fresh.route;
-    if (targets && p->context == 0 &&
+    if (targets && p->context == 0 && p->hops <= 127 &&
         !rate_blocked(n, interface(n, ingress), p->destination, now)) {
       rnc_packet relay = *p;
       uint64_t due = after(now, ((unsigned)jitter[0] * 256 + jitter[1]) % 501u);
@@ -1402,7 +1402,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
       rnc_packet relay = *p;
       relay.context = 11;
       relay_announce(n, &relay);
-      if (n->requests[i].ingress != ingress)
+      if (n->requests[i].ingress != ingress && p->hops <= 127)
         emit(n, RNC_NODE_SEND, n->requests[i].ingress, &relay);
       n->requests[i].used = 0;
     }
@@ -1886,11 +1886,14 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
   if (!room(n, interface_count(n) + RNC_NODE_REQUESTS + 2u))
     return RNC_AGAIN;
   p = *packet;
-  if (p.hops >= 127)
+  type = p.flags & 3u;
+  /* PATHFINDER_M is 128 hops. The reference counts a hop on arrival and accepts an announce up
+   * to 128 hops (so up to 127 on the wire), but refuses to transmit above 127: such a path is
+   * learned and never passed on. Everything else keeps the stricter 127 bound. */
+  if (p.hops >= (type == RNC_ANNOUNCE ? 128u : 127u))
     return RNC_PROTOCOL;
   if (!interface(n, ingress)->local)
     p.hops++;
-  type = p.flags & 3u;
   destination = (p.flags >> 2) & 3u;
   if (type == RNC_ANNOUNCE) {
     n->input_packet = packet;
@@ -2270,7 +2273,7 @@ rnc_result rnc_node_state_import(rnc_node *n, const rnc_identity *owner,
     if (r != RNC_OK)
       goto done;
     at += wire;
-    if (entry.packet.hops >= 128 ||
+    if (entry.packet.hops > 128 ||
         (!entry.packet.hops && interface(n, iface) &&
          !interface(n, iface)->local)) {
       r = RNC_PROTOCOL;
@@ -2738,7 +2741,7 @@ rnc_result rnc_node_tunnels_import(rnc_node *n, const rnc_identity *owner,
       r = rnc_packet_decode(state + at, wire, &p->entry.packet);
       if (r == RNC_OK)
         r = rnc_announce_verify(&p->entry.packet, &p->entry.route.announce);
-      if (r != RNC_OK || p->entry.packet.hops >= 128) {
+      if (r != RNC_OK || p->entry.packet.hops > 128) {
         r = r == RNC_OK ? RNC_PROTOCOL : r;
         goto done;
       }
