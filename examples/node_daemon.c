@@ -61,6 +61,7 @@ static int parse_hash_list(const char *value, uint8_t (*out)[16],
 #define STATE_MAX (96u + RNC_NODE_ROUTES * (14u + RNC_MTU))
 typedef struct interface_config {
   rnc_host_config host;
+  char auto_devices[256], auto_ignored[256];
   char name[64], address[256], target[256], device[64], group[64], netname[128],
       passphrase[128], callsign[RNC_HOST_CALLSIGN_MAX + 2u], ax_call[8];
   size_t ifac_size;
@@ -391,6 +392,31 @@ static int interface_key(interface_config *f, const char *key,
     return text_copy(f->target, sizeof(f->target), value);
   if (!strcmp(key, "device") || !strcmp(key, "interface"))
     return text_copy(f->device, sizeof(f->device), value);
+  if (!strcmp(key, "devices"))
+    return text_copy(f->auto_devices, sizeof(f->auto_devices), value);
+  if (!strcmp(key, "ignored_devices"))
+    return text_copy(f->auto_ignored, sizeof(f->auto_ignored), value);
+  if (!strcmp(key, "discovery_scope")) {
+    static const struct {
+      const char *name;
+      unsigned scope;
+    } scopes[] = {{"link", RNC_AUTO_SCOPE_LINK},
+                  {"admin", RNC_AUTO_SCOPE_ADMIN},
+                  {"site", RNC_AUTO_SCOPE_SITE},
+                  {"organisation", RNC_AUTO_SCOPE_ORGANISATION},
+                  {"global", RNC_AUTO_SCOPE_GLOBAL}};
+    size_t k;
+    for (k = 0; k < sizeof(scopes) / sizeof(*scopes); ++k)
+      if (!strcasecmp(value, scopes[k].name)) {
+        f->host.auto_scope = scopes[k].scope;
+        return 1;
+      }
+    return 0;
+  }
+  if (!strcmp(key, "multicast_address_type")) {
+    f->host.auto_permanent = !strcasecmp(value, "permanent"); /* anything else is temporary */
+    return 1;
+  }
   if (!strcmp(key, "group_id"))
     return text_copy(f->group, sizeof(f->group), value);
   if (!strcmp(key, "networkname") || !strcmp(key, "network_name"))
@@ -806,6 +832,8 @@ static void interface_bind(interface_config *f) {
   f->host.target = f->target[0] ? f->target : NULL;
   f->host.device = f->device[0] ? f->device : NULL;
   f->host.group = f->group[0] ? f->group : NULL;
+  f->host.auto_devices = f->auto_devices[0] ? f->auto_devices : NULL;
+  f->host.auto_ignored_devices = f->auto_ignored[0] ? f->auto_ignored : NULL;
   f->host.id_callsign = f->callsign[0] ? f->callsign : NULL;
   f->host.callsign = f->ax_call[0] ? f->ax_call : NULL;
   if (f->host.ifac)

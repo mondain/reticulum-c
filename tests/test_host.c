@@ -57,6 +57,27 @@ static void codecs(void) {
   }
   CHECK(rnc_host_auto_group("reticulum", out) == RNC_OK && out[0] == 0xff &&
         out[1] == 0x12 && out[2] == 0 && out[3] == 0);
+  /* the multicast type and scope nibbles: permanent/temporary and link/admin/site/organisation/global */
+  {
+    uint8_t base[16];
+    CHECK(rnc_host_auto_group("reticulum", base) == RNC_OK);
+    CHECK(rnc_host_auto_group_ex("reticulum", 0, RNC_AUTO_SCOPE_LINK, out) == RNC_OK && !memcmp(out, base, 16));
+    CHECK(rnc_host_auto_group_ex("reticulum", 1, RNC_AUTO_SCOPE_LINK, out) == RNC_OK && out[1] == 0x02 &&
+          !memcmp(out + 2, base + 2, 14));
+    CHECK(rnc_host_auto_group_ex("reticulum", 0, RNC_AUTO_SCOPE_ADMIN, out) == RNC_OK && out[1] == 0x14);
+    CHECK(rnc_host_auto_group_ex("reticulum", 0, RNC_AUTO_SCOPE_SITE, out) == RNC_OK && out[1] == 0x15);
+    CHECK(rnc_host_auto_group_ex("reticulum", 0, RNC_AUTO_SCOPE_ORGANISATION, out) == RNC_OK && out[1] == 0x18);
+    CHECK(rnc_host_auto_group_ex("reticulum", 1, RNC_AUTO_SCOPE_GLOBAL, out) == RNC_OK && out[1] == 0x0e);
+    CHECK(rnc_host_auto_group_ex("reticulum", 0, 3u, out) == RNC_INVALID);
+  }
+  /* device selection: `devices` restricts, `ignored_devices` excludes, lo0 is always skipped */
+  CHECK(rnc_host_auto_device_allowed(NULL, NULL, "eth0") && rnc_host_auto_device_allowed("", "", "wlan0"));
+  CHECK(rnc_host_auto_device_allowed("eth0, wlan0", NULL, "wlan0") &&
+        !rnc_host_auto_device_allowed("eth0, wlan0", NULL, "eth1") &&
+        !rnc_host_auto_device_allowed("eth0,wlan0", NULL, "eth"));
+  CHECK(!rnc_host_auto_device_allowed(NULL, "docker0, veth1", "docker0") &&
+        rnc_host_auto_device_allowed(NULL, "docker0, veth1", "eth0"));
+  CHECK(!rnc_host_auto_device_allowed("eth0", "eth0", "eth0") && !rnc_host_auto_device_allowed(NULL, NULL, "lo0"));
   CHECK(rnc_host_auto_token("reticulum", "fe80::1", out) == RNC_OK);
   {
     uint8_t expected[32];

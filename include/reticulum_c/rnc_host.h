@@ -58,6 +58,18 @@ rnc_result rnc_host_frame_feed(rnc_host_framer *state, rnc_host_framing framing,
  * discovery, not identity authentication. Network access is protected by IFAC.
  */
 rnc_result rnc_host_auto_group(const char *group, uint8_t multicast[16]);
+/* The multicast group with the reference's type and scope nibbles: `permanent` selects ff0x over
+ * ff1x, scope is one of the RNC_AUTO_SCOPE_ values (discovery_scope), else RNC_INVALID. */
+#define RNC_AUTO_SCOPE_LINK 2u
+#define RNC_AUTO_SCOPE_ADMIN 4u
+#define RNC_AUTO_SCOPE_SITE 5u
+#define RNC_AUTO_SCOPE_ORGANISATION 8u
+#define RNC_AUTO_SCOPE_GLOBAL 14u
+rnc_result rnc_host_auto_group_ex(const char *group, int permanent, unsigned scope,
+                                  uint8_t multicast[16]);
+/* Whether AutoInterface uses a network device: `allowed` (comma-separated, empty or NULL = any) and
+ * `ignored` are the reference's `devices` and `ignored_devices`; an ignored device is never used. */
+int rnc_host_auto_device_allowed(const char *allowed, const char *ignored, const char *name);
 rnc_result rnc_host_auto_token(const char *group, const char *ipv6,
                                uint8_t token[32]);
 #define RNC_HOST_CALLSIGN_MAX 32u
@@ -86,6 +98,12 @@ typedef struct rnc_host_config {
   const char
       *device; /* AUTO: interface name carrying a link-local IPv6 address */
   const char *group; /* AUTO: discovery group, default"reticulum" */
+  /* AUTO: comma-separated device names to use (`devices`, empty = any) and to skip (`ignored_devices`);
+   * auto_permanent selects the permanent multicast type (`multicast_address_type`); auto_scope is an
+   * RNC_AUTO_SCOPE_ value (`discovery_scope`), 0 = link. */
+  const char *auto_devices, *auto_ignored_devices;
+  int auto_permanent;
+  unsigned auto_scope;
   uint16_t discovery_port, data_port; /* AUTO defaults29716/42671 */
   const rnc_ifac *ifac; /* optional sensitive configuration copied on add */
   uint32_t frequency, bandwidth; /* RNODE required Hz */

@@ -114,10 +114,39 @@ rnc_result rnc_host_frame_feed(rnc_host_framer *s, rnc_host_framing mode,
   return RNC_AGAIN;
 }
 rnc_result rnc_host_auto_group(const char *group, uint8_t out[16]) {
-  uint8_t hash[32], address[16] = {0xff, 0x12, 0, 0};
+  return rnc_host_auto_group_ex(group, 0, RNC_AUTO_SCOPE_LINK, out);
+}
+static int list_has(const char *list, const char *name) {
+  size_t n = strlen(name);
+  while (list && *list) {
+    const char *end = strchr(list, ',');
+    size_t len = end ? (size_t)(end - list) : strlen(list);
+    const char *start = list;
+    while (len && (*start == ' ' || *start == '\t')) {
+      start++;
+      len--;
+    }
+    while (len && (start[len - 1] == ' ' || start[len - 1] == '\t'))
+      len--;
+    if (len == n && !memcmp(start, name, n))
+      return 1;
+    list = end ? end + 1 : NULL;
+  }
+  return 0;
+}
+int rnc_host_auto_device_allowed(const char *allowed, const char *ignored, const char *name) {
+  if (!name || !strcmp(name, "lo0") || list_has(ignored, name))
+    return 0;
+  return !allowed || !*allowed || list_has(allowed, name);
+}
+rnc_result rnc_host_auto_group_ex(const char *group, int permanent, unsigned scope, uint8_t out[16]) {
+  uint8_t hash[32], address[16] = {0xff, 0, 0, 0};
   size_t n;
-  if (!out)
+  if (!out || (scope != RNC_AUTO_SCOPE_LINK && scope != RNC_AUTO_SCOPE_ADMIN &&
+               scope != RNC_AUTO_SCOPE_SITE && scope != RNC_AUTO_SCOPE_ORGANISATION &&
+               scope != RNC_AUTO_SCOPE_GLOBAL))
     return RNC_INVALID;
+  address[1] = (uint8_t)((permanent ? 0x00u : 0x10u) | scope);
   if (!group)
     group = "reticulum";
   n = strlen(group);
@@ -316,7 +345,9 @@ typedef struct host_interface {
       has_ifac, ready;
   rnc_host_status status;
   char address[256], target[256], device[64], group[64],
-      local_ip[INET6_ADDRSTRLEN];
+      local_ip[INET6_ADDRSTRLEN], auto_devices[256], auto_ignored[256];
+  int auto_permanent;
+  unsigned auto_scope;
   uint16_t target_port, discovery_port, data_port;
   unsigned baud, kiss_port, ifindex;
   uint32_t bitrate;
@@ -1139,7 +1170,8 @@ static int setup_auto(host_interface *f) {
     return -1;
   for (it = all; it; it = it->ifa_next) {
     if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET6 ||
-        (f->device[0] && strcmp(f->device, it->ifa_name)))
+        (f->device[0] && strcmp(f->device, it->ifa_name)) ||
+        !rnc_host_auto_device_allowed(f->auto_devices, f->auto_ignored, it->ifa_name))
       continue;
     local = ((struct sockaddr_in6 *)it->ifa_addr)->sin6_addr;
     if (!IN6_IS_ADDR_LINKLOCAL(&local))
@@ -1162,7 +1194,8 @@ static int setup_auto(host_interface *f) {
   m->sin6_family = AF_INET6;
   m->sin6_port = htons(f->discovery_port);
   m->sin6_scope_id = f->ifindex;
-  if (rnc_host_auto_group(f->group, (uint8_t *)&m->sin6_addr) != RNC_OK) {
+  if (rnc_host_auto_group_ex(f->group, f->auto_permanent, f->auto_scope, (uint8_t *)&m->sin6_addr) !=
+      RNC_OK) {
     errno = EINVAL;
     return -1;
   }
@@ -1349,9 +1382,13 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->status.gravity = c->gravity;
   f->status.announces_to_internal = c->announces_to_internal != 0;
   f->policy.ingress = c->ingress;
+  f->auto_permanent = c->auto_permanent != 0;
+  f->auto_scope = c->auto_scope ? c->auto_scope : RNC_AUTO_SCOPE_LINK;
   if (!copy_text(f->address, sizeof(f->address), c->address) ||
       !copy_text(f->target, sizeof(f->target), c->target) ||
       !copy_text(f->device, sizeof(f->device), c->device) ||
+      !copy_text(f->auto_devices, sizeof(f->auto_devices), c->auto_devices) ||
+      !copy_text(f->auto_ignored, sizeof(f->auto_ignored), c->auto_ignored_devices) ||
       !copy_text(f->group, sizeof(f->group),
                  c->group ? c->group : "reticulum")) {
     r = RNC_INVALID;
