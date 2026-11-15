@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "ble_mode.h"
+#include "display_mode.h"
 #include "radio_hal.h"
 #include "rnc_mcu_app.h"
 #include "rnc_radio.h"
@@ -283,10 +284,16 @@ static void rnode_task(void *) {
   const rnc_rnode_io *active = &g_usb_io;
   for (;;) {
     uint64_t now_us = platform_now_ms(NULL) * 1000u;
-    if (RNC_HAVE_BLE && rnc_ble_available() > 0)
+    if (RNC_HAVE_BLE && rnc_ble_available() > 0) {
       active = &rnc_ble_io;
-    else if (Serial.available() > 0)
+      rnc_status_set_link(RNC_LINK_BLE);
+    } else if (Serial.available() > 0) {
       active = &g_usb_io;
+      rnc_status_set_link(RNC_LINK_USB);
+    } else if (active == &rnc_ble_io && rnc_ble_state() != RNC_BLE_SECURE) {
+      active = &g_usb_io; // the phone is gone
+      rnc_status_set_link(RNC_LINK_NONE);
+    }
     (void)rnc_rnode_pump(&g_rnode, active, now_us);
     if (rnc_rnode_reset_requested(&g_rnode)) { // the host asked for a restart
       Serial.flush();
@@ -378,9 +385,12 @@ void setup() {
   rnc_mcu_cfg cfg;
   bool compiled_in = rnc_settings_load(&cfg);
   bool lora_leaf = cfg.lora.mode == RNC_LORA_MODE_LEAF && rnc_lora_cfg_ready(&cfg.lora);
+  rnc_status_sources(&g_radio.li, &g_rnode, &cfg); // the screens, if this board has one
+  (void)rnc_display_start();
 #if defined(ARDUINO_ARCH_ESP32)
   if (rnc_mcu_cfg_wifi_mode(&cfg) && !rnc_mcu_cfg_wifi_ready(&cfg) && !lora_leaf)
-    rnc_provision_console(&cfg, "Wi-Fi mode is selected but ssid, password or host are missing or invalid.");
+    (rnc_status_set_phase(RNC_PHASE_SETUP),
+     rnc_provision_console(&cfg, "Wi-Fi mode is selected but ssid, password or host are missing or invalid."));
 #endif
   bool rnode_mode = rnc_mcu_cfg_rnode_mode(&cfg);
   rnc_rnode_window_init(&g_window);
@@ -388,11 +398,12 @@ void setup() {
     rnode_prepare(&cfg); // so the window can answer a host that is already talking
   if (rnc_provision_requested(RNC_MCU_PROVISION_WINDOW_MS, rnode_mode ? &g_window : NULL,
                               rnode_mode ? &g_rnode : NULL))
-    rnc_provision_console(&cfg, "Requested at boot.");
+    (rnc_status_set_phase(RNC_PHASE_SETUP), rnc_provision_console(&cfg, "Requested at boot."));
   if (rnode_mode) {
 #if defined(ARDUINO_ARCH_ESP32)
     bootloader_random_enable();
 #endif
+    rnc_status_set_phase(RNC_PHASE_RUNNING);
     rnode_start(); // the host owns the radio; lora.* settings are not used in this mode
     return;
   }
@@ -418,6 +429,12 @@ void setup() {
 #else
   (void)compiled_in;
 #endif
+#if defined(ARDUINO_ARCH_ESP32)
+  rnc_status_set_link(g_wifi_mode ? RNC_LINK_WIFI : RNC_LINK_USB);
+#else
+  rnc_status_set_link(RNC_LINK_USB);
+#endif
+  rnc_status_set_phase(RNC_PHASE_RUNNING);
   xTaskCreate(reticulum_task, "reticulum", STACK_DEPTH(RNC_MCU_STACK_BYTES), NULL, 2, NULL);
 }
 

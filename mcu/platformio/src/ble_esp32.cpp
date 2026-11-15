@@ -12,6 +12,7 @@
 #define NUS_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" // notifications to the central
 
 static NimBLECharacteristic *g_tx = NULL;
+static volatile bool g_on = false; // the service has started
 static volatile bool g_connected = false;
 static volatile bool g_secure = false; // encrypted and authenticated (the PIN was used)
 static uint8_t g_ring[1024];
@@ -99,6 +100,14 @@ int rnc_ble_available(void) {
   return n;
 }
 
+rnc_ble_state_t rnc_ble_state(void) {
+  if (!g_on)
+    return RNC_BLE_OFF;
+  if (!g_connected)
+    return RNC_BLE_ADVERTISING;
+  return g_secure ? RNC_BLE_SECURE : RNC_BLE_CONNECTED;
+}
+
 bool rnc_ble_start(const rnc_mcu_cfg *cfg) {
   char name[16];
   if (!rnc_mcu_cfg_ble_ready(cfg))
@@ -122,6 +131,7 @@ bool rnc_ble_start(const rnc_mcu_cfg *cfg) {
   advertising->addServiceUUID(NUS_SERVICE);
   advertising->setScanResponse(true);
   advertising->start();
+  g_on = true;
   return true;
 }
 #endif
