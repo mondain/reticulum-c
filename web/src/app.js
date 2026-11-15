@@ -1,9 +1,11 @@
 import './style.css';
 import { flashEsp, flashNrf, enterDfu } from './flash.js';
-import { ConsoleSession } from './serial.js';
 import { buildCommands, parseSettings } from './config.js';
+import { waitForPort, deviceWarning } from './ports.js';
+import { connectConsole } from './provision.js';
 const $=id=>document.getElementById(id), catalogueUrl=new URL('./firmware/catalog.json',document.baseURI);
-let catalogue,release,selected,filter='all',busy=false,settings,applicationPort,currentPasswordSet=false;
+let catalogue,release,selected,filter='all',busy=false,settings,applicationPort,applicationInfo,currentPasswordSet=false,flashAbort,settingsAbort;
+window.addEventListener('beforeunload',e=>{if(flashAbort){e.preventDefault();e.returnValue='';}});
 const webSerial=!!navigator.serial&&window.isSecureContext;
 $('browser-notice').hidden=webSerial;
 function status(text,kind=''){ $('status').textContent=text;$('status').className=`status ${kind}`; }
@@ -34,7 +36,7 @@ async function choose(board){
  busy=true;selected=undefined;$('confirm-board').checked=false;syncActions();
  try {
   if(settings){await settings.close();settings=undefined;}
-  selected=board;applicationPort=undefined;currentPasswordSet=false;$('config-form').reset();$('settings-state').textContent='No settings session';
+  selected=board;applicationPort=undefined;applicationInfo=undefined;currentPasswordSet=false;$('config-form').reset();$('settings-state').textContent='No settings session';
   $('connection-badge').textContent='Not connected';$('connection-badge').classList.remove('connected');
   $('selected-description').textContent=`${board.name} · ${board.radio} · ${board.chip}`;
   $('nrf-help').hidden=board.family!=='nrf52';$('install-mode').hidden=board.family==='nrf52';$('wifi-section').hidden=board.family!=='esp32';
@@ -55,13 +57,19 @@ function loadReportedSettings(reply){
  if(v['lora.bw']&&v['lora.bw']!=='(not set)')f.namedItem('bandwidth').value=Number(v['lora.bw'])/1000;
  f.namedItem('password').value='';updateFields();
 }
+function settingsState(s){
+ $('settings-state').textContent=s==='console'?'Setup console ready':s==='connected'?'Waiting for setup prompt':'Disconnected';
+ $('connection-badge').textContent=s==='console'?'Settings connected':'Not connected';$('connection-badge').classList.toggle('connected',s==='console');syncActions();
+}
 async function openSettings(port,freshBoot=false){
  if(settings)await settings.close();
- settings=new ConsoleSession({onLog:log,onState:s=>{$('settings-state').textContent=s==='console'?'Setup console ready':s==='connected'?'Waiting for setup prompt':'Disconnected';$('connection-badge').textContent=s==='console'?'Settings connected':'Not connected';$('connection-badge').classList.toggle('connected',s==='console');syncActions();}});
- if(freshBoot){let last;for(let i=0;i<35;i++){try{await settings.connect(port);last=undefined;break;}catch(e){last=e;await new Promise(r=>setTimeout(r,120));}}if(last)throw last;}
- else await settings.connect(port);
- configStatus(freshBoot?'Entering setup after installation…':'Tap RESET now. Waiting for the board’s setup prompt…');
- await settings.enterConsole({timeout:15000});loadReportedSettings(await settings.command('get'));
+ settingsAbort=new AbortController();$('cancel-flash').hidden=false;
+ configStatus(freshBoot?'Entering setup after installation…':'Tap RESET now if the board is running. The connection is restored automatically when it restarts.');
+ try{
+  // Boards with native USB drop off the bus when reset; connectConsole reconnects.
+  settings=await connectConsole({serial:navigator.serial,port,signal:settingsAbort.signal,onLog:log,onSession:s=>{settings=s;},sessionOptions:{onState:settingsState}});
+ }finally{settingsAbort=undefined;if(!flashAbort)$('cancel-flash').hidden=true;}
+ loadReportedSettings(await settings.command('get'));
  configStatus('Saved settings loaded. Change the fields, save, then reboot to run.','success');
 }
 $('open-network').addEventListener('change',()=>{const p=$('config-form').elements.namedItem('password');p.disabled=$('open-network').checked;if(p.disabled)p.value='';});
@@ -73,7 +81,7 @@ $('version').addEventListener('change',async()=>{
  const id=selected?.id,version=$('version').value;busy=true;selected=undefined;$('confirm-board').checked=false;syncActions();
  try {
   if(settings){await settings.close();settings=undefined;}
-  release=catalogue.releases.find(r=>r.version===version);applicationPort=undefined;
+  release=catalogue.releases.find(r=>r.version===version);applicationPort=undefined;applicationInfo=undefined;
   $('selected-description').textContent='Select your board above to get started.';$('downloads').replaceChildren();
   $('settings-state').textContent='No settings session';$('connection-badge').textContent='Not connected';$('connection-badge').classList.remove('connected');
   $('config-form').reset();updateFields();$('nrf-help').hidden=true;
@@ -82,25 +90,39 @@ $('version').addEventListener('change',async()=>{
  const next=release?.boards.find(b=>b.id===id);if(next)await choose(next);
 });
 $('enter-dfu').addEventListener('click',async()=>{
- busy=true;syncActions();try{if(settings){await settings.close();settings=undefined;}applicationPort=await navigator.serial.requestPort();await enterDfu(applicationPort,{onLog:log});status('Bootloader requested. Click Connect & install, then choose the bootloader port.');}
+ busy=true;syncActions();try{if(settings){await settings.close();settings=undefined;}applicationPort=await navigator.serial.requestPort();applicationInfo=applicationPort.getInfo?.();await enterDfu(applicationPort,{onLog:log});status('Bootloader requested. Click Connect & install, then choose the bootloader port.');}
  catch(e){status(e.message||String(e),'error');log(e.message||e);}finally{busy=false;syncActions();}
+});
+$('cancel-flash').addEventListener('click',()=>{
+ if(flashAbort){ status('Cancelling…'); flashAbort.abort(new DOMException('Installation cancelled','AbortError')); }
+ if(settingsAbort)settingsAbort.abort(new DOMException('Connection cancelled','AbortError'));
 });
 $('flash-button').addEventListener('click',async()=>{
  if(!selected||busy)return;
  const board=selected;
  const eraseAll=board.family==='esp32'&&document.querySelector('input[name="install-mode"]:checked').value==='factory';
  if(eraseAll&&!window.confirm('Erase the entire ESP32 flash? The existing identity and saved settings will be lost.'))return;
- busy=true;syncActions();$('progress-wrap').hidden=false;$('progress').value=0;
+ busy=true;syncActions();
  try{
   if(settings){await settings.close();settings=undefined;}
-  const port=await navigator.serial.requestPort();const options={port,board,baseUrl:catalogueUrl,onLog:log,onProgress:n=>{$('progress').value=n;$('progress-text').textContent=`${Math.floor(n)}%`;}};
+  const port=await navigator.serial.requestPort();
+  const warning=deviceWarning(board,port.getInfo?.());
+  if(warning&&!window.confirm(`${warning} Continue anyway?`)){status('Installation not started.');return;}
+  const wanted=board.family==='esp32'?port.getInfo?.():applicationInfo;
+  flashAbort=new AbortController();$('cancel-flash').hidden=false;$('progress-wrap').hidden=false;$('progress').value=0;
+  const options={port,board,baseUrl:catalogueUrl,signal:flashAbort.signal,onLog:log,onProgress:n=>{$('progress').value=n;$('progress-text').textContent=`${Math.floor(n)}%`;}};
   status('Verifying firmware and connecting to the bootloader. Keep USB connected.');
   if(board.family==='esp32')await flashEsp({...options,eraseAll,confirmErase:eraseAll});else await flashNrf(options);
+  flashAbort=undefined;$('cancel-flash').hidden=true;
   status('Firmware transfer verified. The board is rebooting.','success');
-  const appPort=board.family==='esp32'?port:applicationPort;
+  // The board re-enumerates after the reset: look the application port up again.
+  const appPort=await waitForPort(navigator.serial,wanted).catch(()=>undefined)||(board.family==='esp32'?port:undefined);
   if(appPort){try{await openSettings(appPort,true);status('Installation complete. Configure your node below.','success');$('configure').scrollIntoView({behavior:'smooth'});}catch(e){log(`Setup connection: ${e.message}`);configStatus('Firmware installed. Use Connect to settings and RESET if automatic setup could not connect.');}}
   else configStatus('Firmware installed. Select the application USB port using Connect to settings.');
- }catch(e){status(`Installation stopped: ${e.message||String(e)}. Re-enter the bootloader to retry.`,'error');log(e.message||e);}finally{busy=false;syncActions();}
+ }catch(e){
+  const cancelled=e?.name==='AbortError';
+  status(cancelled?'Installation cancelled. The board may hold a partial image; re-enter the bootloader and install again.':`Installation stopped: ${e.message||String(e)}. Re-enter the bootloader to retry.`,'error');log(e.message||e);
+ }finally{flashAbort=undefined;$('cancel-flash').hidden=true;busy=false;syncActions();}
 });
 $('connect-settings').addEventListener('click',async()=>{
  busy=true;syncActions();try{applicationPort=await navigator.serial.requestPort();await openSettings(applicationPort);}

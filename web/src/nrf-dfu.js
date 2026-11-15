@@ -70,7 +70,7 @@ function decodeAck(packet) {
 }
 
 export class DfuTransport {
-  constructor(port, { ackTimeout = 2000, retries = 2 } = {}) {
+  constructor(port, { ackTimeout = 2000, retries = 2, onWarning = () => {} } = {}) {
     this.ackTimeout = ackTimeout; this.retries = retries; this.sequence = 0;
     this.decoder = new SlipDecoder(); this.pending = null; this.failure = null;
     this.link = new SerialLink(port, {
@@ -83,6 +83,7 @@ export class DfuTransport {
         } catch (error) { this.fail(error); }
       },
       onError: error => this.fail(error),
+      onWarning: error => onWarning(error),
     });
   }
   fail(error) { this.failure = error; this.pending?.reject(error); }
@@ -103,12 +104,12 @@ export class DfuTransport {
         ack = new Promise((resolve, reject) => { this.pending = { resolve, reject, expected: (this.sequence + 1) & 7 }; });
         ack.catch(() => {});
         // Set the waiter before writing: USB devices can ACK before write resolves.
-        await this.link.write(frame, { timeout: this.ackTimeout, signal });
+        await this.link.write(frame, { timeout: this.ackTimeout, signal, label: 'DFU write' });
         await bounded(ack, { timeout: this.ackTimeout, signal, label: 'DFU acknowledgement' });
         return;
       } catch (error) {
         aborted(signal);
-        if (this.failure || attempt === this.retries || !/timed out/.test(error.message)) throw error;
+        if (this.failure || attempt === this.retries || !/acknowledgement timed out/.test(error.message)) throw error;
         // Retransmit the same sequence. The bootloader discards duplicates but
         // repeats its ACK, covering a lost ACK without writing data twice.
       } finally { this.pending = null; }
@@ -165,7 +166,7 @@ export async function flashApplication({ port, firmware, initPacket, onProgress 
   if (!(firmware instanceof Uint8Array) || !firmware.length || firmware.length > 1024 * 1024 ||
       !(initPacket instanceof Uint8Array) || !initPacket.length || initPacket.length > 512)
     throw new Error('Invalid application DFU image');
-  const transport = new DfuTransport(port);
+  const transport = new DfuTransport(port, { onWarning: error => onLog(`Serial warning: ${error.name}; the packet is retransmitted if needed.`) });
   const pageCount = Math.floor(firmware.length / 4096) + 1;
   const eraseTime = Math.max(500, pageCount * 89.7);
   try {

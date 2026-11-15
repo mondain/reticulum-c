@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ConsoleSession } from '../src/serial.js';
+import { ConsoleSession, SerialLink } from '../src/serial.js';
 
 function serialFake(onWrite = () => {}) {
   let input;
@@ -138,15 +138,74 @@ test('reboot waits for firmware acknowledgement and releases the port', async ()
   assert.equal(states.at(-1), 'disconnected');
 });
 
-test('native HDLC delimiter rejects entry and ESP reset releases BOOT before reset release', async () => {
-  const binary = serialFake((line, p) => p.emit(Uint8Array.of(0x7e, 0x41, 0x7e)));
+test('HDLC from a running node is ignored until the prompt, then enters the console', async () => {
+  let writes = 0;
+  const port = serialFake((line, p) => {
+    writes++;
+    if (writes < 3) p.emit(Uint8Array.of(0x7e, 0x41, 0x7e, 0xc0, 0x00, 0xff));
+    else p.emit('\r\nreticulum-c provisioning console\r\nrnc> ');
+  });
   const session = new ConsoleSession();
-  await session.connect(binary);
-  await assert.rejects(session.enterConsole(), /HDLC|binary/i);
-  const text = serialFake((line, p) => p.emit('\nrnc> '));
-  await session.connect(text);
-  await session.enterConsole({ reset: true });
-  const resetRelease = text.signals.find(s => s.requestToSend === false);
-  assert.equal(resetRelease.dataTerminalReady, false);
+  await session.connect(port);
+  await session.enterConsole({ quiet: 20 });
+  assert.equal(session.inConsole, true);
   await session.close();
+});
+
+test('binary prefix cannot combine with later text to forge a prompt', async () => {
+  const port = serialFake((line, p) => p.emit(Uint8Array.of(0x7e, 0x0a, 0x72, 0x6e, 0x63, 0x3e, 0x20)));
+  const session = new ConsoleSession();
+  await session.connect(port);
+  // "\nrnc> " is plain text and legitimately a prompt; the 0x7e before it is dropped.
+  await session.enterConsole({ quiet: 10 });
+  assert.equal(session.inConsole, true);
+  await session.close();
+  const junk = serialFake((line, p) => p.emit(Uint8Array.of(0x72, 0x6e, 0x63, 0x3e, 0x20, 0x7e)));
+  const other = new ConsoleSession();
+  await other.connect(junk);
+  await assert.rejects(other.enterConsole({ timeout: 60, quiet: 10 }), /timed out/i);
+});
+
+test('stale entry-line replies are consumed before the first command', async () => {
+  // Two entry lines were already queued: the console answers each with an error and a prompt.
+  const port = serialFake((line, p) => {
+    if (line === 'rnc-config\n') {
+      p.emit('\r\nrnc> ');
+      setTimeout(() => p.emit('rnc-config\r\nerror: unknown command (try help)\r\nrnc> '), 20);
+      setTimeout(() => p.emit('rnc-config\r\nerror: unknown command (try help)\r\nrnc> '), 60);
+    } else setTimeout(() => p.emit(`${line.trim()}\r\nmode=serial\r\nrnc> `), 100);
+  });
+  const session = new ConsoleSession();
+  await session.connect(port);
+  await session.enterConsole({ quiet: 150 });
+  const reply = await session.command('get');
+  assert.match(reply, /mode=serial/);
+  await session.close();
+});
+
+test('recoverable serial read errors keep the link alive', async () => {
+  let controllers = [];
+  const port = {
+    async open() {
+      const make = () => new ReadableStream({ start(c) { controllers.push(c); } });
+      this.readable = make();
+      this.writable = new WritableStream({ write() {} });
+      this.remake = () => { this.readable = make(); };
+    },
+    async close() { this.closed = true; this.readable = null; this.writable = null; },
+  };
+  const seen = [], warnings = [];
+  const link = new SerialLink(port, { onData: b => seen.push(b[0]), onWarning: e => warnings.push(e.name) });
+  await link.open();
+  controllers[0].enqueue(Uint8Array.of(1));
+  await new Promise(r => setTimeout(r, 5));
+  port.remake();
+  controllers[0].error(Object.assign(new Error('x'), { name: 'FramingError' }));
+  await new Promise(r => setTimeout(r, 5));
+  controllers[1].enqueue(Uint8Array.of(2));
+  await new Promise(r => setTimeout(r, 5));
+  assert.deepEqual(seen, [1, 2]);
+  assert.deepEqual(warnings, ['FramingError']);
+  assert.equal(link.opened && !link.closing, true);
+  await link.close();
 });
