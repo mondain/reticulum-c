@@ -6,7 +6,7 @@ if(ESP_PLATFORM)
     return()
 endif()
 cmake_minimum_required(VERSION 3.16)
-project(reticulum_c VERSION 0.2.1 LANGUAGES C)
+project(reticulum_c VERSION 0.3.0 LANGUAGES C)
 set(RNC_TOP_LEVEL OFF)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(RNC_TOP_LEVEL ON)
@@ -295,6 +295,7 @@ endif()
         add_test(NAME installed_consumer COMMAND ${CMAKE_COMMAND}
             -DRNC_BUILD_ROOT=${CMAKE_BINARY_DIR} -DRNC_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DRNC_CONFIG=$<CONFIG> -DRNC_TEST_CC=${CMAKE_C_COMPILER}
+            -DRNC_CONSUMER_VERSION=${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_consumer.cmake)
     endif()
 endif()

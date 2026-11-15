@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(reticulum_c_consumer LANGUAGES C)
-find_package(reticulum_c 0.2 CONFIG REQUIRED)
+# the major.minor of the SDK under test (SameMinorVersion compatibility), passed by the test
+if(NOT RNC_CONSUMER_VERSION)
+  message(FATAL_ERROR "RNC_CONSUMER_VERSION is not set")
+endif()
+find_package(reticulum_c ${RNC_CONSUMER_VERSION} CONFIG REQUIRED)
 add_executable(consumer main.c)
 target_link_libraries(consumer PRIVATE reticulum_c::reticulum_c)
 enable_testing()
