@@ -88,6 +88,8 @@ typedef struct node_rate {
   uint8_t destination[16];
   unsigned violations;
   uint64_t last, blocked_until, touched;
+  size_t stamps;
+  uint64_t stamp[RNC_RATE_TIMESTAMPS];
 } node_rate;
 typedef struct node_route {
   int used;
@@ -997,6 +999,13 @@ rnc_result rnc_node_known_import(rnc_node *n, const void *input, size_t size) {
   free(items);
   return r;
 }
+static void rate_stamp(node_rate *r, uint64_t now) {
+  if (r->stamps == RNC_RATE_TIMESTAMPS) {
+    memmove(r->stamp, r->stamp + 1, (RNC_RATE_TIMESTAMPS - 1u) * sizeof(r->stamp[0]));
+    r->stamps--;
+  }
+  r->stamp[r->stamps++] = now;
+}
 /* Reference-compatible per-destination announce rate table. Returns nonzero
  * when the announce must not be rebroadcast. Paths are learned regardless. */
 static int rate_blocked(rnc_node *n, const node_interface *iface,
@@ -1020,9 +1029,11 @@ static int rate_blocked(rnc_node *n, const node_interface *iface,
     r->used = 1;
     memcpy(r->destination, destination, 16);
     r->last = r->touched = now;
+    rate_stamp(r, now);
     return 0;
   }
   r->touched = now;
+  rate_stamp(r, now);
   if (now <= r->blocked_until)
     return 1;
   if (now - r->last < target)
@@ -1553,6 +1564,27 @@ rnc_result rnc_node_request_path_ex(rnc_node *n, const uint8_t address[16],
 rnc_result rnc_node_request_path(rnc_node *n, const uint8_t address[16],
                                  uint64_t now) {
   return rnc_node_request_path_ex(n, address, 0, NULL, 0, 0, now);
+}
+rnc_result rnc_node_rate_at(const rnc_node *n, size_t ordinal, rnc_rate_entry *entry) {
+  size_t i, seen = 0;
+  if (!n || !entry)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_RATES; i++) {
+    const node_rate *r = &n->rates[i];
+    if (!r->used)
+      continue;
+    if (seen++ != ordinal)
+      continue;
+    memset(entry, 0, sizeof(*entry));
+    memcpy(entry->destination, r->destination, 16);
+    entry->violations = r->violations;
+    entry->last_ms = r->last;
+    entry->blocked_until_ms = r->blocked_until;
+    entry->timestamp_count = r->stamps;
+    memcpy(entry->timestamps_ms, r->stamp, r->stamps * sizeof(r->stamp[0]));
+    return RNC_OK;
+  }
+  return RNC_AGAIN;
 }
 unsigned rnc_node_hops_to(rnc_node *n, const uint8_t address[16], uint64_t now) {
   node_route *route = n && address ? route_find(n, address, now) : NULL;

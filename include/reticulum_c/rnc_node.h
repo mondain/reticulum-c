@@ -343,6 +343,21 @@ rnc_result rnc_node_unbind_link(rnc_node *node, const uint8_t link_id[16]);
 size_t rnc_node_link_count(const rnc_node *node, int active_only);
 rnc_result rnc_node_route_at(const rnc_node *node, size_t ordinal,
                              uint64_t now_ms, rnc_route *route);
+/* Announce rate table, the entries the reference reports over RPC as `rate_table`:
+ * one per destination heard on an interface with an announce rate target. Times are the
+ * node's monotonic milliseconds (the caller converts to wall time); at most
+ * RNC_RATE_TIMESTAMPS recent announce times are kept, oldest first. RNC_AGAIN past the end. */
+#ifndef RNC_RATE_TIMESTAMPS
+#define RNC_RATE_TIMESTAMPS 16u
+#endif
+typedef struct rnc_rate_entry {
+  uint8_t destination[16];
+  unsigned violations;
+  uint64_t last_ms, blocked_until_ms;
+  size_t timestamp_count;
+  uint64_t timestamps_ms[RNC_RATE_TIMESTAMPS];
+} rnc_rate_entry;
+rnc_result rnc_node_rate_at(const rnc_node *node, size_t ordinal, rnc_rate_entry *entry);
 /* Owner-signed, versioned checkpoint of verified public routes/announces.
  * Export needs the node owner's private identity, import its public identity.
  * Import is atomic and only allowed into an empty learner with configured

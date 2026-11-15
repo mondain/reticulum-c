@@ -146,6 +146,7 @@ static void rate(void) {
   rnc_identity src;
   rnc_packet a;
   rnc_route route;
+  rnc_rate_entry entry;
   policy.announce_rate_target = 3600;
   policy.announce_rate_grace = 1;
   policy.announce_rate_penalty = 7200;
@@ -155,12 +156,23 @@ static void rate(void) {
   CHECK(rnc_node_input(n, 1, &a, 1000, 0) == RNC_OK);
   CHECK(rnc_node_tick(n, 1000, 600) == RNC_OK);
   CHECK(sends_on(n, 2) == 1);
+  /* the table the reference reports over RPC: hash, last, rate_violations, blocked_until,
+   * timestamps (one per announce seen) */
+  CHECK(rnc_node_rate_at(n, 0, &entry) == RNC_OK && !memcmp(entry.destination, a.destination, 16) &&
+        entry.violations == 0 && entry.last_ms == 0 && entry.blocked_until_ms == 0 &&
+        entry.timestamp_count == 1 && entry.timestamps_ms[0] == 0);
+  CHECK(rnc_node_rate_at(n, 1, &entry) == RNC_AGAIN);
   a = announce_from(&src, 1010); /* first violation, within grace */
   CHECK(rnc_node_input(n, 1, &a, 1010, 10000) == RNC_OK);
+  CHECK(rnc_node_rate_at(n, 0, &entry) == RNC_OK && entry.violations == 1 && entry.last_ms == 10000 &&
+        entry.blocked_until_ms == 0 && entry.timestamp_count == 2 && entry.timestamps_ms[1] == 10000);
   CHECK(rnc_node_tick(n, 1010, 10600) == RNC_OK);
   CHECK(sends_on(n, 2) >= 1);
   a = announce_from(&src, 1020); /* second violation: blocked */
   CHECK(rnc_node_input(n, 1, &a, 1020, 20000) == RNC_OK);
+  /* blocked until last (10 s) + target (3600 s) + penalty (7200 s) */
+  CHECK(rnc_node_rate_at(n, 0, &entry) == RNC_OK && entry.violations == 2 &&
+        entry.blocked_until_ms == 10000u + 3600000u + 7200000u && entry.timestamp_count == 3);
   /* Only the second announce's pending retry may go out, not the third. */
   CHECK(rnc_node_tick(n, 1020, 20600) == RNC_OK);
   CHECK(rnc_node_tick(n, 1020, 60000) == RNC_OK);
