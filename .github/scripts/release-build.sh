@@ -17,7 +17,11 @@ cmake -S . -B /tmp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_EXE_LINKER_FLAGS=-static
 cmake --build /tmp/build -j"$(nproc)"
 # the tests that need no sockets or ptys prove the binaries run on this CPU
-ctest --test-dir /tmp/build -j"$(nproc)" --output-on-failure -LE "$skip"
+# reticulum_node_process_sh_tools drives an interactive client through a pty; on the
+# GitHub runner's container it hangs (passes in the same image elsewhere and in CI),
+# so it is left out of this gate. The normal CI workflow still runs it.
+ctest --test-dir /tmp/build -j"$(nproc)" --output-on-failure -LE "$skip" \
+  -E '^reticulum_node_process_sh_tools$'
 cmake --install /tmp/build --prefix "$stage"
 # what a consumer needs to link statically: OpenSSL and bzip2 beside the SDK
 mkdir -p "$stage/include" "$stage/lib"
