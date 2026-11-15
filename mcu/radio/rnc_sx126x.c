@@ -250,7 +250,7 @@ static int sx_check(rnc_modem *m, const rnc_lora_params *p) {
 static int sx_init(rnc_modem *m, const rnc_lora_params *p) {
   rnc_sx126x *d = (rnc_sx126x *)m;
   uint8_t b[4], pa[4], img[2], sw_hi = 0, sw_lo = 0;
-  int8_t txp;
+  int8_t txp = 0; /* set by rnc_sx126x_pa, which sx_check has already proved succeeds */
   uint32_t frf;
   int rc = sx_check(m, p);
   if (rc != 0)

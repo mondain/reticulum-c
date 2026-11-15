@@ -29,7 +29,9 @@ cp -a /usr/include/openssl "$stage/include/"
 cp /usr/include/bzlib.h "$stage/include/"
 cp /usr/lib/libcrypto.a /usr/lib/libbz2.a "$stage/lib/"
 # the archive must be consumable as shipped: link the installed SDK statically
-cmake -S tests/consumer -B /tmp/consumer -DCMAKE_PREFIX_PATH="$stage" \
+# the consumer asks for this SDK's own major.minor (SameMinorVersion); a -rc suffix is ignored
+base=${version%%-*}
+cmake -S tests/consumer -B /tmp/consumer -DCMAKE_PREFIX_PATH="$stage" -DRNC_CONSUMER_VERSION="${base%.*}" \
   -DOPENSSL_ROOT_DIR="$stage" -DOPENSSL_USE_STATIC_LIBS=ON \
   -DBZIP2_LIBRARY_RELEASE="$stage/lib/libbz2.a" -DBZIP2_INCLUDE_DIR="$stage/include" \
   -DCMAKE_EXE_LINKER_FLAGS=-static
