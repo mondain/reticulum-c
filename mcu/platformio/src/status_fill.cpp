@@ -16,6 +16,8 @@ static volatile rnc_status_link g_link = RNC_LINK_NONE;
 
 void rnc_status_sources(const rnc_lora_if *li, const rnc_rnode *rn, const rnc_mcu_cfg *cfg) {
   g_cfg = *cfg;
+  memset(g_cfg.password, 0, sizeof g_cfg.password); // the screen never needs the Wi-Fi secrets
+  memset(g_cfg.ssid, 0, sizeof g_cfg.ssid);
   g_li = li;
   g_rn = rn;
 }

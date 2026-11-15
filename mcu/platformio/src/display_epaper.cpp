@@ -18,7 +18,8 @@ const unsigned display_min_interval_ms = 15000u, display_pin_interval_ms = 2000u
 #define EPD_CS 30
 #define EPD_DC 28
 #define EPD_RESET 2
-#define EPD_BUSY 3
+// BUSY (pin 3) is deliberately not given to GxEPD2: on a timeout it prints "Busy Timeout!" to Serial,
+// which here is the host's KISS/HDLC stream. Without it the library waits fixed times instead.
 #define EPD_SCK 31
 #define EPD_MOSI 29
 // The panel has no MISO line, but the Adafruit nRF52 core maps every pin through a table of 48
@@ -26,7 +27,7 @@ const unsigned display_min_interval_ms = 15000u, display_pin_interval_ms = 2000u
 #define EPD_MISO_UNUSED 23
 
 static SPIClass g_spi(NRF_SPIM3, EPD_MISO_UNUSED, EPD_SCK, EPD_MOSI);
-static GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> g_display(GxEPD2_154_D67(EPD_CS, EPD_DC, EPD_RESET, EPD_BUSY));
+static GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> g_display(GxEPD2_154_D67(EPD_CS, EPD_DC, EPD_RESET, -1));
 
 bool display_init(void) {
   pinMode(EPD_VEXT, OUTPUT);

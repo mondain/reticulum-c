@@ -133,7 +133,7 @@ B. Libraries (GxEPD2, Adafruit SH110X, Adafruit GFX, BusIO): quickest to pixels 
   - Layouts: two profiles of the same layout code: OLED 21 columns by 8 rows (6 x 8 font),
     e-paper 16 columns by 12 rows (text size 2 on 200 x 200). The PIN is always on its own
     line; if rows run out, lower-priority lines are dropped first, never the PIN.
-  - Buses: the T-Echo display uses SPIM0 (the radio uses SPIM2; the RNode firmware uses the
+  - Buses: the T-Echo display uses SPIM3 (SPIM0 and SPIM1 are disabled in the Adafruit nRF52 core, found on the board) (the radio uses SPIM2; the RNode firmware uses the
     same pairing on this board); software SPI only if a conflict appears. The Supreme OLED
     uses the default Wire on SDA 17 and SCL 18; the AXP2101 is on Wire1 (42/41) in
     radio_hal.cpp, so the buses are not shared. Whether the OLED needs a power rail is settled
