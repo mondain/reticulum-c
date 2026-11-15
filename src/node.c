@@ -21,6 +21,8 @@
 #define PATH_LIFETIME UINT64_C(604800000)
 #define PACKET_LIFETIME UINT64_C(300000)
 #define REQUEST_LIFETIME UINT64_C(15000)
+#define PATH_REQUEST_GRACE UINT64_C(400)   /* Transport.PATH_REQUEST_GRACE: let direct peers answer first */
+#define PATH_REQUEST_RG UINT64_C(1500)     /* Transport.PATH_REQUEST_RG: extra wait on roaming interfaces */
 #ifndef RNC_NODE_ANNOUNCES
 #define RNC_NODE_ANNOUNCES 64u
 #endif
@@ -1437,6 +1439,7 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
   node_request entry = {0};
   size_t i, slot = RNC_NODE_REQUESTS;
   int pr_limited, filtered = 0;
+  uint64_t due;
   rnc_result r;
   r = rnc_path_request_decode(packet, &request);
   if (r != RNC_OK)
@@ -1462,6 +1465,11 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
   if (route && rnc_node_is_blackholed(n, route->route.announce.identity.hash,
                                       unix_seconds))
     route = NULL;
+  /* Transport.path_request: a roaming interface is not answered when the path lies behind that
+   * same interface (a local destination is still announced). */
+  if (!d && route && interface(n, ingress)->mode == RNC_MODE_ROAMING &&
+      route->route.interface_id == ingress)
+    return RNC_OK;
   if (!d && !route) {
     /* Unknown destination: only interfaces that discover paths for their
      * clients search other interfaces (reference Transport.path_request). */
@@ -1491,7 +1499,16 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
       relay_announce(n, &reply);
     }
     reply.context = 11;
-    queue(n, ingress, &reply, now);
+    /* A local destination answers at once. An answer from a known path waits the grace period
+     * unless the asker or the path is a local client; a roaming asker waits longer still. */
+    due = now;
+    if (!d && !interface(n, ingress)->local &&
+        !interface(n, route->route.interface_id)->local) {
+      due = after(now, PATH_REQUEST_GRACE);
+      if (interface(n, ingress)->mode == RNC_MODE_ROAMING)
+        due = after(due, PATH_REQUEST_RG);
+    }
+    queue(n, ingress, &reply, due);
   } else {
     r = rnc_path_request_create(request.destination, n->id, request.tag,
                                 request.tag_size, &reply);

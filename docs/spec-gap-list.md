@@ -14,7 +14,7 @@ The implementation covers identities, SINGLE/GROUP/PLAIN destinations, announces
 
 Concrete remaining gaps include:
 
-1. Announce propagation exceptions: path-response hold-down, the hop-limit difference and `MODE_INTERNAL` (section 2).
+1. Announce propagation: pending path responses are not cancelled by a neighbour's rebroadcast the way the reference's shared announce table does (section 2).
 2. Host interface options: Auto device lists/multiple NICs and scope selection, UDP multiple targets, TCP device binding/`i2p_tunneled`, serial locking/hardware flow control, and the I2P/RNode Multi/Weave options listed in section 4.
 3. Management and discovery details: the RPC rate table is empty; two discovery auto-connect options are accepted without effect; I2P/Weave discovery announcements are absent.
 4. API differences: no resend convenience method or per-link physical-signal tracking; event APIs replace Python callbacks. Bounded tables and queues differ from the reference's capacities.
@@ -43,7 +43,7 @@ Host RNode/RNode Multi adapters remain unverified against real stock RNode hardw
 | IMPL | Wire format, MTU 500..4096 with 3B signalling | |
 | IMPL | Crypto primitives | OpenSSL backend (`src/crypto.c`); optional portable backend (`src/crypto_portable.c`, vendored Monocypher), documented in [PROVENANCE.md](../PROVENANCE.md) |
 | IMPL | Ratchets: generate, rotate, export/import, encrypt/decrypt, 30-day peer expiry | `src/ratchet.c` |
-| PART | Announce propagation (6.7.4) | One retry after 5.5s (PATHFINDER_R/G/RW), cancelled after 2 heard neighbour rebroadcasts or when passed on a further hop; single transmission for shared-instance clients; locally originated announces blocked on AP interfaces. Verified against reference `Transport.py` at the pinned commit. Hold-down of announces during path-request answers is not implemented; hop drop remains at wire hops >= 127 (reference allows 128 after increment); `MODE_INTERNAL` not implemented |
+| PART | Announce propagation (6.7.4) | One retry after 5.5s (PATHFINDER_R/G/RW), cancelled after 2 heard neighbour rebroadcasts or when passed on a further hop; single transmission for shared-instance clients; locally originated announces blocked on AP interfaces. Verified against reference `Transport.py` at the pinned commit. An announce is accepted up to 128 hops (127 on the wire) and a 128 hop path is learned but never passed on, as the reference's `_outbound` refuses above 127. `MODE_INTERNAL` with `announces_from_internal` and `announces_to_internal` follows the reference's broadcast rules; an INTERNAL interface sends outside the announce cap. A path response from a known path waits `PATH_REQUEST_GRACE` (0.4 s), 1.5 s more on a roaming interface, and goes at once to a local client; a roaming interface is not answered when the path lies behind it. The reference's announce-table hold-down has no counterpart because path responses and rebroadcasts are separate queue entries here, so neither replaces the other. Not implemented: a neighbour's rebroadcast does not cancel a pending path response (the reference's table does), and the checks above ran against unit tests and a reading of `Transport.py`, not a live reference node |
 | IMPL | Path expiry | 7 days; AP 1 day, Roaming 6 hours by ingress interface mode |
 | IMPL | Delivery proofs | Endpoint proof creation (implicit 64B / explicit 96B) via `rnc_node_prove` and PROVE_ALL; validation by signer in `rnc_node_send_tracked` receipts |
 | IMPL | Packet prioritisation | The reference prioritises announces with fewer hops (the announce queue here does the same) and scans interfaces fastest first; nothing else is prioritised there either |
@@ -60,7 +60,7 @@ Host RNode/RNode Multi adapters remain unverified against real stock RNode hardw
 
 | Status | Feature | Notes |
 | --- | --- | --- |
-| PART | Shared instance and RPC server (HMAC, MessagePack queries and blackhole mutations) | Daemon responses include interface/path statistics, link counts and blackhole entries (`examples/node_rpc.h`); `rate_table` still returns an empty array. Shared-instance data transport is TCP only |
+| PART | Shared instance and RPC server (HMAC, MessagePack queries and blackhole mutations) | Daemon responses include interface/path statistics, link counts and blackhole entries (`examples/node_rpc.h`); `rate_table` returns the node's announce rate entries (hash, last, rate_violations, blocked_until, timestamps; filled when the node has another interface to pass announces on). Shared-instance data transport is TCP only |
 | PART | `get_instance`, `transport_enabled`, `link_mtu_discovery`, `should_use_implicit_proof` accessors | `rnc_node_implicit_proofs` / `rnc_node_set_implicit_proofs` cover `should_use_implicit_proof`; `rnc_node_link_mtu_discovery` covers `link_mtu_discovery`; `get_instance` and `transport_enabled` are Python-instance accessors |
 
 ### Identity
@@ -130,7 +130,7 @@ Host RNode/RNode Multi adapters remain unverified against real stock RNode hardw
 | IMPL | `blackhole_identity` / `unblackhole_identity` / `is_blackholed`, expiry, reference file format | Node API, daemon admin (`BLACKHOLE` / `UNBLACKHOLE` / `BLACKHOLES`), RPC get/set, persisted beside `--state`; verified with the reference `rnpath -B/-b/-U` |
 | IMPL | Blackhole publishing (`rnstransport.info.blackhole`, `/list`, open to all) | Daemon `publish_blackhole`; verified with the reference `rnpath -p` |
 | IMPL | Blackhole sources: `blackhole_sources`, `blackhole_update_interval` (minutes, default 60), first-run wait 20 s | Daemon `BlackholeUpdater` equivalent on `rnc_requester`; lists persist as `<state>.blackhole.<source hash>`; verified against a reference publisher |
-| IMPL | `remote_management_enabled` | `rnstransport.remote.management` with `/status` and `/path` (table; rates is empty), identity allow list |
+| IMPL | `remote_management_enabled` | `rnstransport.remote.management` with `/status` and `/path` (table; the remote `rates` query is still empty), identity allow list |
 | IMPL | `discovered_interfaces`, `interface_discovery_sources` | Daemon keeps the reference's record files (`<state>.discovery`, or `discovery_storage`) and lists them with the admin `DISCOVERED` command; the reference's own `rnstatus -d` reads files written either way |
 
 ## 4. Interfaces (manual ch7, ch8)
@@ -239,7 +239,7 @@ The repository's executables are `examples/text_peer.c`, the node daemon (`node_
 
 The original Phase A library list (proofs/receipts, policy/rate controls, recall and link lifecycle) and Phase C management list (blackholes and remote management) have implementations above. Phase B host kinds and Phase D CLI tools also exist, with the explicit omissions in their tables. Their existence does not close the remaining options or validation gaps.
 
-1. Resolve the announce propagation exceptions listed in section 2 and expose the RPC rate table.
+1. Done on 2026-11-15: hop limit, `MODE_INTERNAL`, path-response grace and the RPC rate table (section 2). Open: cancelling a pending path response when a neighbour rebroadcasts, and the remote-management `rates` query.
 2. Fill the host options in section 4, including Auto device selection, UDP multiple targets and serial/TCP gaps; retain separate validation for emulator-backed host adapters and real hardware.
 3. Implement or reject the two no-effect discovery options, then cover I2P/Weave discovery announcements.
 4. Extend the CLI subsets and add runnable stand-alone protocol examples. Keep browser MCU firmware installation distinct from reference `rnodeconf` parity.

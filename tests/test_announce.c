@@ -259,6 +259,47 @@ static void internal_no_cap(void) {
   CHECK(sends_on(n, 2) == 3);
   rnc_node_free(n);
 }
+/* Answering a path request from a known path (reference Transport.path_request): the answer waits
+ * PATH_REQUEST_GRACE (0.4 s) so directly reachable peers can answer first, 1.5 s more on a
+ * roaming interface, and goes out at once to a local client. A roaming interface is not answered
+ * when the path comes from that same interface. */
+static size_t answered_after(rnc_interface_mode mode, int local, int path_on_asker, uint64_t tick_ms) {
+  rnc_interface_policy ask = {0};
+  rnc_identity src;
+  rnc_packet a, request;
+  uint8_t tag[16] = {7}, dest[16];
+  rnc_node *n = make(1, 0, NULL);
+  size_t c;
+  ask.mode = mode;
+  CHECK(rnc_node_interface_policy(n, 2, &ask) == RNC_OK);
+  if (local)
+    CHECK(rnc_node_local_interface(n, 2, 1) == RNC_OK);
+  CHECK(rnc_identity_generate(&src, rng, NULL) == RNC_OK);
+  a = announce_from(&src, 1000);
+  CHECK(rnc_node_input(n, path_on_asker ? 2 : 1, &a, 1000, 0) == RNC_OK);
+  memcpy(dest, a.destination, 16);
+  CHECK(rnc_node_tick(n, 1000, 700) == RNC_OK);
+  while (sends_on(n, 1) + sends_on(n, 2) > 0) {
+  }
+  CHECK(rnc_path_request_create(dest, NULL, tag, sizeof(tag), &request) == RNC_OK);
+  CHECK(rnc_node_input(n, 2, &request, 1001, 1000) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1001, 1000 + tick_ms) == RNC_OK);
+  c = sends_on(n, 2);
+  rnc_node_free(n);
+  return c;
+}
+static void path_response_grace(void) {
+  /* a known path on another interface is answered after the 0.4 s grace, not before */
+  CHECK(answered_after(RNC_MODE_FULL, 0, 0, 399) == 0);
+  CHECK(answered_after(RNC_MODE_FULL, 0, 0, 400) == 1);
+  /* a local client gets the answer at once */
+  CHECK(answered_after(RNC_MODE_FULL, 1, 0, 0) == 1);
+  /* a roaming interface waits another 1.5 s for better connected peers */
+  CHECK(answered_after(RNC_MODE_ROAMING, 0, 0, 1899) == 0);
+  CHECK(answered_after(RNC_MODE_ROAMING, 0, 0, 1900) == 1);
+  /* a roaming interface is never told about a path that lies behind itself */
+  CHECK(answered_after(RNC_MODE_ROAMING, 0, 1, 5000) == 0);
+}
 /* Locally originated announces are never sent on access-point interfaces. */
 static void access_point(void) {
   rnc_interface_policy policy = {0};
@@ -314,6 +355,8 @@ int main(int argc, char **argv) {
     rate();
   else if (!strcmp(argv[1], "access_point"))
     access_point();
+  else if (!strcmp(argv[1], "path_response_grace"))
+    path_response_grace();
   else if (!strcmp(argv[1], "internal_mode"))
     internal_mode();
   else if (!strcmp(argv[1], "internal_no_cap"))
