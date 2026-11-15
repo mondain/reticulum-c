@@ -1159,8 +1159,11 @@ The PlatformIO firmware can run as the device side of the RNode KISS protocol
 set is the one this project's host adapter and RNS 1.5.5 `RNodeInterface` use (detect,
 firmware 1.74, platform, MCU, board, frequency, bandwidth, power, spreading factor,
 coding rate, radio state, airtime locks, ready, data, RSSI and SNR reports, leave, reset).
-Not implemented: EEPROM, signing and firmware-update flows, display, battery and
-temperature reports, Bluetooth.
+Not implemented: EEPROM, signing and firmware-update flows, battery and temperature
+reports. Bluetooth is optional (PIN pairing). The T-Echo (e-paper) and T-Beam Supreme (OLED)
+show a status page with the radio state and, only while Bluetooth is advertising or
+connected unsecured with a PIN set, that PIN (PIN rule seen on the T-Echo; see
+mcu/README.txt).
 
 Evidence: unit tests of the framer, every command and the failure cases; this project's
 host RNode adapter over a pseudo terminal against the module with a simulated radio and

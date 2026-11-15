@@ -8,6 +8,7 @@
 
 #include "rnc_mcu_net.h"
 #include "rnc_rnode_io.h"
+#include "rnc_status.h"
 
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52840_XXAA) || defined(ARDUINO_ARCH_ESP32)
 #define RNC_HAVE_BLE 1
@@ -17,9 +18,14 @@ bool rnc_ble_start(const rnc_mcu_cfg *cfg);
 extern const rnc_rnode_io rnc_ble_io;
 // Bytes waiting from the central.
 int rnc_ble_available(void);
+// OFF until the service has started (a PIN is set), then ADVERTISING, CONNECTED (a central that
+// is not yet authenticated) or SECURE (encrypted and authenticated); the screens use it to show
+// the PIN only while it is needed.
+rnc_ble_state_t rnc_ble_state(void);
 #else
 #define RNC_HAVE_BLE 0
 static inline bool rnc_ble_start(const rnc_mcu_cfg *) { return false; }
 static inline int rnc_ble_available(void) { return 0; }
+static inline rnc_ble_state_t rnc_ble_state(void) { return RNC_BLE_OFF; }
 static const rnc_rnode_io rnc_ble_io = {NULL, NULL, NULL}; // never used: no Bluetooth here
 #endif

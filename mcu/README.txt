@@ -215,8 +215,25 @@ percent full on the T-Beam v1.0/1.1 and 74 percent on the T3-S3). On ESP32 the l
 authenticated before any byte is accepted or sent.
 
 Not included: stock RNode EEPROM provisioning, signing and firmware-update flows
-(rnodeconf cannot flash or provision this firmware), the display, battery and temperature
-reports. The generic ESP-IDF image has no Bluetooth or radio selection and ignores this mode.
+(rnodeconf cannot flash or provision this firmware), battery and temperature reports. The generic ESP-IDF image has no Bluetooth or radio selection and ignores this mode.
+
+Status screens (LilyGo T-Echo e-paper, LilyGo T-Beam Supreme OLED). These two boards draw a
+status page: name and version, the phase (setup or running), radio on or off, frequency and
+transmit power, bandwidth, spreading factor and coding rate, RSSI and SNR of the last packet,
+packet counts and airtime used, the link (USB, Bluetooth or none) and, only while it is
+needed, the Bluetooth PIN. The PIN row appears only when a PIN is set (ble.pin) and Bluetooth
+is advertising or connected but not yet secured; it is hidden while off, once the link is
+encrypted and whenever no PIN is set. The screen only reads the node's state, runs as a
+low priority task, and a screen that fails to start never affects the radio, USB or
+Bluetooth. The e-paper refreshes at most every 15 s (2 s when the PIN row changes) with a
+full refresh every 5 minutes; the OLED every second. Libraries (pinned in platformio.ini):
+GxEPD2, Adafruit GFX, Adafruit SH110X, Adafruit BusIO. The e-paper uses SPIM3 (the Adafruit
+nRF52 core disables SPIM0 and SPIM1). Other boards build without a screen driver.
+Evidence: the layout, the PIN rule and the refresh policy are unit tested (test_mcu_status).
+On 2026-11-15 the Supreme OLED showed the status page, and the T-Echo e-paper showed the
+status page and, with ble.pin set and mode rnode, showed the PIN while advertising, removed
+it while a PC was paired and connected, and showed it again after the disconnect. Not
+checked on hardware: the no-PIN case, the 5 minute full refresh, the Supreme PIN rows.
 
 Evidence: the protocol logic is unit tested, and tested against this project's own host
 RNode adapter over a pseudo terminal with a simulated LoRa peer. On 2026-11-14 a T-Echo
@@ -499,7 +516,8 @@ The firmware targets chips, not boards, because the serial path is the same:
             (menuconfig), in which case move the console off it.
 
 Board pin maps differ for the radio, display and power chips. Only the LoRa radio is
-driven (see the LoRa radio section; the display, GPS, buttons and the battery are not).
+driven (see the LoRa radio section; GPS, buttons and the battery are not). The T-Echo e-paper and
+the Supreme OLED show a status page (see the status screens paragraph in the RNode section).
 Set the board name in menuconfig so /info reports it.
 
 Limits

@@ -1,0 +1,257 @@
+# Status Screens Implementation Plan
+
+> For agentic workers: REQUIRED SUB-SKILL: use superpowers:subagent-driven-development
+> (recommended) or superpowers:executing-plans to implement this plan task by task.
+> Steps use checkbox syntax for tracking.
+
+**Goal:** Show the Bluetooth PIN (only while it is needed) and the radio status on the
+T-Echo e-paper and the T-Beam Supreme OLED.
+
+**Architecture:** A portable status record and text layout (with the PIN rule and the
+refresh policy) in `mcu/app/rnc_status.{h,c}`, tested on the host. Firmware code fills the
+record from the LoRa interface, the RNode module and a new Bluetooth state, and a
+low-priority task per board draws the layout with Adafruit GFX (GxEPD2 on the T-Echo,
+Adafruit SH110X on the Supreme).
+
+**Tech Stack:** C11 (portable), Arduino/PlatformIO C++, GxEPD2, Adafruit GFX, Adafruit
+SH110X, Adafruit BusIO, ctest.
+
+**Spec:** docs/display-status-design.txt (approved 2026-11-14, with section 6.6). Read it first.
+
+## Global Constraints
+
+- The PIN is shown only in Bluetooth states ADVERTISING and CONNECTED; never in OFF or
+  SECURE; never when no PIN is set; the record's PIN field is zeroed when not visible.
+- No secret on screen other than the PIN (never the Wi-Fi password).
+- Layout profiles: OLED 21 columns x 8 rows; e-paper 16 columns x 12 rows. The PIN is on
+  its own line and is never dropped; lower-priority lines go first.
+- Refresh: OLED at most once a second and only when the layout changed. E-paper: only when
+  the layout changed, at least 15 s apart, partial refresh, a full refresh every 5 minutes;
+  a change in PIN visibility is drawn at once, at least 2 s after the last refresh.
+- The display task runs at priority 1 (below the radio and Reticulum tasks at 2), only
+  reads shared state, never writes it; a screen that fails to start ends its task silently.
+- Version text is `RNC_MCU_VERSION`.
+- Display code and libraries only in `lilygo_t_echo` (RNC_DISPLAY_EPAPER) and
+  `lilygo_t_beam_supreme` (RNC_DISPLAY_OLED); library versions pinned exactly (use the
+  latest release that resolves at implementation time and record it in platformio.ini).
+- T-Echo display pins (SPIM0): CS 30, DC 28, RESET 2, BUSY 3, SCK 31, MOSI 29, no MISO.
+  Supreme OLED: SH1106 128x64, address 0x3C, default `Wire` on SDA 17, SCL 18.
+- C code compiles with `-Wall -Wextra -Wpedantic -Werror`. Commit messages: no emoji, no
+  tool taglines.
+
+## Review Focus
+
+1. The PIN never appears when the link is SECURE, when Bluetooth is OFF, or when no PIN is
+   set, including after a state change back and forth (Task 1 tests, Task 3 hardware check).
+2. A burst of changes (a packet every second) never refreshes the e-paper more than once per
+   15 s, but a PIN visibility change still shows within about 2 s (Task 2 tests).
+3. Extreme values never overflow a line: 21 or 16 column limits with long mode text, negative
+   and large RSSI/SNR, 10-digit counters, frequency 1020 MHz (Task 1 tests).
+4. "No signal yet" until a packet is received; counters and airtime never shown as garbage
+   when the radio never started (Task 1 tests).
+5. A screen that fails to initialise leaves radio, USB and Bluetooth working (the
+   init-failure branch of `rnc_display_step` is tested on the host in Task 2; Tasks 4 and 5
+   check on the boards that the radio and Bluetooth still work with the display running).
+
+---
+
+### Task 1: Status record, layout and PIN rule
+
+**Files:** Create `mcu/app/rnc_status.h`, `mcu/app/rnc_status.c`, `mcu/tests/test_status.c`;
+Modify `mcu/CMakeLists.txt` (library `rnc_mcu_app` gets rnc_status.c; `test_mcu_status` next to
+`test_mcu_net`), `mcu/tests/mcu_unit.sh` (build and run it), `library.json` (srcFilter).
+
+**Interfaces:**
+- Produces (in `rnc_status.h`):
+  - `typedef enum { RNC_PHASE_STARTING, RNC_PHASE_SETUP, RNC_PHASE_RUNNING } rnc_status_phase;`
+  - `typedef enum { RNC_LINK_NONE, RNC_LINK_USB, RNC_LINK_BLE, RNC_LINK_WIFI } rnc_status_link;`
+  - `typedef enum { RNC_BLE_OFF, RNC_BLE_ADVERTISING, RNC_BLE_CONNECTED, RNC_BLE_SECURE } rnc_ble_state_t;`
+  - `typedef struct rnc_status { rnc_status_phase phase; char mode[24]; int radio_on; int radio_set;
+    uint32_t freq_hz, bw_hz; uint8_t sf, cr; int8_t txp_dbm; int has_signal; int16_t rssi_dbm;
+    int16_t snr_quarter_db; uint32_t rx_packets, tx_packets; uint16_t airtime_permille;
+    rnc_status_link link; rnc_ble_state_t ble; char pin[7]; char version[12]; } rnc_status;`
+  - `int rnc_status_pin_visible(rnc_ble_state_t ble, int pin_set)`
+  - `typedef struct rnc_status_profile { unsigned cols, rows; } rnc_status_profile;` with
+    constants `RNC_PROFILE_OLED` (21, 8) and `RNC_PROFILE_EPAPER` (16, 12)
+  - `#define RNC_STATUS_MAX_COLS 21`, `#define RNC_STATUS_MAX_ROWS 12`
+  - `unsigned rnc_status_layout(const rnc_status *s, rnc_status_profile p,
+    char lines[RNC_STATUS_MAX_ROWS][RNC_STATUS_MAX_COLS + 1])` returns the rows used, every
+    row NUL terminated and at most `p.cols` characters.
+
+- [ ] Step 1: tests in `test_status.c` (name and exact assertions):
+  `pin_rule`: visible for ADVERTISING and CONNECTED with `pin_set` 1; hidden for OFF, SECURE,
+  and for every state with `pin_set` 0.
+  `running_page_oled`: a status with radio on, 915000000 Hz, 125000 Hz, SF8, CR5, 0 dBm,
+  rssi -31, snr 51 (quarter dB), rx 12, tx 3, airtime 4 permille, link USB, version "0.2.1",
+  mode "RNode" gives lines (exact strings): `reticulum-c 0.2.1`, `RNode`, `Radio ON`,
+  `915.000 MHz`, `BW 125k SF8 CR4/5`, `0 dBm`, `RSSI -31 SNR 12.8`, `RX 12 TX 3 Air 0.4%`,
+  and row 8 `Link USB` (check the layout order against what fits; the strings are the
+  contract, pick the packing so they hold).
+  `pin_line_replaces_link`: with the PIN visible (`ble` ADVERTISING, pin "246810") the
+  last row is `BLE PIN 246810`; with `ble` SECURE and the same pin string present in the
+  record the string "246810" appears nowhere in any line (Review Focus 1).
+  `no_signal_and_off`: `has_signal` 0 gives `No signal yet`; `radio_set` 0 gives
+  `Radio not set` and no frequency lines.
+  `epaper_profile`: the same status on `RNC_PROFILE_EPAPER` uses at most 16 columns per
+  row and at most 12 rows, and the PIN row is present whenever the PIN is visible even when
+  the content must be dropped (set `rows` small in a custom profile of 4 rows with PIN
+  visible: the PIN row is there).
+  `extremes`: 10-digit counters, 1020 MHz, rssi -157 and 0, snr -128 and 127, a 23 character
+  mode text: no row exceeds `cols`, no crash.
+  `phases`: STARTING gives `reticulum-c 0.2.1` then `starting`; SETUP gives `Setup mode`
+  then `rnc-config console`.
+- [ ] Step 2: run `cmake --build <mcu build> --target test_mcu_status` and the binary;
+  Expected: build fails (header missing), then after Step 3 assertions drive the work.
+- [ ] Step 3: implement the three functions in `rnc_status.c` with no allocation and no
+  `printf` of floating point (format MHz and the one-decimal SNR with integers). Fields are
+  short strings packed greedily onto rows, the PIN field on its own last row.
+- [ ] Step 4: add `test_mcu_status` to `mcu/CMakeLists.txt` (like `test_mcu_net`), to
+  `mcu/tests/mcu_unit.sh`, and `rnc_status.c` to `library.json` srcFilter.
+- [ ] Step 5: run `bash mcu/tests/mcu_unit.sh $PWD` and the existing mcu tests; Expected:
+  `mcu unit tests passed`. Commit `app: status record, layout and PIN rule for the screens`.
+
+### Task 2: Refresh policy
+
+**Files:** Modify `mcu/app/rnc_status.h`, `mcu/app/rnc_status.c`, `mcu/tests/test_status.c`
+
+**Interfaces:**
+- Produces: `typedef struct rnc_refresh { unsigned min_interval_ms, pin_interval_ms,
+  full_interval_ms; uint64_t last_ms, last_full_ms; int last_pin_visible; int drawn_once; }
+  rnc_refresh;`
+  `typedef enum { RNC_REFRESH_NONE, RNC_REFRESH_PARTIAL, RNC_REFRESH_FULL } rnc_refresh_action;`
+  `void rnc_refresh_init(rnc_refresh *r, unsigned min_ms, unsigned pin_ms, unsigned full_ms)`
+  `rnc_refresh_action rnc_refresh_decide(rnc_refresh *r, int layout_changed, int pin_visible,
+  uint64_t now_ms)` (records the draw when it returns a non-NONE action).
+  OLED init is (1000, 1000, 0) (full interval 0 = never a full refresh); e-paper is
+  (15000, 2000, 300000).
+  `typedef struct rnc_display_state { char prev[RNC_STATUS_MAX_ROWS][RNC_STATUS_MAX_COLS + 1];
+  unsigned prev_rows; } rnc_display_state;`
+  `rnc_refresh_action rnc_display_step(rnc_refresh *r, rnc_display_state *st, const rnc_status *s,
+  rnc_status_profile p, int init_ok, uint64_t now_ms, char out[RNC_STATUS_MAX_ROWS][RNC_STATUS_MAX_COLS + 1],
+  unsigned *rows)`: lays the status out, compares it with `st->prev`, asks `rnc_refresh_decide`
+  (with `pin_visible` taken from whether `s->pin[0]` is set), and returns the action; with
+  `init_ok` 0 it always returns NONE. On an action other than NONE it fills `out` and `*rows`
+  and updates `st->prev`. This is what the display task calls, so the task's logic is tested on
+  the host.
+
+- [ ] Step 1: tests `first_draw_is_full`, `no_change_no_draw`, `change_waits_min_interval`
+  (changes at t=0, 5 s, 14 s: draws at 0 and at 15 s only), `pin_change_is_prompt`
+  (a PIN visibility change 3 s after a draw draws within `pin_interval_ms`, a plain change at
+  the same time does not), `full_refresh_every_five_minutes` (a changed layout after 300 s is
+  FULL), `burst_rate` (a change every second for 10 minutes gives at most 41 draws with the
+  e-paper values; Review Focus 2), and for `rnc_display_step`: `init_failed_never_draws`
+  (`init_ok` 0 returns NONE for every input), `unchanged_layout_is_quiet`, `fills_out_on_draw`
+  (the returned rows equal `rnc_status_layout`'s).
+- [ ] Step 2: run; Expected: FAIL (symbols missing). Step 3: implement. Step 4: run the unit
+  tests; Expected: PASS. Commit `app: refresh policy and display step for the screens`.
+
+### Task 3: Bluetooth state, status filler and display task skeleton
+
+**Files:** Modify `mcu/platformio/src/ble_mode.h`, `ble_nrf.cpp`, `ble_esp32.cpp`,
+`mcu/platformio/src/main.cpp`, `mcu/platformio/src/wifi_mode.h` (phase hook only if needed);
+Create `mcu/platformio/src/status_fill.h`, `status_fill.cpp`, `display_mode.h`,
+`display_task.cpp`.
+
+**Interfaces:**
+- Consumes: Task 1 record and layout, Task 2 policy.
+- Produces:
+  - `rnc_ble_state_t rnc_ble_state(void)` in `ble_mode.h` (stub returning `RNC_BLE_OFF` where
+    there is no Bluetooth). nRF: OFF until `rnc_ble_start` succeeded, then ADVERTISING when
+    `Bluefruit.connected()` is 0, CONNECTED when connected and
+    `Bluefruit.Connection(0)->secured()` is false, SECURE when secured. ESP32: OFF, then
+    ADVERTISING / CONNECTED / SECURE from `g_connected` and `g_secure`.
+  - `void rnc_status_sources(const rnc_lora_if *li, const rnc_rnode *rn, const rnc_mcu_cfg *cfg)`
+    (stores pointers; the cfg is copied once), `void rnc_status_set_phase(rnc_status_phase)`,
+    `void rnc_status_set_link(rnc_status_link)`, `void rnc_status_fill(rnc_status *out, uint64_t now_ms)`.
+    `rnc_status_fill` fills the mode text (`RNode`, or `USB` / `WiFi` followed by the LoRa mode
+    when it is not off), the radio state and settings (from the RNode module in rnode mode,
+    from the configuration otherwise), RSSI/SNR/counters from `li->stats`, airtime permille
+    from `rnc_airtime_used(&li->budget, now_ms)` over `li->budget.budget_ms`, the Bluetooth
+    state, the PIN digits only when `rnc_status_pin_visible()` says so (zeroed otherwise) and
+    `RNC_MCU_VERSION`. It reads only.
+  - `bool rnc_display_start(void)` in `display_mode.h` creates the display task (priority 1);
+    returns false when no display is built in. The driver functions (Tasks 4 and 5) are
+    `bool display_init(void)` and `void display_draw(const char lines[][22], unsigned rows,
+    rnc_refresh_action action)`, with a profile constant `DISPLAY_PROFILE`.
+
+- [ ] Step 1: build all 8 environments with the new code and no display flag
+  (`mcu/build-platformio.sh`, output in the scratchpad); Expected: all build, the six
+  without a screen within a few hundred bytes of the previous size.
+- [ ] Step 2: implement `rnc_ble_state()` on both stacks and the stubs; build the nRF and ESP32
+  environments; Expected: PASS.
+- [ ] Step 3: implement `status_fill.*` and `display_task.cpp` (the task loop: every 200 ms
+  fill, layout, `rnc_refresh_decide` against a copy of the previous lines, draw); in `main.cpp`
+  call `rnc_status_sources`, `rnc_status_set_phase` (STARTING at the top of `setup()`, SETUP
+  just before `rnc_provision_console`, RUNNING before the tasks start) and `rnc_display_start()`
+  early in `setup()` (before the provisioning window).
+- [ ] Step 4: the task loop is only I/O around `rnc_display_step` (Task 2, already tested,
+  including the init-failure case of Review Focus 5): every 200 ms `rnc_status_fill`, then
+  `rnc_display_step`, then `display_draw` when the action is not NONE; if `display_init()`
+  returned false the task calls `rnc_display_step` with `init_ok` 0 once and exits.
+- [ ] Step 5: build all 8 environments again; run the unit tests. Commit
+  `firmware: Bluetooth state, status filler and display task skeleton`.
+
+### Task 4: OLED driver for the T-Beam Supreme
+
+**Files:** Create `mcu/platformio/src/display_oled.cpp`; Modify `mcu/platformio/platformio.ini`
+(`lilygo_t_beam_supreme`: `lib_deps` with Adafruit GFX Library, Adafruit SH110X, Adafruit BusIO,
+pinned; `-DRNC_DISPLAY_OLED`).
+
+**Interfaces:** Consumes Task 3's driver functions. Produces `DISPLAY_PROFILE = RNC_PROFILE_OLED`.
+
+- [ ] Step 1: implement `display_init()` (`Wire.begin(17, 18)`, `Adafruit_SH1106G display(128, 64,
+  &Wire, -1)`, `begin(0x3C, true)`, clear) and `display_draw()` (text size 1, white on black,
+  one `println` per row, `display.display()`); returns false when the controller does not answer.
+- [ ] Step 2: build `lilygo_t_beam_supreme`; Expected: builds; record flash and RAM.
+- [ ] Step 3: flash the Supreme (the owner approves; it replaces the gateway firmware: keep the
+  NVS parts, flash the separate images from `flash.txt`) and look at it: the starting frame,
+  then the status page. If the screen stays dark, check the AXP2101 rails (`rnc_axp2101.h`)
+  and record what was needed.
+- [ ] Step 4: with the owner looking: rnode mode with a PIN (PIN line shown), pair from BlueZ
+  (PIN disappears when paired), disconnect (PIN returns), `set ble.pin` empty (no PIN line);
+  record what was seen in `mcu/README.txt`. Commit `firmware: OLED status screen on the T-Beam Supreme`.
+
+### Task 5: E-paper driver for the T-Echo
+
+**Files:** Create `mcu/platformio/src/display_epaper.cpp`; Modify `mcu/platformio/platformio.ini`
+(`lilygo_t_echo`: `lib_deps` with GxEPD2, Adafruit GFX Library, Adafruit BusIO, pinned;
+`-DRNC_DISPLAY_EPAPER`).
+
+**Interfaces:** Consumes Task 3's driver functions. Produces `DISPLAY_PROFILE = RNC_PROFILE_EPAPER`.
+
+- [ ] Step 1: implement `display_init()` (`SPIClass displaySPI(NRF_SPIM0, -1, 31, 29)`,
+  `GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(GxEPD2_154_D67(30, 28, 2, 3))`,
+  `display.init(0, true, 10, false, displaySPI, SPISettings(4000000, MSBFIRST, SPI_MODE0))`,
+  rotation, black on white) and `display_draw()` (text size 2; PARTIAL uses the partial window
+  and `display(true)`, FULL uses a full refresh; `hibernate` is not used).
+- [ ] Step 2: build `lilygo_t_echo`; Expected: builds; record flash and RAM; confirm the
+  radio still works (the existing hardware checks: `bench3` style run against the Supreme or
+  the BlueZ pairing test).
+- [ ] Step 3: flash the T-Echo (the owner double-taps RESET) and look: starting frame, status
+  page, PIN line while advertising, PIN gone after pairing, partial refreshes not flickering
+  more than the 15 s policy, a full refresh at 5 minutes. Record what was seen.
+- [ ] Step 4: with the display running, repeat the Bluetooth pairing test and a USB DETECT
+  exchange; Expected: unchanged results (display task does not disturb them). Commit
+  `firmware: e-paper status screen on the T-Echo`.
+
+### Task 6: Docs, CI check and review
+
+**Files:** Modify `mcu/README.txt`, `COMPATIBILITY.md`, `web/index.html` (one sentence),
+`docs/display-status-design.txt` (status).
+
+- [ ] Step 1: document the screens, the PIN rule, what each screen shows, the refresh policy and
+  the evidence level (what was seen, on which boards) in `mcu/README.txt` and
+  `COMPATIBILITY.md`.
+- [ ] Step 2: run the unit tests, the web tests and all eight environment builds; Expected: PASS.
+- [ ] Step 3: push the branch and open a PR (stacked on `feature/rnode-mode`); watch the CI mcu
+  jobs (PlatformIO downloads the display libraries). Commit `docs: the status screens`.
+
+## Self-Review Notes
+
+- Spec coverage: 2 (goals) Tasks 1 to 5; PIN rule Tasks 1 and 3; 6.2 Task 1; 6.3 Task 3; 6.4
+  Tasks 2, 3, 4, 5; 6.5 Tasks 4 and 5; 6.6 throughout; 7 Tasks 1 to 6. Non-goals untouched.
+- Names across tasks: `rnc_status`, `rnc_status_layout`, `rnc_status_pin_visible`,
+  `rnc_refresh_*`, `rnc_display_step`, `rnc_ble_state`, `rnc_status_fill`, `rnc_display_start`,
+  `display_init`, `display_draw`, `DISPLAY_PROFILE`.
+- Tasks 4 and 5 need the boards and the owner looking at them; the Supreme flash replaces its
+  gateway firmware, so ask first.

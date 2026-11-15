@@ -37,6 +37,7 @@ public:
   }
 };
 static RncUart g_uart;
+static bool g_on = false; // the service has started
 
 static int ble_read(void *, uint8_t *buffer, size_t capacity) {
   int n;
@@ -61,6 +62,15 @@ const rnc_rnode_io rnc_ble_io = {ble_read, ble_write, NULL};
 
 int rnc_ble_available(void) { return Bluefruit.connected() ? g_uart.available() : 0; }
 
+rnc_ble_state_t rnc_ble_state(void) {
+  if (!g_on)
+    return RNC_BLE_OFF;
+  if (!Bluefruit.connected())
+    return RNC_BLE_ADVERTISING;
+  BLEConnection *connection = Bluefruit.Connection(Bluefruit.connHandle());
+  return connection && connection->secured() ? RNC_BLE_SECURE : RNC_BLE_CONNECTED;
+}
+
 bool rnc_ble_start(const rnc_mcu_cfg *cfg) {
   char name[16];
   if (!rnc_mcu_cfg_ble_ready(cfg))
@@ -83,6 +93,7 @@ bool rnc_ble_start(const rnc_mcu_cfg *cfg) {
   Bluefruit.Advertising.setInterval(32, 244); // units of 0.625 ms
   Bluefruit.Advertising.setFastTimeout(30);
   Bluefruit.Advertising.start(0); // advertise until connected, again after a disconnect
+  g_on = true;
   return true;
 }
 #endif
