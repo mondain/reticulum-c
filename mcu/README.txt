@@ -262,8 +262,11 @@ Sideband (Android), T-Echo, 2026-11-15: after pairing the phone with the PIN in 
 Bluetooth settings, Sideband connected over BLE once "Connect using Bluetooth" and "Device
 requires BLE" were on and Sideband was restarted (its "Bluetooth" without BLE is classic
 Bluetooth and cannot see this board). The board's status screen then showed the frequency
-and the BLE link. NOT verified: packets in either direction through Sideband (the RX and TX
-counts were not checked), many connect/disconnect cycles, the range, and the ESP32 transport.
+and the BLE link. Over the air (915 MHz, 125 kHz, SF8, CR 4/5, 0 dBm, close range) the
+T-Echo then counted RX 2 and TX 2 against a T-Beam Supreme running this project's gateway
+firmware, and its screen showed RSSI -46 dBm and SNR 12.5 dB for the last packet. NOT
+verified: that Sideband itself displayed the received announces, many connect/disconnect
+cycles, the range, and the ESP32 transport.
 
 Provisioning
 ------------
