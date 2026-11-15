@@ -61,14 +61,23 @@ function settingsState(s){
  $('settings-state').textContent=s==='console'?'Setup console ready':s==='connected'?'Waiting for setup prompt':'Disconnected';
  $('connection-badge').textContent=s==='console'?'Settings connected':'Not connected';$('connection-badge').classList.toggle('connected',s==='console');syncActions();
 }
+const CONSOLE_WAIT_SECONDS=60;
 async function openSettings(port,freshBoot=false){
  if(settings)await settings.close();
  settingsAbort=new AbortController();$('cancel-flash').hidden=false;
- configStatus(freshBoot?'Entering setup after installation…':'Tap RESET now if the board is running. The connection is restored automatically when it restarts.');
+ // The firmware only accepts the setup request for about two seconds after a reset, so
+ // tell the user how long this attempt stays open and count it down.
+ const deadline=Date.now()+CONSOLE_WAIT_SECONDS*1000;
+ const tick=()=>{const left=Math.max(0,Math.ceil((deadline-Date.now())/1000));
+  configStatus(freshBoot&&left>CONSOLE_WAIT_SECONDS-10?'Entering setup after installation…':`Press RESET on the board within ${left} second${left===1?'':'s'}. The connection is restored automatically after the board restarts.`,left<=10?'error':'');};
+ tick();const timer=setInterval(tick,1000);
  try{
   // Boards with native USB drop off the bus when reset; connectConsole reconnects.
-  settings=await connectConsole({serial:navigator.serial,port,signal:settingsAbort.signal,onLog:log,onSession:s=>{settings=s;},sessionOptions:{onState:settingsState}});
- }finally{settingsAbort=undefined;if(!flashAbort)$('cancel-flash').hidden=true;}
+  settings=await connectConsole({serial:navigator.serial,port,signal:settingsAbort.signal,timeout:CONSOLE_WAIT_SECONDS*1000,onLog:log,onSession:s=>{settings=s;},sessionOptions:{onState:settingsState}});
+ }catch(e){
+  if(/timed out/i.test(e.message))throw new Error(`No setup prompt within ${CONSOLE_WAIT_SECONDS} seconds`);
+  throw e;
+ }finally{clearInterval(timer);settingsAbort=undefined;if(!flashAbort)$('cancel-flash').hidden=true;}
  loadReportedSettings(await settings.command('get'));
  configStatus('Saved settings loaded. Change the fields, save, then reboot to run.','success');
 }
@@ -126,7 +135,7 @@ $('flash-button').addEventListener('click',async()=>{
 });
 $('connect-settings').addEventListener('click',async()=>{
  busy=true;syncActions();try{applicationPort=await navigator.serial.requestPort();await openSettings(applicationPort);}
- catch(e){configStatus(`${e.message||String(e)}. Select the application port and retry after RESET.`,'error');log(e.message||e);if(settings)await settings.close();}finally{busy=false;syncActions();}
+ catch(e){configStatus(`${e.message||String(e)}. Click Connect to settings to try again, then press RESET on the board.`,'error');log(e.message||e);if(settings)await settings.close();}finally{busy=false;syncActions();}
 });
 $('config-form').addEventListener('submit',async event=>{
  event.preventDefault();if(!settings?.inConsole||busy)return;
