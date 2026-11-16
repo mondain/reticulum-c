@@ -513,6 +513,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             add_test(NAME reticulum_node_process_x_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> x_tools $<TARGET_FILE:reticulum-c-x>)
             set_tests_properties(reticulum_node_process_x_tools PROPERTIES LABELS network TIMEOUT 120)
+            add_test(NAME reticulum_node_process_ctl_remote COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> ctl_remote $<TARGET_FILE:reticulum-c-ctl>)
+            set_tests_properties(reticulum_node_process_ctl_remote PROPERTIES LABELS network TIMEOUT 120)
             add_test(NAME reticulum_node_process_examples COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> examples $<TARGET_FILE:reticulum-c-example-announce> $<TARGET_FILE:reticulum-c-example-request>)
             set_tests_properties(reticulum_node_process_examples PROPERTIES LABELS network TIMEOUT 120)

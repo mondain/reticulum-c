@@ -20,7 +20,9 @@
 #include <poll.h>
 #include "msgpack_tree.h"
 #include <reticulum_c/rnc.h>
+#include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_ipc.h>
+#include <reticulum_c/rnc_requester.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -316,11 +318,184 @@ static void reply_free(reply *r) {
   free(r->data);
   free(r->pool);
 }
+/* ---- remote management (-R) --------------------------------------------
+ * rnstatus -R and rnpath -R talk to another transport instance's management destination,
+ * "rnstransport.remote.management", whose hash comes from that instance's identity hash. The
+ * link needs a node of its own: --attach HOST:PORT is a TCP server interface to reach the network
+ * through, --mgmt-identity the identity the remote instance has on its allow list. */
+static struct {
+  const char *hash, *attach, *identity;
+  double wait;
+} remote;
+static rnc_result remote_random(void *context, uint8_t *out, size_t size) {
+  (void)context;
+  return RAND_priv_bytes(out, (int)size) == 1 ? RNC_OK : RNC_CRYPTO;
+}
+static int remote_destination(const char *identity_hex, uint8_t destination[16]) {
+  static const char name[] = "rnstransport.remote.management";
+  uint8_t identity_hash[16], name_hash[32], material[26], full[32];
+  if (strlen(identity_hex) != 32 || !hex_decode(identity_hex, identity_hash, 16))
+    return 0;
+  if (rnc_hash(name, sizeof(name) - 1, name_hash) != RNC_OK)
+    return 0;
+  memcpy(material, name_hash, 10);
+  memcpy(material + 10, identity_hash, 16);
+  if (rnc_hash(material, sizeof(material), full) != RNC_OK)
+    return 0;
+  memcpy(destination, full, 16);
+  return 1;
+}
+/* One request to the remote instance; the answer is parsed into *out. */
+static int remote_call(const char *path, const uint8_t *request, size_t request_size, reply *out) {
+  rnc_identity id;
+  rnc_node *node = NULL;
+  rnc_host *host = NULL;
+  rnc_requester *requester = NULL;
+  rnc_host_config hc;
+  rnc_requester_result result;
+  uint8_t destination[16], *answer = NULL;
+  char address[256];
+  const char *colon = remote.attach ? strrchr(remote.attach, ':') : NULL;
+  unsigned long port = 0, started;
+  double wait = remote.wait > 0 ? remote.wait : 15.0;
+  int ok = 0, have_id = 0;
+  memset(out, 0, sizeof(*out));
+  if (!remote.attach || !remote.identity || !colon || colon == remote.attach ||
+      (size_t)(colon - remote.attach) >= sizeof(address) || !number(colon + 1, 65535, &port) || !port) {
+    fprintf(stderr, "A remote query needs --attach HOST:PORT and --mgmt-identity FILE\n");
+    return 0;
+  }
+  memcpy(address, remote.attach, (size_t)(colon - remote.attach));
+  address[colon - remote.attach] = 0;
+  if (!remote_destination(remote.hash, destination)) {
+    fprintf(stderr, "The remote instance is its 32 hexadecimal character identity hash\n");
+    return 0;
+  }
+  if (rnc_host_identity_load(remote.identity, remote_random, NULL, &id) != RNC_OK) {
+    fprintf(stderr, "Cannot load the management identity %s\n", remote.identity);
+    return 0;
+  }
+  have_id = 1;
+  node = rnc_node_new(&id, 0, remote_random, NULL);
+  host = node ? rnc_host_new(node) : NULL;
+  memset(&hc, 0, sizeof(hc));
+  hc.kind = RNC_HOST_TCP_CONNECT;
+  hc.name = "ctl remote";
+  hc.address = address;
+  hc.port = (uint16_t)port;
+  hc.mtu = RNC_MAX_MTU;
+  hc.bitrate = 1000000000u;
+  if (!host || rnc_host_add(host, 1, &hc) != RNC_OK) {
+    fprintf(stderr, "Cannot attach to %s\n", remote.attach);
+    goto done;
+  }
+  requester = rnc_requester_new(node, 1u << 20, remote_random, NULL);
+  answer = malloc(1u << 20);
+  if (!requester || !answer)
+    goto done;
+  if (rnc_host_await_path(host, destination, (unsigned)(wait * 1000.0), NULL, NULL) != RNC_OK) {
+    fprintf(stderr, "No path to the remote instance\n");
+    goto done;
+  }
+  if (rnc_requester_start(requester, destination, &id, path, request, request_size, 1,
+                          (uint64_t)(wait * 1000.0), (uint64_t)time(NULL), now_ms()) != RNC_OK) {
+    fprintf(stderr, "Could not start the remote request\n");
+    goto done;
+  }
+  started = now_ms();
+  while (now_ms() - started < (unsigned long)(wait * 1000.0) + 2000ul) {
+    rnc_host_event event;
+    uint64_t unix_now = (uint64_t)time(NULL), now = now_ms();
+    if (rnc_host_step(host, 20, unix_now, now) != RNC_OK)
+      break;
+    while (rnc_host_poll(host, &event) == RNC_OK)
+      if (event.type == RNC_HOST_NODE && event.node.type == RNC_NODE_LOCAL)
+        (void)rnc_requester_input(requester, &event.node, unix_now, now);
+    (void)rnc_requester_tick(requester, unix_now, now_ms());
+    if (rnc_requester_poll(requester, &result, answer, 1u << 20) == RNC_OK) {
+      reader r;
+      if (result.status != RNC_REQUESTER_DONE) {
+        fprintf(stderr, "The remote request failed. Likely an authentication failure.\n");
+        break;
+      }
+      out->pool = calloc(POOL, sizeof(val));
+      r.p = answer;
+      r.end = answer + result.size;
+      r.pool = out->pool;
+      r.used = 0;
+      r.cap = POOL;
+      if (!out->pool || !parse(&r, &out->root, 0)) {
+        fprintf(stderr, "Unreadable response from the remote instance\n");
+        break;
+      }
+      out->data = answer; /* the parsed values point into it */
+      answer = NULL;
+      ok = 1;
+      break;
+    }
+  }
+done:
+  free(answer);
+  rnc_requester_free(requester);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  if (have_id)
+    rnc_identity_clear(&id);
+  if (!ok) {
+    free(out->pool);
+    memset(out, 0, sizeof(*out));
+  }
+  return ok;
+}
+/* get_request, answered by the remote instance when -R is given. */
+static int remote_get(const char *method, const uint8_t *dest, long max_hops, reply *out) {
+  uint8_t buf[128];
+  rnc_rpc_writer w;
+  size_t n;
+  int status = !strcmp(method, "interface_stats");
+  rnc_rpc_writer_init(&w, buf, sizeof(buf));
+  if (status) {
+    (void)rnc_rpc_write_array(&w, 1);
+    (void)rnc_rpc_write_bool(&w, 0);
+  } else if (!strcmp(method, "path_table") || !strcmp(method, "rate_table")) {
+    int table = !strcmp(method, "path_table");
+    (void)rnc_rpc_write_array(&w, table ? 3 : 2);
+    (void)rnc_rpc_write_string(&w, table ? "table" : "rates");
+    if (dest)
+      (void)rnc_rpc_write_bin(&w, dest, 16);
+    else
+      (void)rnc_rpc_write_nil(&w);
+    if (table) {
+      if (max_hops > 0)
+        (void)rnc_rpc_write_uint(&w, (uint64_t)max_hops);
+      else
+        (void)rnc_rpc_write_nil(&w);
+    }
+  } else {
+    fprintf(stderr, "%s is not available from a remote instance\n", method);
+    return 0;
+  }
+  if (rnc_rpc_writer_finish(&w, &n) != RNC_OK)
+    return 0;
+  if (!remote_call(status ? "/status" : "/path", buf, n, out))
+    return 0;
+  if (status) { /* [statistics, link count]: the statistics are what the local call returns */
+    if (out->root.type != V_ARR || !out->root.n) {
+      fprintf(stderr, "Unreadable response from the remote instance\n");
+      reply_free(out);
+      return 0;
+    }
+    out->root = out->root.kids[0];
+  }
+  return 1;
+}
 static int get_request(const target *t, const char *method, const uint8_t *dest,
                        long max_hops, reply *out) {
   uint8_t buf[256];
   rnc_rpc_writer w;
   size_t n, pairs = 1 + (dest ? 1 : 0) + (max_hops > 0 ? 1 : 0);
+  if (remote.hash)
+    return remote_get(method, dest, max_hops, out);
   rnc_rpc_writer_init(&w, buf, sizeof(buf));
   (void)rnc_rpc_write_map(&w, pairs);
   (void)rnc_rpc_write_string(&w, "get");
@@ -392,6 +567,10 @@ static void read_config(const char *path, conn *c, char *rpc_key, size_t size) {
 static int make_target(conn *c, target *t) {
   rnc_identity id;
   char config_key[RNC_RPC_KEY_MAX * 2 + 2];
+  if (remote.hash) { /* answered by the remote instance: no local RPC key is needed */
+    memset(t, 0, sizeof(*t));
+    return 1;
+  }
   if (c->config)
     read_config(c->config, c, config_key, sizeof(config_key));
   t->port = c->port ? (unsigned)c->port : DEFAULT_CONTROL_PORT;
@@ -422,6 +601,24 @@ static int make_target(conn *c, target *t) {
 /* shared option handling; returns 1 if argv[*i] was consumed */
 static int conn_option(conn *c, int argc, char **argv, int *i) {
   const char *a = argv[*i];
+  if (!strcmp(a, "-R") || !strcmp(a, "--attach") || !strcmp(a, "--mgmt-identity") || !strcmp(a, "-w")) {
+    if (*i + 1 >= argc)
+      return -1;
+    ++*i;
+    if (!strcmp(a, "-R"))
+      remote.hash = argv[*i];
+    else if (!strcmp(a, "--attach"))
+      remote.attach = argv[*i];
+    else if (!strcmp(a, "--mgmt-identity"))
+      remote.identity = argv[*i];
+    else {
+      char *end;
+      remote.wait = strtod(argv[*i], &end);
+      if (*end || !(remote.wait > 0) || remote.wait > 3600)
+        return -1;
+    }
+    return 1;
+  }
   if (!strcmp(a, "--port") || !strcmp(a, "--identity") ||
       !strcmp(a, "--config") || !strcmp(a, "--rpc-key")) {
     if (*i + 1 >= argc)

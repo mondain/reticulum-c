@@ -109,7 +109,7 @@ static rnc_result mgmt_path(void *context, const char *path,
     write_path_table(&w, m->host, m->node, has_max, max_hops, only,
                      monotonic_ms());
   else if (command_size == 5 && !memcmp(request + 2, "rates", 5))
-    (void)rnc_rpc_write_array(&w, 0); /* no rate table is kept */
+    write_rate_table(&w, m->node, monotonic_ms(), only);
   else
     return RNC_AGAIN;
   return rnc_rpc_writer_finish(&w, written);

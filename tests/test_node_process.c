@@ -3170,6 +3170,68 @@ static void x_tools(const char *exe, const char *x) {
   remove_tree(dir);
   puts("x tool tests passed");
 }
+/* rnstatus -R and rnpath -R equivalents: reticulum-c-ctl asks another instance's management destination. */
+static void ctl_remote_test(const char *exe, const char *ctl) {
+  char dir[] = "/tmp/rnc-node-rem-XXXXXX", cfg[256], key[256], admin[256], idb[300], idc[300], attach[64],
+       hash_b[33], hash_c[33], daemon[33], out[16384], text[1024], announced[33];
+  unsigned port = unused_port(), entropy = 5, waited;
+  uint8_t seed_key[64] = {9}, raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+  rnc_identity announcer;
+  rnc_packet announce;
+  size_t raw_size, framed_size, k;
+  int fd, feed;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/node-identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(idb, sizeof(idb), "%s/id_b", dir) > 0);
+  CHECK(snprintf(idc, sizeof(idc), "%s/id_c", dir) > 0);
+  CHECK(snprintf(attach, sizeof(attach), "127.0.0.1:%u", port) > 0);
+  write_identity(idb, 31, hash_b);
+  write_identity(idc, 71, hash_c);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\nenable_remote_management = Yes\n"
+                 "remote_management_allowed = %s\n[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 hash_b, port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, daemon);
+  /* give the daemon one path to report */
+  CHECK(rnc_identity_from_private(&announcer, seed_key) == RNC_OK &&
+        rnc_announce_create(&announcer, "reticulum_c.ctl.remote", NULL, 0, (uint64_t)time(NULL), rng, &entropy,
+                            &announce) == RNC_OK);
+  CHECK(rnc_packet_encode(&announce, raw, sizeof(raw), &raw_size) == RNC_OK &&
+        rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, raw_size, framed, sizeof(framed), &framed_size) == RNC_OK);
+  for (k = 0; k < 16; ++k)
+    CHECK(snprintf(announced + 2 * k, 3, "%02x", announce.destination[k]) == 2);
+  feed = tcp_connect(port);
+  CHECK(write(feed, framed, framed_size) == (ssize_t)framed_size);
+  for (waited = 0; waited < 100 && !admin_has_path(admin, announced); ++waited) {
+    struct timespec ts = {0, 50000000};
+    nanosleep(&ts, NULL);
+  }
+  CHECK(waited < 100);
+  /* the allowed identity gets statistics and the path table; the filter and the hop limit still work */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-R", daemon, "--attach", attach, "--mgmt-identity", idb, "-w", "20",
+                NULL) == 0 &&
+        strstr(out, "Status") && strstr(out, "Transport Instance <"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-t", "-R", daemon, "--attach", attach, "--mgmt-identity", idb, "-w", "20",
+                NULL) == 0 &&
+        strstr(out, announced));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-r", "-R", daemon, "--attach", attach, "--mgmt-identity", idb, "-w", "20",
+                NULL) == 0);
+  /* an identity that is not on the allow list is refused */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-R", daemon, "--attach", attach, "--mgmt-identity", idc, "-w", "8",
+                NULL) != 0);
+  /* a remote query needs somewhere to attach and an identity */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-R", daemon, NULL) != 0);
+  close(feed);
+  stop(p, fd);
+  remove_tree(dir);
+  puts("ctl remote tests passed");
+}
 /* The stand-alone examples (examples/example_announce.c, example_request.c) against the daemon. */
 static void examples_test(const char *exe, const char *announce, const char *request) {
   char dir[] = "/tmp/rnc-node-ex-XXXXXX", cfg[256], key[256], admin[256], id_a[300], id_b[300], id_s[300],
@@ -4014,6 +4076,8 @@ int main(int argc, char **argv) {
     panic_on_interface(argv[1]);
   else if (!strcmp(argv[2], "sh_tools") && argc == 4)
     sh_tools(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "ctl_remote") && argc == 4)
+    ctl_remote_test(argv[1], argv[3]);
   else if (!strcmp(argv[2], "examples") && argc == 5)
     examples_test(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "x_tools") && argc == 4)
