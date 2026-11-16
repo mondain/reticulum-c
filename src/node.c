@@ -1942,6 +1942,31 @@ rnc_result rnc_node_set_implicit_proofs(rnc_node *n, int implicit) {
 int rnc_node_implicit_proofs(const rnc_node *n) {
   return n ? !n->explicit_proofs : 1;
 }
+rnc_result rnc_node_send_single(rnc_node *n, const uint8_t destination[16], const void *data, size_t size,
+                                uint64_t timeout, uint64_t unix_seconds, uint64_t now, uint8_t hash[32]) {
+  node_route *route;
+  rnc_packet packet;
+  rnc_result r;
+  size_t written = 0;
+  if (!n || !destination || (!data && size) || !hash || now < n->now)
+    return RNC_INVALID;
+  route = route_find(n, destination, now);
+  if (!route)
+    return RNC_STATE;
+  memset(&packet, 0, sizeof(packet));
+  memcpy(packet.destination, destination, 16);
+  packet.flags = (uint8_t)((RNC_SINGLE << 2) | RNC_DATA);
+  if (route->route.announce.has_ratchet)
+    r = rnc_ratchet_encrypt(&route->route.announce.identity, route->route.announce.ratchet, data, size, n->random,
+                            n->random_context, packet.data, sizeof(packet.data), &written);
+  else
+    r = rnc_identity_encrypt(&route->route.announce.identity, data, size, n->random, n->random_context, packet.data,
+                             sizeof(packet.data), &written);
+  if (r != RNC_OK)
+    return r;
+  packet.data_size = written;
+  return rnc_node_send_tracked(n, &packet, timeout, unix_seconds, now, hash);
+}
 rnc_result rnc_node_send_tracked(rnc_node *n, const rnc_packet *packet,
                                  uint64_t timeout, uint64_t unix_seconds,
                                  uint64_t now, uint8_t hash[32]) {

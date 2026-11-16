@@ -1,3 +1,4 @@
+#include <reticulum_c/rnc_security.h>
 #include <reticulum_c/rnc_node.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,8 @@ typedef struct pair {
   rnc_node *a, *b;
   rnc_identity ida, idb;
   uint8_t dest[16];
+  rnc_ratchet_key keys[1];
+  rnc_ratchets store;
 } pair;
 static int next(rnc_node *n, rnc_node_event_type type, rnc_node_event *out) {
   rnc_node_event e;
@@ -52,7 +55,31 @@ static pair setup(void) {
   CHECK(rnc_node_input(p.a, 1, &e.packet, 1000, 20) == RNC_OK);
   return p;
 }
+/* like setup, but B announces a ratchet */
+static void setup_ratchet(pair *out) {
+  pair p; /* the ratchet store points at the keys inside the struct, so it is built in place below */
+  rnc_node_event e;
+  uint8_t pub[32];
+  memset(&p, 0, sizeof(p));
+  CHECK(rnc_identity_generate(&p.ida, rng, NULL) == RNC_OK);
+  CHECK(rnc_identity_generate(&p.idb, rng, NULL) == RNC_OK);
+  p.a = rnc_node_new(&p.ida, 0, rng, NULL);
+  p.b = rnc_node_new(&p.idb, 0, rng, NULL);
+  CHECK(p.a && p.b);
+  CHECK(rnc_node_add_interface(p.a, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_add_interface(p.b, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_add_destination(p.b, &p.idb, "receipt.test", NULL, 0, p.dest) == RNC_OK);
+  *out = p;
+  CHECK(rnc_ratchets_init(&out->store, &out->idb, out->keys, 1, 1) == RNC_OK);
+  CHECK(rnc_ratchets_rotate(&out->store, 1000, rng, NULL) == RNC_OK && rnc_ratchets_public(&out->store, pub) == RNC_OK);
+  CHECK(rnc_node_set_ratchet(p.b, p.dest, pub) == RNC_OK);
+  CHECK(rnc_node_announce(p.b, p.dest, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_tick(p.b, 1000, 10) == RNC_OK);
+  CHECK(next(p.b, RNC_NODE_SEND, &e));
+  CHECK(rnc_node_input(p.a, 1, &e.packet, 1000, 20) == RNC_OK);
+}
 static void release(pair *p) {
+  rnc_ratchets_clear(&p->store);
   rnc_node_free(p->a);
   rnc_node_free(p->b);
 }
@@ -258,6 +285,60 @@ static void explicit_proof(void) {
   CHECK(rnc_node_set_implicit_proofs(p.b, 2) == RNC_INVALID);
   release(&p);
 }
+/* rnc_node_send_single: the payload reaches the destination decryptable, a proof delivers the receipt, and a
+ * second call with the same data (Packet.resend) is a new packet with a new hash and different ciphertext. */
+static void send_single(void) {
+  pair p = setup();
+  rnc_node_event e, proof, second_event;
+  uint8_t hash[32], again[32], plain[64];
+  size_t plain_size;
+  rnc_receipt_status status;
+  CHECK(rnc_node_set_proof_strategy(p.b, p.dest, RNC_PROVE_ALL) == RNC_OK);
+  CHECK(rnc_node_send_single(p.a, p.dest, "echo me", 7, 5000, 1000, 100, hash) == RNC_OK);
+  CHECK(next(p.a, RNC_NODE_SEND, &e));
+  CHECK(e.packet.data_size > 7u && memcmp(e.packet.data, "echo me", 7)); /* not sent in the clear */
+  CHECK(rnc_node_input(p.b, 1, &e.packet, 1000, 130) == RNC_OK);
+  CHECK(next(p.b, RNC_NODE_LOCAL, &second_event));
+  CHECK(rnc_identity_decrypt(&p.idb, second_event.packet.data, second_event.packet.data_size, plain, sizeof(plain),
+                             &plain_size) == RNC_OK && plain_size == 7 && !memcmp(plain, "echo me", 7));
+  CHECK(next(p.b, RNC_NODE_SEND, &proof));
+  CHECK(rnc_node_input(p.a, 1, &proof.packet, 1000, 160) == RNC_OK);
+  CHECK(next(p.a, RNC_NODE_RECEIPT, &e) && e.receipt_status == RNC_RECEIPT_DELIVERED &&
+        !memcmp(e.receipt_hash, hash, 32));
+  /* the resend */
+  CHECK(rnc_node_send_single(p.a, p.dest, "echo me", 7, 5000, 1000, 200, again) == RNC_OK);
+  CHECK(memcmp(hash, again, 32));
+  CHECK(rnc_node_receipt_status(p.a, again, &status, NULL) == RNC_OK && status == RNC_RECEIPT_SENT);
+  CHECK(next(p.a, RNC_NODE_SEND, &e));
+  CHECK(e.packet.data_size != second_event.packet.data_size ||
+        memcmp(e.packet.data, second_event.packet.data, e.packet.data_size));
+  /* no route, no packet; too much data does not fit */
+  {
+    uint8_t unknown[16] = {1}, big[600] = {0};
+    CHECK(rnc_node_send_single(p.a, unknown, "x", 1, 5000, 1000, 300, again) == RNC_STATE);
+    CHECK(rnc_node_send_single(p.a, p.dest, big, sizeof(big), 5000, 1000, 300, again) != RNC_OK);
+    CHECK(rnc_node_send_single(p.a, p.dest, NULL, 1, 5000, 1000, 300, again) == RNC_INVALID);
+  }
+  release(&p);
+}
+/* A destination that announced a ratchet is written to with that ratchet, not its identity key. */
+static void send_single_ratchet(void) {
+  pair p;
+  setup_ratchet(&p);
+  rnc_node_event e;
+  uint8_t hash[32], plain[64];
+  size_t plain_size;
+  CHECK(rnc_node_send_single(p.a, p.dest, "ratcheted", 9, 5000, 1000, 100, hash) == RNC_OK);
+  CHECK(next(p.a, RNC_NODE_SEND, &e));
+  CHECK(rnc_identity_decrypt(&p.idb, e.packet.data, e.packet.data_size, plain, sizeof(plain), &plain_size) !=
+        RNC_OK); /* the static identity key cannot open it */
+  {
+    uint8_t used[10];
+    CHECK(rnc_ratchets_decrypt(&p.store, &p.idb, 1, e.packet.data, e.packet.data_size, plain, sizeof(plain),
+                               &plain_size, used) == RNC_OK && plain_size == 9 && !memcmp(plain, "ratcheted", 9));
+  }
+  release(&p);
+}
 int main(int argc, char **argv) {
   if (argc != 2)
     return 2;
@@ -277,6 +358,10 @@ int main(int argc, char **argv) {
     recycle();
   else if (!strcmp(argv[1], "default_timeout"))
     default_timeout();
+  else if (!strcmp(argv[1], "send_single"))
+    send_single();
+  else if (!strcmp(argv[1], "send_single_ratchet"))
+    send_single_ratchet();
   else
     return 2;
   return 0;

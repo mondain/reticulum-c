@@ -1500,7 +1500,7 @@ typedef struct live_proc {
   char buf[16384];
   size_t used;
 } live_proc;
-static void live_spawn(live_proc *p, const char *python, const char *reference, const char *script, const char *dir) {
+static void live_spawn_argv(live_proc *p, const char *pythonpath, char *const argv[]) {
   int to[2], from[2];
   CHECK(!pipe(to) && !pipe(from));
   p->pid = fork();
@@ -1508,8 +1508,8 @@ static void live_spawn(live_proc *p, const char *python, const char *reference, 
   if (!p->pid) {
     CHECK(dup2(to[0], STDIN_FILENO) >= 0 && dup2(from[1], STDOUT_FILENO) >= 0 && dup2(from[1], STDERR_FILENO) >= 0);
     close(to[0]); close(to[1]); close(from[0]); close(from[1]);
-    CHECK(!setenv("PYTHONPATH", reference, 1));
-    execl(python, python, "-c", script, dir, (char *)NULL);
+    CHECK(!setenv("PYTHONPATH", pythonpath, 1));
+    execv(argv[0], argv);
     _exit(127);
   }
   close(to[0]);
@@ -1518,6 +1518,10 @@ static void live_spawn(live_proc *p, const char *python, const char *reference, 
   p->out = from[0];
   p->used = 0;
   p->buf[0] = 0;
+}
+static void live_spawn(live_proc *p, const char *python, const char *reference, const char *script, const char *dir) {
+  char *argv[] = {(char *)python, "-c", (char *)script, (char *)dir, NULL};
+  live_spawn_argv(p, reference, argv);
 }
 static void live_send(live_proc *p, const char *line) {
   signal(SIGPIPE, SIG_IGN);
@@ -2124,6 +2128,92 @@ static void status_discovered(const char *ctl, const char *reference, const char
   }
   remove_tree(dir);
   puts(reference ? "rnstatus -d / -D match the reference" : "rnstatus -d / -D tests passed");
+}
+/* Echo: this example client against the reference's Echo.py server, and the reference's Echo.py client against
+ * this example server, over a daemon that joins them. */
+static pid_t spawn_cp(const char *cp, int *out, char *const *args);
+static void read_until(int fd, const char *needle, char *buf, size_t size, unsigned seconds);
+static int run_cp(const char *cp, char *out, size_t size, char *const *args);
+static void stop_cp(pid_t pid, int fd);
+static int live_find(live_proc *p, const char *needle, unsigned ms, char *line, size_t size) {
+  uint64_t end = now_ms() + ms;
+  while (now_ms() < end) {
+    if (live_expect(p, "", 200, line, size) && strstr(line, needle))
+      return 1;
+  }
+  return 0;
+}
+static void echo_reference(const char *exe, const char *echo, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-echo-XXXXXX", cfg[400], key[400], admin[400], text[1024], identity[33], id_file[400],
+       id_file2[400], connect[64], dir[500], line[2048], script[500], out[8192], hash[40];
+  unsigned port = unused_port();
+  pid_t daemon;
+  int dfd;
+  live_proc ref;
+  const char *at;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", base) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", base) > 0);
+  CHECK(snprintf(id_file, sizeof(id_file), "%s/echo_id", base) > 0);
+  CHECK(snprintf(id_file2, sizeof(id_file2), "%s/echo_id2", base) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(script, sizeof(script), "%s/Examples/Echo.py", reference) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  /* this client, the reference server */
+  {
+    char *argv[] = {(char *)python, script, "-s", "--config", dir, NULL};
+    char *client[] = {(char *)echo, "--connect", connect, "--identity", id_file, "--count", "3", "client", hash, NULL};
+    live_peer_config(dir, sizeof(dir), base, "refserver", port);
+    live_spawn_argv(&ref, reference, argv);
+    CHECK(live_find(&ref, "Echo server <", 30000, line, sizeof(line)));
+    at = strstr(line, "Echo server <");
+    CHECK(sscanf(at, "Echo server <%32[0-9a-f]>", hash) == 1);
+    live_send(&ref, "\n"); /* the reference server announces on Enter */
+    live_sleep(2000);
+    memset(out, 0, sizeof(out));
+    CHECK(run_cp(echo, out, sizeof(out), client) == 0);
+    CHECK(strstr(out, "Valid reply received from") && strstr(out, hash) && strstr(out, "round-trip time is"));
+    live_end(&ref);
+  }
+  /* the reference client, this server */
+  {
+    int sfd;
+    pid_t server;
+    char *serve[] = {(char *)echo, "--connect", connect, "--identity", id_file2, "server", NULL};
+    server = spawn_cp(echo, &sfd, serve);
+    memset(line, 0, sizeof(line));
+    read_until(sfd, "Echo server <", line, sizeof(line), 10);
+    read_until(sfd, ">", line, sizeof(line), 10);
+    at = strstr(line, "Echo server <");
+    CHECK(at && sscanf(at, "Echo server <%32[0-9a-f]>", hash) == 1);
+    {
+      char *argv[] = {(char *)python, script, "--config", dir, "-t", "10", hash, NULL};
+      uint64_t end = now_ms() + 40000;
+      int replied = 0;
+      live_peer_config(dir, sizeof(dir), base, "refclient", port);
+      live_spawn_argv(&ref, reference, argv);
+      live_sleep(4000);
+      while (now_ms() < end && !replied) {
+        live_send(&ref, "\n"); /* Enter: request the path, then send once it is known */
+        replied = live_find(&ref, "Valid reply received from", 3000, line, sizeof(line));
+      }
+      CHECK(replied);
+      live_end(&ref);
+    }
+    memset(line, 0, sizeof(line));
+    read_until(sfd, "proof sent", line, sizeof(line), 10);
+    CHECK(strstr(line, "Received packet from echo client, proof sent"));
+    stop_cp(server, sfd);
+  }
+  stop(daemon, dfd);
+  remove_tree(base);
+  puts("echo example matches the reference");
 }
 /* The shared instance as the reference does it on Linux: no shared_instance_type, so abstract Unix sockets named
  * by instance_name, for both the data port and the RPC port. Clients find it by name (ctl through --config, the
@@ -4536,7 +4626,7 @@ static void ctl_remote_test(const char *exe, const char *ctl) {
   puts("ctl remote tests passed");
 }
 /* The stand-alone examples (examples/example_announce.c, example_request.c) against the daemon. */
-static void examples_test(const char *exe, const char *announce, const char *request) {
+static void examples_test(const char *exe, const char *announce, const char *request, const char *echo) {
   char dir[] = "/tmp/rnc-node-ex-XXXXXX", cfg[256], key[256], admin[256], id_a[300], id_b[300], id_s[300],
        connect[64], dest[33], out[4096], listen_out[4096], text[1024], identity[33], hash[33];
   unsigned port = unused_port();
@@ -4593,6 +4683,28 @@ static void examples_test(const char *exe, const char *announce, const char *req
     CHECK(strstr(out, "dlrow olleh"));
     stop_cp(server, sfd);
     CHECK(run_cp(request, out, sizeof(out), (char *[]){(char *)request, "--connect", connect, "--identity", id_a, "client", "00000000000000000000000000000000", "x", NULL}) != 0);
+  }
+  /* echo: the server proves, the client reports the round trip */
+  {
+    char id_e[300], echo_dest[33];
+    char *serve_args[] = {(char *)echo, "--connect", connect, "--identity", id_s, "server", NULL};
+    char *ping_args[] = {(char *)echo, "--connect", connect, "--identity", id_a, "--count", "2", "client", echo_dest, NULL};
+    (void)id_e;
+    server = spawn_cp(echo, &sfd, serve_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(sfd, "Echo server <", listen_out, sizeof(listen_out), 10);
+    read_until(sfd, ">", listen_out, sizeof(listen_out), 10);
+    parse_after(listen_out, "Echo server <", echo_dest);
+    CHECK(run_cp(echo, out, sizeof(out), ping_args) == 0);
+    CHECK(strstr(out, "Sent echo request to <") && strstr(out, "Valid reply received from <") &&
+          strstr(out, "round-trip time is"));
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(sfd, "proof sent", listen_out, sizeof(listen_out), 10);
+    CHECK(strstr(listen_out, "Received packet from echo client, proof sent"));
+    stop_cp(server, sfd);
+    /* nobody there: the client reports it and fails */
+    CHECK(run_cp(echo, out, sizeof(out), (char *[]){(char *)echo, "--connect", connect, "--identity", id_a, "client",
+                                                    "00000000000000000000000000000000", NULL}) != 0);
   }
   stop(daemon, dfd);
   remove_tree(dir);
@@ -5451,8 +5563,8 @@ int main(int argc, char **argv) {
     sh_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "ctl_remote") && argc == 4)
     ctl_remote_test(argv[1], argv[3]);
-  else if (!strcmp(argv[2], "examples") && argc == 5)
-    examples_test(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "examples") && argc == 6)
+    examples_test(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "x_tools") && argc == 4)
     x_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "cp_ref") && argc == 6)
@@ -5493,6 +5605,8 @@ int main(int argc, char **argv) {
     status_discovered(argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "disc_list_ref") && argc == 6)
     status_discovered(argv[3], argv[4], argv[5]);
+  else if (!strcmp(argv[2], "echo_ref") && argc == 6)
+    echo_reference(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "shared_unix") && argc == 4)
     shared_unix(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "shared_unix_ref") && argc == 6)
