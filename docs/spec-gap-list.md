@@ -22,6 +22,12 @@ Concrete remaining gaps include:
 
 Host RNode/RNode Multi adapters remain unverified against real stock RNode hardware. Separately, this project's native MCU LoRa firmware has a short 2026-11-14 bench exchange on a T-Echo leaf and T-Beam Supreme SX1262 gateway at 915 MHz: three-hop host access, a 10-byte `/echo` reply and a 116-byte `/info` response, with one request retry. This does not establish stock-RNode interoperability, range or sustained-load reliability; see [mcu/radio/README.txt](../mcu/radio/README.txt).
 
+The native MCU firmware (PlatformIO boards, see [mcu/README.txt](../mcu/README.txt)) also has three features that are not reference-Reticulum features and so have no row in the tables below:
+
+- **RNode mode** (`set mode rnode`): the board speaks the stock RNode KISS protocol over USB, so this project's host RNode adapter, and in principle other RNode clients, can drive its radio. Nothing is transmitted until the host has set all five radio settings; a LEAVE, RESET or board reset turns the radio off; a 1 percent per hour airtime budget stays active. Verified on 2026-11-14 with a T-Echo driven by this project's host adapter against a T-Beam Supreme (announce delivered, `radio_ready`). Not included: stock RNode EEPROM provisioning, signing and firmware-update flows (so `rnodeconf` cannot flash or provision this firmware), battery and temperature reports. The generic ESP-IDF image ignores the mode.
+- **Bluetooth LE** (all PlatformIO boards): the same KISS stream over the Nordic UART service, off until a six digit PIN is set (`set ble.pin`), no access without pairing. Verified on 2026-11-15 with Sideband on an Android phone and a T-Echo (connected, frequency shown, packet counts rising, RSSI -46 dBm and SNR 12.5 dB on the far board). Not tested on hardware: the ESP32 and ESP32-S3 NimBLE builds, other phones and computers.
+- **Status screens** (LilyGo T-Echo e-paper, T-Beam Supreme OLED): a read-only status page with a PIN row only while pairing is needed. Layout, PIN rule and refresh policy are unit tested; both screens were seen on hardware on 2026-11-15. Not checked on hardware: the no-PIN case, the 5 minute full refresh and the Supreme PIN rows.
+
 ## 2. Protocol (manual ch6, ch9)
 
 | Status | Feature | Notes |
@@ -158,7 +164,7 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 | RNode LoRa | IMPL | Radio setup over KISS, `radio_ready` ack, flow control, serial reopen |
 | RNode LoRa | IMPL | Detection (DETECT, firmware version, platform and MCU asked first; the radio is configured when the device answers, and the interface drops after 5 s of silence) and the firmware check (at least 1.52, otherwise the interface is refused and not retried) |
 | RNode LoRa | IMPL | RSSI (dBm), SNR (dB) and link quality (percent from SNR and spreading factor) of the last frame: `rnc_host_status`, on each host event for a received packet, and the RPC interface stats (`rssi`, `snr`, `q`, shown by `reticulum-c-ctl status`) |
-| RNode LoRa | MISS | BLE RNode, battery, temperature and channel statistics |
+| RNode LoRa | MISS | The host adapter reaching an RNode over BLE (the firmware serves BLE, see above), battery, temperature and channel statistics |
 | RNode LoRa | IMPL | WiFi RNode over TCP: `port = tcp://host` (port 7633, or `rnc_host_config.port`); the same KISS protocol, detection and radio setup once the socket opens, a detection ping after 3.5 s of silence, reconnect after a drop |
 | RNode Multi | IMPL | `RNodeMultiInterface`: one serial device, radios found by the device itself (`CMD_INTERFACES`) and selected with `CMD_SEL_INT` before each command and frame, `[[[radio]]]` sections (`vport`, frequency, bandwidth, txpower, spreadingfactor, codingrate, flow_control, airtime limits, outgoing, interface_enabled), per radio RSSI/SNR/quality, firmware 1.74 or newer, 5 s reconnect. Command streams match the unmodified reference against the same emulated device; not tested on real hardware |
 | RNode Multi | MISS | The shared station-ID timer (each radio keeps its own), display/framebuffer, TCP/BLE transport |
