@@ -214,8 +214,12 @@ static int command(uint8_t op, const uint8_t *data, size_t size, uint32_t checks
  * before the status (copied to reply), or -1. */
 static int check_command(const char *what, uint8_t op, const uint8_t *data, size_t size, uint32_t checksum,
                          unsigned timeout_ms, uint8_t *reply, size_t reply_cap) {
-  uint8_t buf[256];
+  uint8_t buf[256] = {0};
   int n = command(op, data, size, checksum, timeout_ms, NULL, buf, sizeof(buf));
+  if (n > (int)sizeof(buf)) { /* command() copies nothing from a reply this long */
+    fprintf(stderr, "Failed to %s: the loader's answer is too long (%d bytes)\n", what, n);
+    return -1;
+  }
   if (n < STATUS_BYTES) {
     fprintf(stderr, "Failed to %s: %s\n", what, n < 0 ? "no answer from the loader" : "a short answer");
     return -1;
