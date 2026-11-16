@@ -2213,6 +2213,39 @@ static void cli_tools_id(const char *ctl, const char *dir) {
     CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-V", sig, "--raw", NULL) == 0);
     CHECK(!unlink(sig));
   }
+  /* signed messages (rnid -S): the text travels inside the .rsm, which validates without the original */
+  {
+    char base[300], rsm[320], msgfile[300], other[300], other_hash[33], bytes[1024];
+    size_t size;
+    CHECK(snprintf(base, sizeof(base), "%s/note", dir) > 0 && snprintf(rsm, sizeof(rsm), "%s.rsm", base) > 0);
+    CHECK(snprintf(msgfile, sizeof(msgfile), "%s/note.txt", dir) > 0 && snprintf(other, sizeof(other), "%s/other2.id", dir) > 0);
+    write_identity(other, 141, other_hash);
+    (void)unlink(rsm);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "meet at noon, bring maps", "-w", base, NULL) == 0 &&
+          strstr(out, "Message signed with") && strstr(out, hex) && strstr(out, "note.rsm"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", rsm, NULL) == 0 &&
+          strstr(out, "Signature is valid, the following message was signed by") && strstr(out, hex) &&
+          strstr(out, "meet at noon, bring maps"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-V", rsm, NULL) == 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", other, "-V", rsm, NULL) == 10 && strstr(out, "NOT signed by") &&
+          !strstr(out, "meet at noon"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "again", "-w", base, NULL) == 11); /* not overwritten */
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "again", "-w", base, "-f", NULL) == 0);
+    /* a flipped byte in the stored text no longer matches the signed hash */
+    size = file_read(rsm, bytes, sizeof(bytes));
+    CHECK(size > 64 + 100);
+    bytes[size - 1] ^= 1;
+    file_bytes(rsm, bytes, size);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", rsm, NULL) == 10 && strstr(out, "Invalid signature"));
+    /* the message from a file; text and file together, or no write path, are refused */
+    file_bytes(msgfile, "from a file\nsecond line", 23);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "-r", msgfile, "-w", base, "-f", NULL) == 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", rsm, NULL) == 0 && strstr(out, "from a file\nsecond line"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "x", "-r", msgfile, "-w", base, "-f", NULL) == 250);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "no destination", NULL) == 250);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "x", "-w", base, "-f", "-b", NULL) == 250);
+    CHECK(!unlink(rsm) && !unlink(msgfile));
+  }
   /* base32 and base64 output and import (rnid -B, -b, -m, -M); the private key is the bytes 0..63 so the
    * expected text is fixed */
   {
@@ -2486,6 +2519,22 @@ static void cli_id_reference(const char *ctl, const char *reference,
   CHECK(!unlink(sig));
   ref_args[4] = "-p"; ref_args[5] = "-H"; ref_args[6] = "example.aspect"; ref_args[7] = NULL;
   ref_args[2] = "-i"; ref_args[3] = idfile;
+  /* signed messages: the reference validates ours, and ours validates the reference's */
+  {
+    char base[320], rsm[340];
+    CHECK(snprintf(base, sizeof(base), "%s/refnote", dir) > 0 && snprintf(rsm, sizeof(rsm), "%s.rsm", base) > 0);
+    CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-S", "hello from ours", "-w", base, NULL) == 0);
+    ref_args[4] = "-V"; ref_args[5] = rsm; ref_args[6] = NULL;
+    reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+    CHECK(strstr(out, "Signature is valid") && strstr(out, hex) && strstr(out, "hello from ours"));
+    CHECK(!unlink(rsm));
+    ref_args[4] = "-S"; ref_args[5] = "hello from the reference"; ref_args[6] = "-w"; ref_args[7] = base;
+    ref_args[8] = NULL;
+    reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+    CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-V", rsm, NULL) == 0 && strstr(ours, "hello from the reference") &&
+          strstr(ours, hex));
+    CHECK(!unlink(rsm));
+  }
   /* ours encrypts, reference decrypts */
   CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-e", data, NULL) == 0);
   ref_args[4] = "-d"; ref_args[5] = enc; ref_args[6] = "-w"; ref_args[7] = dec;
