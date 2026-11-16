@@ -2309,6 +2309,50 @@ static void echo_reference(const char *exe, const char *echo, const char *refere
   remove_tree(base);
   puts("echo example matches the reference");
 }
+/* rnid -a: a reference peer on the instance's other interface hears the announce, with the destination rnid printed. */
+static int ctl_run(const char *ctl, char *out, size_t size, ...);
+static void rnid_announce_reference(const char *exe, const char *ctl, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-rnida-XXXXXX", cfg[400], key[400], admin[400], text[1024], identity[33], idfile[400],
+       dir[500], line[1024], out[4096], dest[40], data_arg[16];
+  unsigned data = unused_port(), control = unused_port(), world = unused_port();
+  pid_t daemon;
+  int dfd;
+  live_proc peer;
+  char *at;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", base) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", base) > 0);
+  CHECK(snprintf(idfile, sizeof(idfile), "%s/announcer.id", base) > 0);
+  CHECK(snprintf(data_arg, sizeof(data_arg), "%u", data) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\n[interfaces]\n[[World]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+                 data, control, world) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  live_peer_config(dir, sizeof(dir), base, "listener", world);
+  live_spawn(&peer, python, reference, live_peer, dir);
+  CHECK(live_expect(&peer, "HASH", 20000, line, sizeof(line)));
+  live_sleep(2500);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-g", idfile, NULL) == 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-a", "example.rnid.interop", "--data-port", data_arg, NULL) == 0);
+  at = strstr(out, "destination <");
+  CHECK(at && sscanf(at, "destination <%32[0-9a-f]>", dest) == 1);
+  {
+    uint64_t end = now_ms() + 15000;
+    int heard = 0;
+    while (now_ms() < end && !heard)
+      heard = live_expect(&peer, "ANN", 300, line, sizeof(line)) && strstr(line, dest);
+    CHECK(heard);
+  }
+  live_end(&peer);
+  stop(daemon, dfd);
+  remove_tree(base);
+  puts("rnid announce is heard by the reference");
+}
 /* The shared instance as the reference does it on Linux: no shared_instance_type, so abstract Unix sockets named
  * by instance_name, for both the data port and the RPC port. Clients find it by name (ctl through --config, the
  * unmodified reference through its own config), and a second daemon cannot take the name. */
@@ -3693,6 +3737,49 @@ static void cli_tools(const char *exe, const char *ctl) {
     CHECK(ctl_run(ctl, out, sizeof(out), "status", "-j", "--port", port_arg, "--identity", keypath, NULL) == 0);
     CHECK(strstr(out, "\"incoming_pr_frequency\"") && strstr(out, "\"rxs\""));
     CHECK(ctl_run(ctl, out, sizeof(out), "status", "-s", "bogus", "--port", port_arg, "--identity", keypath, NULL) != 0);
+  }
+
+  /* rnid -a: the announce of an identity's destination goes out of the instance's other interfaces */
+  {
+    char idfile[300], dest_text[40], *at;
+    int world_fd = tcp_connect(admin_status(admin)), seen = 0, tries;
+    uint8_t raw_in[RNC_MAX_MTU * 2], decoded[RNC_MAX_FRAME];
+    rnc_host_framer framer = {0};
+    CHECK(snprintf(idfile, sizeof(idfile), "%s/announcer.id", dir) > 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-g", idfile, NULL) == 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-a", "example.rnid.test", "--data-port", data_arg, NULL) == 0);
+    at = strstr(out, "Announcing example.rnid.test destination <");
+    CHECK(at && sscanf(at, "Announcing example.rnid.test destination <%32[0-9a-f]>", dest_text) == 1);
+    for (tries = 0; tries < 60 && !seen; ++tries) {
+      struct pollfd pf = {world_fd, POLLIN, 0};
+      CHECK(poll(&pf, 1, 100) >= 0);
+      if (pf.revents & POLLIN) {
+        ssize_t sz = read(world_fd, raw_in, sizeof(raw_in));
+        size_t q, cnt;
+        uint8_t command;
+        CHECK(sz > 0);
+        for (q = 0; q < (size_t)sz; ++q)
+          if (rnc_host_frame_feed(&framer, RNC_HOST_HDLC, raw_in[q], &command, decoded, sizeof(decoded), &cnt) == RNC_OK) {
+            rnc_packet got;
+            rnc_announce verified;
+            char got_hex[33];
+            if (rnc_packet_decode(decoded, cnt, &got) == RNC_OK && (got.flags & 3u) == RNC_ANNOUNCE &&
+                rnc_announce_verify(&got, &verified) == RNC_OK) {
+              hex_of(got.destination, 16, got_hex);
+              if (!strcmp(got_hex, dest_text))
+                seen = 1;
+            }
+          }
+      }
+    }
+    CHECK(seen);
+    /* refusals: no dot in the aspects, no private key, no instance there */
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-a", "nodot", "--data-port", data_arg, NULL) == 9 &&
+          strstr(out, "Invalid destination aspects"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-a", "example.x", "--data-port", "1", NULL) == 254 &&
+          strstr(out, "An error ocurred while attempting to send the announce"));
+    close(world_fd);
+    CHECK(!unlink(idfile));
   }
 
   /* -l: the link table footer */
@@ -5736,6 +5823,8 @@ int main(int argc, char **argv) {
     status_discovered(argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "echo_ref") && argc == 6)
     echo_reference(argv[1], argv[3], argv[4], argv[5]);
+  else if (!strcmp(argv[2], "rnid_announce_ref") && argc == 6)
+    rnid_announce_reference(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "shared_unix") && argc == 4)
     shared_unix(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "shared_unix_ref") && argc == 6)
