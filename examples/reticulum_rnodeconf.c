@@ -15,9 +15,9 @@
  *   --nm A|none   WiFi settings
  *   --trust-key HEX   also accept this DER public key for device signatures
  *
- * Firmware download, flashing, update and extraction, EEPROM provisioning,
- * signing and recovery are not part of this tool: they need the vendor
- * toolchain and the hardware, and nothing here can test them. */
+ * Firmware download, update and extraction, EEPROM provisioning, signing and
+ * recovery are not part of this tool. Writing an image to an ESP32-family board
+ * is reticulum-c-flash (examples/reticulum_flash.c). */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 #ifdef __APPLE__
