@@ -33,6 +33,49 @@ static void query(const char *get, rnc_node *node, rnc_host *host,
   CHECK(rnc_rpc_writer_finish(&w, &n) == RNC_OK);
   CHECK(rpc_response(out, 4096, size, data, n, host, node, cfg, id, 0, 0));
 }
+static int has(const uint8_t *buf, size_t size, const char *text, size_t n);
+/* The remote management "rates" query (rnpath -R -r): the same entries as the local rate table, and
+ * optionally only those of one destination. */
+static void mgmt_rates_test(void) {
+  uint8_t key1[64] = {1}, key2[64] = {2}, other[16] = {0x42}, req[64], out[1024];
+  rnc_identity id, src;
+  rnc_packet a;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_interface_policy policy = {0};
+  rnc_rpc_writer w;
+  size_t n, size;
+  CHECK(rnc_identity_from_private(&id, key1) == RNC_OK && rnc_identity_from_private(&src, key2) == RNC_OK);
+  node = rnc_node_new(&id, 1, rng, NULL);
+  CHECK(node && rnc_node_add_interface(node, 1, 1000000) == RNC_OK && rnc_node_add_interface(node, 2, 1000000) == RNC_OK);
+  policy.announce_rate_target = 60;
+  policy.announce_rate_grace = 3;
+  policy.announce_rate_penalty = 120;
+  CHECK(rnc_node_interface_policy(node, 1, &policy) == RNC_OK);
+  CHECK(rnc_announce_create(&src, "rates.remote", NULL, 0, 1000, rng, NULL, &a) == RNC_OK);
+  CHECK(rnc_node_input(node, 1, &a, 1000, 0) == RNC_OK);
+  host = rnc_host_new(node);
+  CHECK(host);
+  memset(&mgmt, 0, sizeof(mgmt));
+  mgmt.host = host;
+  mgmt.node = node;
+  rnc_rpc_writer_init(&w, req, sizeof(req));
+  CHECK(rnc_rpc_write_array(&w, 2) == RNC_OK && rnc_rpc_write_string(&w, "rates") == RNC_OK && rnc_rpc_write_nil(&w) == RNC_OK &&
+        rnc_rpc_writer_finish(&w, &n) == RNC_OK);
+  CHECK(mgmt_path(&mgmt, "/path", req, n, id.hash, out, sizeof(out), &size) == RNC_OK);
+  CHECK(size > 40 && out[0] == 0x91 && out[1] == 0x85 && has(out, size, "rate_violations", 15));
+  rnc_rpc_writer_init(&w, req, sizeof(req));
+  CHECK(rnc_rpc_write_array(&w, 2) == RNC_OK && rnc_rpc_write_string(&w, "rates") == RNC_OK &&
+        rnc_rpc_write_bin(&w, a.destination, 16) == RNC_OK && rnc_rpc_writer_finish(&w, &n) == RNC_OK);
+  CHECK(mgmt_path(&mgmt, "/path", req, n, id.hash, out, sizeof(out), &size) == RNC_OK && out[0] == 0x91);
+  rnc_rpc_writer_init(&w, req, sizeof(req));
+  CHECK(rnc_rpc_write_array(&w, 2) == RNC_OK && rnc_rpc_write_string(&w, "rates") == RNC_OK &&
+        rnc_rpc_write_bin(&w, other, 16) == RNC_OK && rnc_rpc_writer_finish(&w, &n) == RNC_OK);
+  CHECK(mgmt_path(&mgmt, "/path", req, n, id.hash, out, sizeof(out), &size) == RNC_OK && size == 1 && out[0] == 0x90);
+  memset(&mgmt, 0, sizeof(mgmt));
+  rnc_host_free(host);
+  rnc_node_free(node);
+}
 /* The drop calls over the RPC: a known path answers True and is gone, a second drop False, all_via counts. */
 static void drop_rpc_test(void) {
   uint8_t private_key[64] = {1}, key2[64] = {2}, out[256], data[128];
@@ -349,6 +392,7 @@ int main(void) {
   stable_interface_test();
   internal_mode_config_test();
   drop_rpc_test();
+  mgmt_rates_test();
   gravity_config_test();
   discovery_types_test();
   auto_options_test();

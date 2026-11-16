@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -405,7 +406,7 @@ static rnc_result handle_command(void *context, const char *path,
 /* ---- node setup (as in reticulum-c-cp) ----------------------------------- */
 typedef struct options {
   const char *connect, *identity, *stdin_text;
-  int listen, no_announce, mirror, detailed, no_id, print_identity;
+  int listen, no_announce, mirror, detailed, no_id, print_identity, interactive;
   double timeout, result_timeout; /* result_timeout 0 = none given (-W) */
   long stdout_limit, stderr_limit; /* -1 = none */
   uint8_t allowed[8][16];
@@ -677,6 +678,7 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
                                                            : opt.timeout + REPLY_GRACE_SECONDS + 5.0) *
                                    1000.0);
   int rc;
+  rnc_requester_free(a->requester); /* a second command in interactive mode */
   a->requester = rnc_requester_new(a->node, RNC_RPC_MESSAGE_MAX, secure_random, NULL);
   if (!a->requester)
     return EXIT_NO_REQUEST;
@@ -723,6 +725,39 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
   return rc;
 }
 
+/* -x: one command per line. The prompt shows the last remote exit code when it was not zero; "exit",
+ * "quit" or the end of input leave, "clear" clears the screen. A failed request is reported and the
+ * prompt comes back, as in the reference. */
+static int run_interactive(rnc_identity *id, app *a, const uint8_t destination[16]) {
+  char line[4096];
+  int code = 0;
+  size_t n;
+  opt.mirror = 1; /* run_client then returns the remote exit code */
+  while (!stopping) {
+    if (code > 0 && code < 240)
+      printf("%d", code);
+    fputs("> ", stdout);
+    fflush(stdout);
+    if (!fgets(line, sizeof(line), stdin))
+      break;
+    n = strcspn(line, "\r\n");
+    line[n] = 0;
+    if (!strcasecmp(line, "exit") || !strcasecmp(line, "quit"))
+      break;
+    if (!strcasecmp(line, "clear")) {
+      fputs("\033c", stdout);
+      code = 0;
+      continue;
+    }
+    if (!n)
+      continue;
+    code = run_client(id, a, destination, line);
+    if (code >= 240)
+      code = 0; /* the request itself failed: no exit code to show */
+  }
+  putchar('\n');
+  return 0;
+}
 static void usage(void) {
   fputs("usage: reticulum-c-x --connect HOST:PORT --identity FILE -l -a IDENTITY_HASH... [-b]\n"
         "       reticulum-c-x --connect HOST:PORT --identity FILE [-w SECONDS] [-m] [-d] [-N]\n"
@@ -784,6 +819,8 @@ int main(int argc, char **argv) {
         return usage(), EXIT_USAGE;
     } else if (!strcmp(arg, "-p") || !strcmp(arg, "--print-identity"))
       opt.print_identity = 1;
+    else if (!strcmp(arg, "-x") || !strcmp(arg, "--interactive"))
+      opt.interactive = 1;
     else if (!strcmp(arg, "-a") || !strcmp(arg, "--allowed")) {
       if (opt.allowed_count >= 8 ||
           !hex_decode(VALUE, opt.allowed[opt.allowed_count], 16)) {
@@ -819,7 +856,7 @@ int main(int argc, char **argv) {
   }
   if (!opt.connect || !opt.identity)
     return usage(), EXIT_USAGE;
-  if (opt.listen ? positional_count != 0 : positional_count != 2)
+  if (opt.listen ? positional_count != 0 : positional_count != (opt.interactive ? 1u : 2u))
     return usage(), EXIT_USAGE;
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
@@ -833,7 +870,9 @@ int main(int argc, char **argv) {
   else if (!hex_decode(positional[0], destination, 16)) {
     fprintf(stderr, "The destination must be 32 hexadecimal characters\n");
     rc = EXIT_USAGE;
-  } else
+  } else if (opt.interactive)
+    rc = run_interactive(&id, &a, destination);
+  else
     rc = run_client(&id, &a, destination, positional[1]);
   rnc_responder_free(a.responder);
   rnc_requester_free(a.requester);
