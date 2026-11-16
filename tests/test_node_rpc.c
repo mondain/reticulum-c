@@ -152,6 +152,33 @@ static void discovery_types_test(void) {
   mgmt.identity = NULL;
   CHECK(!unlink(path) && !rmdir(dir));
 }
+static void auto_options_test(void) {
+  char dir[] = "/tmp/rnc-config-auto-XXXXXX", path[256];
+  config c;
+  CHECK(mkdtemp(dir) && snprintf(path, sizeof(path), "%s/config", dir) > 0);
+  config_file(path,
+              "[interfaces]\n[[A]]\ntype=AutoInterface\ndevices=eth0, wlan0\nignored_devices=docker0\n"
+              "discovery_scope=Site\nmulticast_address_type=permanent\n[[B]]\ntype=AutoInterface\n");
+  CHECK(read_config(path, &c));
+  CHECK(!strcmp(c.interfaces[0].host.auto_devices, "eth0, wlan0") &&
+        !strcmp(c.interfaces[0].host.auto_ignored_devices, "docker0") &&
+        c.interfaces[0].host.auto_scope == RNC_AUTO_SCOPE_SITE && c.interfaces[0].host.auto_permanent == 1);
+  CHECK(c.interfaces[1].host.auto_devices == NULL && c.interfaces[1].host.auto_scope == 0 &&
+        c.interfaces[1].host.auto_permanent == 0); /* link scope, temporary: the reference defaults */
+  /* TCP servers and UDP interfaces may name a device instead of an address */
+  config_file(path,
+              "[interfaces]\n[[S]]\ntype=TCPServerInterface\ndevice=lo\nlisten_port=4242\n"
+              "[[U]]\ntype=UDPInterface\ndevice=lo\nlisten_port=4243\n"
+              "[[T]]\ntype=TCPClientInterface\ntarget_host=127.0.0.1\ntarget_port=4244\ni2p_tunneled=Yes\n");
+  CHECK(read_config(path, &c) && !strcmp(c.interfaces[0].host.device, "lo") &&
+        !strcmp(c.interfaces[1].host.device, "lo") && c.interfaces[1].host.port == 4243 &&
+        c.interfaces[2].host.i2p_tunneled == 1);
+  config_file(path, "[interfaces]\n[[A]]\ntype=AutoInterface\ndiscovery_scope=nowhere\n");
+  CHECK(!read_config(path, &c)); /* the reference never sets a scope here and fails; refuse it */
+  config_file(path, "[interfaces]\n[[A]]\ntype=AutoInterface\nmulticast_address_type=odd\n");
+  CHECK(read_config(path, &c) && c.interfaces[0].host.auto_permanent == 0); /* unknown: temporary, as the reference */
+  CHECK(!unlink(path) && !rmdir(dir));
+}
 static void stable_interface_test(void) {
   char dir[] = "/tmp/rnc-config-binding-XXXXXX", path[256];
   config first, reordered, changed;
@@ -324,6 +351,7 @@ int main(void) {
   drop_rpc_test();
   gravity_config_test();
   discovery_types_test();
+  auto_options_test();
   puts("node RPC response tests passed");
   return 0;
 }

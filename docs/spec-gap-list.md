@@ -15,7 +15,7 @@ The implementation covers identities, SINGLE/GROUP/PLAIN destinations, announces
 Concrete remaining gaps include:
 
 1. Announce propagation: pending path responses are not cancelled by a neighbour's rebroadcast the way the reference's shared announce table does (section 2).
-2. Host interface options: Auto device lists/multiple NICs and scope selection, UDP multiple targets, TCP device binding/`i2p_tunneled`, serial locking/hardware flow control, and the I2P/RNode Multi/Weave options listed in section 4.
+2. Host interface options: Auto on several network devices at once (it uses one), address-change handling, and the I2P/RNode Multi/Weave options listed in section 4. Done on 2026-11-15: Auto device lists, scope and address type, `device` on TCP servers and UDP, `i2p_tunneled`. UDP multiple targets, serial hardware flow control and serial port locking are not in the pinned reference (it has one forward address and opens serial ports with `rtscts` off and no locking), so they are not gaps.
 3. Management and discovery details: the remote-management `rates` query is absent. Done: gravity, `autoconnect_announces_to_internal`, and I2P/Weave discovery announcements (2026-11-15).
 4. API differences: no resend convenience method or per-link physical-signal tracking; event APIs replace Python callbacks. Bounded tables and queues differ from the reference's capacities.
 5. CLI feature subsets and stand-alone protocol examples (sections 5 and 6). The C `rnodeconf` tool does not flash firmware; the separate browser flasher under `web/` targets this project's MCU firmware.
@@ -140,21 +140,21 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 | Interface | Status | Detail |
 | --- | --- | --- |
 | Auto | IMPL | IPv6 link-local multicast, `group_id`, discovery/data ports, 1.6s announce, 22s peer timeout, per-peer sub-interfaces |
-| Auto | PART | `multicast_address_type` / scope (only temporary link scope) |
-| Auto | MISS | `allowed_devices`, `ignored_devices`, multiple devices; multi-NIC; Android/Windows specifics; address-change handling |
+| Auto | IMPL | `devices` and `ignored_devices` (comma lists; `lo0` always skipped), `discovery_scope` (link, admin, site, organisation, global; an unknown value is refused, where the reference would fail later) and `multicast_address_type` (permanent or temporary) |
+| Auto | MISS | Using several devices at once (the first suitable device is used); Android/Windows specifics; address-change handling |
 | Backbone / BackboneClient | PART | Verified against the reference in both directions; daemon types map to TCP listen/connect (same HDLC wire format) with 100 Mb/s pacing and fast-flap IP blocking; no epoll data-plane egress/ingress watermarks or `device` binding; the common TCP `prefer_ipv6` option is accepted |
 | TCP server | IMPL | Listen, accept, IPv4/IPv6, DNS |
 | TCP server | IMPL | `prefer_ipv6`, TCP keepalive and user timeout on accepted sockets |
-| TCP server | MISS | `i2p_tunneled`, device binding |
+| TCP server | IMPL | `device` (the device's IPv4 address, or IPv6 with `prefer_ipv6`, wins over a given address, as in the reference) and `i2p_tunneled` (I2P dead-peer timings; accepted connections inherit it) |
 | TCP client | IMPL | Connect, auto-reconnect (default 5 s wait, configurable) |
 | TCP client | IMPL | `reconnect_wait`, `max_reconnect_tries`, `connect_timeout`, `prefer_ipv6`, keepalive and user timeout |
 | TCP client | PART | Address resolved once on add; reconnects reuse it |
 | TCP client | IMPL | `kiss_framing` (`fixed_mtu` is the existing `mtu`) |
-| TCP client | MISS | `i2p_tunneled` |
+| TCP client | IMPL | `i2p_tunneled` |
 | UDP | IMPL | Single target (unicast or IPv4 broadcast); receive-only mode. Datagram sockets enable `SO_BROADCAST` in `src/host_posix.c`; this source reconciliation did not exercise broadcast delivery |
-| UDP | MISS | Multiple targets |
+| UDP | IMPL | `device`: the device's broadcast address stands in for whichever of listen and forward is not given. Multiple targets are not a reference feature (it has one `forward_ip`) |
 | I2P | IMPL | `I2PInterface` through a router's SAM v3 bridge: session and key file (named as the reference names them), `peers` (b32 names, bare b32, full destinations), `connectable`, 15 s reconnect, keepalive and read watchdog, 1064 byte MTU. Verified against the unmodified reference in both directions through a fake SAM router; not tested against a real I2P router |
-| I2P | MISS | SAM address from the environment (`target_host`/`target_port` set it instead), `i2p_tunneled` on TCP interfaces, stale-tunnel state, I2P interface discovery announcements |
+| I2P | MISS | SAM address from the environment (`target_host`/`target_port` set it instead), stale-tunnel state |
 | RNode LoRa | IMPL | Radio setup over KISS, `radio_ready` ack, flow control, serial reopen |
 | RNode LoRa | IMPL | Detection (DETECT, firmware version, platform and MCU asked first; the radio is configured when the device answers, and the interface drops after 5 s of silence) and the firmware check (at least 1.52, otherwise the interface is refused and not retried) |
 | RNode LoRa | IMPL | RSSI (dBm), SNR (dB) and link quality (percent from SNR and spreading factor) of the last frame: `rnc_host_status`, on each host event for a received packet, and the RPC interface stats (`rssi`, `snr`, `q`, shown by `reticulum-c-ctl status`) |
@@ -167,7 +167,7 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 | Weave | MISS | Remote display, device log/statistics rendering, `ET_PROTO_WEAVE_EP_VIA` routing hints (parsed and ignored), USB switch discovery (`weaveconf`), Weave announcements |
 | Serial | IMPL | HDLC over termios, speed |
 | Serial | IMPL | databits, parity, stopbits (daemon `databits` / `parity` / `stopbits`) |
-| Serial | MISS | hardware flow control, port locking |
+| Serial | N/A | Hardware flow control and port locking: the pinned reference opens serial ports with `rtscts`, `xonxoff` and `dsrdtr` off and takes no lock |
 | Pipe | IMPL | `PipeInterface`: command on a socketpair, HDLC, respawn delay, 1 Mb/s pacing |
 | KISS | IMPL | Framing, port nibble, `flow_control` |
 | KISS | IMPL | preamble, txtail, persistence, slottime, ready flow control, `id_callsign` / `id_interval` beacon |
@@ -240,6 +240,6 @@ The repository's executables are `examples/text_peer.c`, the node daemon (`node_
 The original Phase A library list (proofs/receipts, policy/rate controls, recall and link lifecycle) and Phase C management list (blackholes and remote management) have implementations above. Phase B host kinds and Phase D CLI tools also exist, with the explicit omissions in their tables. Their existence does not close the remaining options or validation gaps.
 
 1. Done on 2026-11-15: hop limit, `MODE_INTERNAL`, path-response grace and the RPC rate table (section 2). Open: cancelling a pending path response when a neighbour rebroadcasts, and the remote-management `rates` query.
-2. Fill the host options in section 4, including Auto device selection, UDP multiple targets and serial/TCP gaps; retain separate validation for emulator-backed host adapters and real hardware.
+2. Done on 2026-11-15: the host options above. Open: Auto on several devices at once, and the stale-tunnel state of I2P; retain separate validation for emulator-backed host adapters and real hardware.
 3. Done on 2026-11-15: the two discovery options and I2P/Weave discovery announcements (section 6).
 4. Done on 2026-11-15: path drops, rates, status sorting and filtering, `rnid` formats and import. Open: the rest of the CLI subsets (remote queries, `.rsg`, `rncp`/`rnx`/`rnsh` modes), `rnodeconf` firmware flashing, and runnable stand-alone protocol examples. Keep browser MCU firmware installation distinct from reference `rnodeconf` parity.
