@@ -2121,6 +2121,15 @@ int main(int argc, char **argv) {
       config_path = dir_config;
       if (!key_path)
         key_path = dir_identity;
+      if (!discovery_dir[0]) { /* the reference keeps discovered interfaces in <dir>/storage/discovery/interfaces */
+        char parent[1200];
+        if (snprintf(parent, sizeof(parent), "%s/storage/discovery", dir_path) < (int)sizeof(parent) &&
+            snprintf(discovery_dir, sizeof(discovery_dir), "%s/interfaces", parent) < (int)sizeof(discovery_dir)) {
+          (void)mkdir(parent, 0700);
+          (void)mkdir(discovery_dir, 0700);
+        } else
+          discovery_dir[0] = 0;
+      }
     }
   }
   if (!config_path || (!check && !key_path) ||

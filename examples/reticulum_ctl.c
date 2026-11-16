@@ -13,6 +13,8 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #include <arpa/inet.h>
+#include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -52,6 +54,8 @@ enum {
   RC_UNKNOWN_ERROR = 254
 };
 #define DEFAULT_CONTROL_PORT 37429u
+#define DEFAULT_DATA_PORT 37428u
+#define DEFAULT_PATH_TIMEOUT 15.0 /* Transport.PATH_REQUEST_TIMEOUT */
 #define ENC_CHUNK (16u * 1024u * 1024u)
 #define DEC_CHUNK (ENC_CHUNK + 96u)
 
@@ -202,6 +206,7 @@ static void json_value(const val *v) {
 /* ---- RPC client --------------------------------------------------------- */
 typedef struct target {
   unsigned port;
+  unsigned data_port; /* the shared instance's data port, for a TCP instance */
   char unix_name[RNC_HOST_UNIX_NAME_MAX + 1]; /* set: the abstract Unix socket of this instance, port unused */
   uint8_t key[RNC_RPC_KEY_MAX];
   size_t key_size;
@@ -536,6 +541,7 @@ typedef struct conn {
   unsigned long port;
   const char *identity, *config, *rpc_key;
   int tcp;                               /* the config names shared_instance_type = tcp */
+  unsigned long data_port;               /* the config's shared_instance_port */
   char instance_name[RNC_HOST_UNIX_NAME_MAX + 1]; /* the config's instance_name */
 } conn;
 static int load_private(const char *path, rnc_identity *id) {
@@ -577,6 +583,8 @@ static void read_config(const char *path, conn *c, char *rpc_key, size_t size) {
       e[-1] = 0;
     if (!strcmp(k, "instance_control_port") && !c->port)
       (void)number(v, 65535, &c->port);
+    else if (!strcmp(k, "shared_instance_port") && !c->data_port)
+      (void)number(v, 65535, &c->data_port);
     else if (!strcmp(k, "shared_instance_type") && !strcasecmp(v, "tcp"))
       c->tcp = 1;
     else if (!strcmp(k, "instance_name") && !c->instance_name[0] && strlen(v) <= RNC_HOST_UNIX_NAME_MAX)
@@ -631,6 +639,7 @@ static int make_target(conn *c, target *t) {
   if (c->config)
     read_config(c->config, c, config_key, sizeof(config_key));
   t->port = c->port ? (unsigned)c->port : DEFAULT_CONTROL_PORT;
+  t->data_port = c->data_port ? (unsigned)c->data_port : DEFAULT_DATA_PORT;
   /* As the reference: on Linux the shared instance is an abstract Unix socket unless the config says TCP or a
    * control port was given on the command line */
 #ifdef __linux__
@@ -682,13 +691,16 @@ static int conn_option(conn *c, int argc, char **argv, int *i) {
     }
     return 1;
   }
-  if (!strcmp(a, "--port") || !strcmp(a, "--identity") ||
+  if (!strcmp(a, "--port") || !strcmp(a, "--data-port") || !strcmp(a, "--identity") ||
       !strcmp(a, "--config") || !strcmp(a, "--rpc-key")) {
     if (*i + 1 >= argc)
       return -1;
     ++*i;
     if (!strcmp(a, "--port")) {
       if (!number(argv[*i], 65535, &c->port) || !c->port)
+        return -1;
+    } else if (!strcmp(a, "--data-port")) {
+      if (!number(argv[*i], 65535, &c->data_port) || !c->data_port)
         return -1;
     } else if (!strcmp(a, "--identity"))
       c->identity = argv[*i];
@@ -734,27 +746,59 @@ static void print_hex(const val *v) {
     for (i = 0; i < v->n; ++i)
       printf("%02x", v->p[i]);
 }
-/* The value an interface is sorted by (rnstatus -s); -1 when the key is not one of ours. */
-static int sort_key_known(const char *key) {
-  static const char *keys[] = {"rate", "bitrate", "traffic", "rx", "tx", "arxc", "atxc", "gravity"};
+/* The values an interface is sorted by (rnstatus -s): one statistics key, or the sum of two */
+typedef struct sort_def {
+  const char *name, *alias, *first, *second;
+} sort_def;
+static const sort_def sort_defs[] = {
+    {"rate", "bitrate", "bitrate", NULL},
+    {"rx", NULL, "rxb", NULL},
+    {"tx", NULL, "txb", NULL},
+    {"rxs", NULL, "rxs", NULL},
+    {"txs", NULL, "txs", NULL},
+    {"traffic", NULL, "rxb", "txb"},
+    {"anns", "announces", "incoming_announce_frequency", "outgoing_announce_frequency"},
+    {"arx", NULL, "incoming_announce_frequency", NULL},
+    {"atx", NULL, "outgoing_announce_frequency", NULL},
+    {"arxc", NULL, "arxc", NULL},
+    {"atxc", NULL, "atxc", NULL},
+    {"prx", NULL, "incoming_pr_frequency", NULL},
+    {"ptx", NULL, "outgoing_pr_frequency", NULL},
+    {"prxc", NULL, "prxc", NULL},
+    {"ptxc", NULL, "ptxc", NULL},
+    {"held", NULL, "held_announces", NULL},
+    {"pvs", NULL, "protocol_violations", NULL},
+    {"ivs", NULL, "ifac_violations", NULL},
+    {"flt", NULL, "packet_filter_hits", NULL},
+    {"gravity", "g", "gravity", NULL},
+    {"txdrp", NULL, "txdrp", NULL},
+    {"txdrb", NULL, "txdrb", NULL},
+    {"txbuf", NULL, "txbuffered", NULL}};
+static const sort_def *sort_find(const char *key) {
   size_t k;
-  for (k = 0; k < sizeof(keys) / sizeof(*keys); ++k)
-    if (!strcmp(key, keys[k]))
-      return 1;
-  return 0;
+  char lower[16];
+  size_t n = strlen(key);
+  if (n >= sizeof(lower))
+    return NULL;
+  for (k = 0; k <= n; ++k) /* the reference lower-cases the key */
+    lower[k] = (char)tolower((unsigned char)key[k]);
+  for (k = 0; k < sizeof(sort_defs) / sizeof(*sort_defs); ++k)
+    if (!strcmp(lower, sort_defs[k].name) || (sort_defs[k].alias && !strcmp(lower, sort_defs[k].alias)))
+      return &sort_defs[k];
+  return NULL;
+}
+static int sort_key_known(const char *key) {
+  return sort_find(key) != NULL;
 }
 static double sort_value(const val *f, const char *key) {
-  if (!strcmp(key, "rate") || !strcmp(key, "bitrate"))
-    return (double)as_uint(map_get(f, "bitrate"));
-  if (!strcmp(key, "gravity"))
-    return as_double(map_get(f, "gravity"));
-  if (!strcmp(key, "traffic"))
-    return (double)as_uint(map_get(f, "rxb")) + (double)as_uint(map_get(f, "txb"));
-  if (!strcmp(key, "rx"))
-    return (double)as_uint(map_get(f, "rxb"));
-  if (!strcmp(key, "tx"))
-    return (double)as_uint(map_get(f, "txb"));
-  return (double)as_uint(map_get(f, key));
+  const sort_def *d = sort_find(key);
+  double v;
+  if (!d)
+    return 0.0;
+  v = as_double(map_get(f, d->first));
+  if (d->second)
+    v += as_double(map_get(f, d->second));
+  return v;
 }
 static int name_matches(const val *f, const char *filter) {
   const val *name = map_get(f, "name");
@@ -769,9 +813,13 @@ static int name_matches(const val *f, const char *filter) {
   text[n] = 0;
   return strstr(text, filter) != NULL;
 }
+static int discovered_listing(const char *dir, const char *filter, int details, int json, int show_stale,
+                              int show_unknown);
 static int cmd_status(int argc, char **argv) {
   conn c = {0};
-  int i, json = 0, reverse = 0;
+  int i, json = 0, reverse = 0, link_stats = 0, monitor = 0, discovered = 0, details = 0, show_stale = 0, show_unknown = 0;
+  double interval = 1.0;
+  const char *discovery_dir = NULL;
   const char *sort = NULL, *filter = NULL;
   size_t order[256], shown = 0, m;
   target t;
@@ -789,9 +837,34 @@ static int cmd_status(int argc, char **argv) {
       json = 1;
     else if (!strcmp(argv[i], "-r") || !strcmp(argv[i], "--reverse"))
       reverse = 1;
+    else if (!strcmp(argv[i], "-l") || !strcmp(argv[i], "--link-stats"))
+      link_stats = 1;
+    else if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--discovered"))
+      discovered = 1;
+    else if (!strcmp(argv[i], "-D"))
+      details = 1;
+    else if (!strcmp(argv[i], "--show-stale"))
+      show_stale = 1;
+    else if (!strcmp(argv[i], "--show-unknown"))
+      show_unknown = 1;
+    else if (!strcmp(argv[i], "--discovery-dir")) {
+      if (++i >= argc)
+        return RC_INVALID_ARGS;
+      discovery_dir = argv[i];
+    }
+    else if (!strcmp(argv[i], "-m") || !strcmp(argv[i], "--monitor"))
+      monitor = 1;
+    else if (!strcmp(argv[i], "-I") || !strcmp(argv[i], "--monitor-interval")) {
+      char *end;
+      if (++i >= argc)
+        return RC_INVALID_ARGS;
+      interval = strtod(argv[i], &end);
+      if (*end || !(interval > 0) || interval > 3600)
+        return RC_INVALID_ARGS;
+    }
     else if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--sort")) {
       if (++i >= argc || !sort_key_known(argv[i])) {
-        fprintf(stderr, "Sort by one of rate, traffic, rx, tx, arxc, atxc, gravity\n");
+        fprintf(stderr, "Sort by one of rate, traffic, rx, tx, rxs, txs, anns, arx, atx, arxc, atxc, held, prx, ptx, prxc, ptxc, pvs, ivs, flt, gravity, txdrp, txdrb, txbuf\n");
         return RC_INVALID_ARGS;
       }
       sort = argv[i];
@@ -802,8 +875,34 @@ static int cmd_status(int argc, char **argv) {
       return RC_INVALID_ARGS;
     }
   }
+  if (discovered || details) {
+    /* the records live in <configuration directory>/storage/discovery/interfaces, as the reference keeps them */
+    char dir[1300], base[1100];
+    struct stat sb;
+    if (!discovery_dir) {
+      if (c.config && !stat(c.config, &sb) && S_ISDIR(sb.st_mode))
+        (void)snprintf(base, sizeof(base), "%s", c.config);
+      else if (c.config) { /* a configuration file: its directory */
+        const char *slash = strrchr(c.config, '/');
+        if (slash)
+          (void)snprintf(base, sizeof(base), "%.*s", (int)(slash - c.config), c.config);
+        else
+          (void)snprintf(base, sizeof(base), ".");
+      } else if (!default_config_dir(base, sizeof(base))) {
+        fprintf(stderr, "No configuration directory: give --config or --discovery-dir\n");
+        return RC_INVALID_ARGS;
+      }
+      (void)snprintf(dir, sizeof(dir), "%s/storage/discovery/interfaces", base);
+      discovery_dir = dir;
+    }
+    return discovered_listing(discovery_dir, filter, details, json, show_stale, show_unknown);
+  }
   if (!make_target(&c, &t))
     return RC_INVALID_ARGS;
+  for (;;) { /* once, or every `interval` seconds in monitor mode */
+  shown = 0;
+  if (monitor && !json)
+    fputs("\033[H\033[J", stdout); /* home the cursor and clear the screen */
   if (!get_request(&t, "interface_stats", NULL, 0, &r))
     return RC_UNKNOWN_ERROR;
   if (r.root.type != V_MAP) {
@@ -879,12 +978,43 @@ static int cmd_status(int argc, char **argv) {
     print_hex(v);
     printf(">\n");
   }
-  v = map_get(&r.root, "transport_uptime");
-  if (v && as_double(v) > 0)
-    printf(" Uptime is %.0f seconds\n", as_double(v));
+  {
+    char link_text[96] = "";
+    if (link_stats) { /* the reference's footer: entries in the link table, and how many of them are active */
+      reply links;
+      unsigned long long total, active = 0;
+      if (get_request(&t, "link_count", NULL, 0, &links)) {
+        total = as_uint(&links.root);
+        reply_free(&links);
+        if (get_request(&t, "active_link_count", NULL, 0, &links)) {
+          active = as_uint(&links.root);
+          reply_free(&links);
+        }
+        (void)snprintf(link_text, sizeof(link_text), "%s%llu entr%s in link table%s", map_get(&r.root, "transport_id") ? ", " : " ",
+                       total, total == 1 ? "y" : "ies", "");
+        if (active) {
+          size_t used = strlen(link_text);
+          (void)snprintf(link_text + used, sizeof(link_text) - used, " (%llu active)", active);
+        }
+      }
+    }
+    v = map_get(&r.root, "transport_uptime");
+    if (v && as_double(v) > 0)
+      printf(" Uptime is %.0f seconds%s\n", as_double(v), link_text);
+    else if (link_text[0])
+      printf("%s\n", link_text);
+  }
   reply_free(&r);
-  return RC_OK;
+  if (!monitor)
+    return RC_OK;
+  (void)fflush(stdout);
+  {
+    struct timespec pause = {(time_t)interval, (long)((interval - (double)(time_t)interval) * 1e9)};
+    nanosleep(&pause, NULL);
+  }
+  }
 }
+
 
 /* ---- path --------------------------------------------------------------- */
 static void print_path(const val *e) {
@@ -949,6 +1079,57 @@ static void print_hash(const uint8_t *hash) {
   for (k = 0; k < 16; ++k)
     printf("%02x", hash[k]);
 }
+/* Ask the shared instance for a path the way the reference's clients do: as a local client of its data port,
+ * send a path request for the destination. The answer arrives in the instance's path table, which the caller
+ * polls. */
+static int send_path_request(const target *t, const uint8_t hash[16]) {
+  struct sockaddr_storage addr;
+  socklen_t addr_size = sizeof(struct sockaddr_in);
+  uint8_t tag[16], raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+  rnc_packet packet;
+  size_t n, m;
+  int fd, ok;
+  memset(&addr, 0, sizeof(addr));
+  if (t->unix_name[0]) {
+    size_t len = rnc_host_abstract_address(t->unix_name, "", &addr, sizeof(addr));
+    if (!len)
+      return 0;
+    addr_size = (socklen_t)len;
+  } else {
+    struct sockaddr_in *in = (struct sockaddr_in *)&addr;
+    in->sin_family = AF_INET;
+    in->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    in->sin_port = htons((uint16_t)t->data_port);
+  }
+  if (RAND_bytes(tag, sizeof(tag)) != 1 ||
+      rnc_path_request_create(hash, NULL, tag, sizeof(tag), &packet) != RNC_OK ||
+      rnc_packet_encode(&packet, raw, sizeof(raw), &n) != RNC_OK ||
+      rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) != RNC_OK)
+    return 0;
+  fd = socket(addr.ss_family, SOCK_STREAM, 0);
+  if (fd < 0)
+    return 0;
+  ok = !connect(fd, (struct sockaddr *)&addr, addr_size) && write_all(fd, framed, m);
+  /* give the instance time to read the request before the connection goes */
+  if (ok) {
+    struct timespec pause = {0, 100000000L};
+    nanosleep(&pause, NULL);
+  }
+  close(fd);
+  return ok;
+}
+/* The path table entry for `hash`, or no pool at all; the reply stays alive until reply_free */
+static const val *find_path(const reply *r, const uint8_t hash[16]) {
+  size_t k;
+  if (r->root.type != V_ARR)
+    return NULL;
+  for (k = 0; k < r->root.n; ++k) {
+    const val *h = map_get(&r->root.kids[k], "hash");
+    if (h && h->type == V_BIN && h->n == 16 && !memcmp(h->p, hash, 16))
+      return &r->root.kids[k];
+  }
+  return NULL;
+}
 static int cmd_path(int argc, char **argv) {
   conn c = {0};
   int i, json = 0, table = 0, list = 0, have_hash = 0, rc = RC_OK;
@@ -957,6 +1138,7 @@ static int cmd_path(int argc, char **argv) {
   int do_add = 0, do_remove = 0, rates = 0, drop = 0, drop_via = 0, drop_queues = 0;
   unsigned long hours = 0;
   const char *reason = NULL;
+  double timeout = DEFAULT_PATH_TIMEOUT;
   target t;
   reply r;
   size_t k;
@@ -1130,6 +1312,50 @@ static int cmd_path(int argc, char **argv) {
       }
     reply_free(&r);
   }
+  if (have_hash && !table && !list && !do_add && !do_remove && !json && !remote.hash) {
+    /* the reference's lookup: a known path is reported, an unknown one is requested and waited for */
+    unsigned long long deadline = now_ms() + (unsigned long long)((remote.wait > 0 ? remote.wait : timeout) * 1000.0);
+    int requested = 0;
+    for (;;) {
+      const val *e;
+      if (!get_request(&t, "path_table", NULL, 0, &r))
+        return RC_UNKNOWN_ERROR;
+      e = find_path(&r, hash);
+      if (e) {
+        uint64_t hops = as_uint(map_get(e, "hops"));
+        if (requested)
+          fputs("\r", stdout);
+        fputs("Path found, destination ", stdout);
+        print_hash(hash);
+        printf(" is %llu hop%s away via ", (unsigned long long)hops, hops == 1 ? "" : "s");
+        print_hex(map_get(e, "via"));
+        fputs(" on ", stdout);
+        print_str(map_get(e, "interface"), "?");
+        putchar('\n');
+        reply_free(&r);
+        return RC_OK;
+      }
+      reply_free(&r);
+      if (!requested) {
+        if (!send_path_request(&t, hash)) {
+          fprintf(stderr, "Could not send the path request to the shared instance\n");
+          return RC_UNKNOWN_ERROR;
+        }
+        fputs("Path to ", stdout);
+        print_hash(hash);
+        fputs(" requested  \n", stdout);
+        requested = 1;
+      }
+      if (now_ms() >= deadline) {
+        puts("Path not found");
+        return 1;
+      }
+      {
+        struct timespec pause = {0, 100000000L};
+        nanosleep(&pause, NULL);
+      }
+    }
+  }
   if (table || have_hash) {
     int shown = 0;
     if (!get_request(&t, "path_table", NULL, max_hops, &r))
@@ -1166,6 +1392,442 @@ static int cmd_path(int argc, char **argv) {
     reply_free(&r);
   }
   return rc;
+}
+
+
+/* ---- discovered interfaces (rnstatus -d / -D) ---------------------------- */
+/* The reference lists the records InterfaceDiscovery keeps, one msgpack file per interface, in
+ * <storage>/discovery/interfaces; this daemon keeps them in the same format (its discovery_storage, or the
+ * configuration directory's storage when started from one). */
+static int read_file(const char *path, uint8_t **data, size_t *size);
+static void py_float_repr(double v, char *out, size_t cap);
+#define DISC_MAX 256
+typedef struct disc_record {
+  uint8_t *data;
+  val *pool;
+  val root;
+  double heard, discovered;
+  int status; /* 2 available, 1 unknown, 0 stale (the reference's STATUS_CODE_MAP) */
+  uint64_t value;
+  char name[256];
+} disc_record;
+static void disc_free(disc_record *r) {
+  free(r->data);
+  free(r->pool);
+}
+/* InterfaceAnnounceHandler.sanitize_name: ASCII only, runs of spaces folded, alphanumeric at the start and
+ * alphanumeric or ")" at the end */
+static void disc_name(const val *v, char *out, size_t cap) {
+  char tmp[256];
+  size_t n = 0, i, start = 0, end;
+  int k;
+  if (!v || v->type != V_STR) {
+    out[0] = 0;
+    return;
+  }
+  for (i = 0; i < v->n && n < sizeof(tmp) - 1; ++i)
+    if (v->p[i] < 128)
+      tmp[n++] = (char)v->p[i];
+  tmp[n] = 0;
+  while (n && isspace((unsigned char)tmp[n - 1]))
+    tmp[--n] = 0;
+  while (start < n && isspace((unsigned char)tmp[start]))
+    ++start;
+  memmove(tmp, tmp + start, n - start + 1);
+  n -= start;
+  for (k = 0; k < 3; ++k) {
+    static const char *runs[] = {"     ", "   ", "  "};
+    char *at;
+    size_t len = strlen(runs[k]);
+    while ((at = strstr(tmp, runs[k])) != NULL) {
+      memmove(at + 1, at + len, strlen(at + len) + 1);
+    }
+  }
+  n = strlen(tmp);
+  for (start = 0; start < n && !isalnum((unsigned char)tmp[start]); ++start) {
+  }
+  memmove(tmp, tmp + start, n - start + 1);
+  n -= start;
+  for (end = n; end && !isalnum((unsigned char)tmp[end - 1]) && tmp[end - 1] != ')'; --end) {
+  }
+  tmp[end] = 0;
+  (void)snprintf(out, cap, "%s", tmp);
+}
+static int disc_type_ok(const val *t) {
+  static const char *types[] = {"BackboneInterface", "TCPServerInterface", "I2PInterface",
+                                "RNodeInterface", "WeaveInterface", "KISSInterface"};
+  size_t k;
+  if (!t || t->type != V_STR)
+    return 0;
+  for (k = 0; k < sizeof(types) / sizeof(*types); ++k)
+    if (t->n == strlen(types[k]) && !memcmp(t->p, types[k], t->n))
+      return 1;
+  return 0;
+}
+/* an IP address or a host name, as the reference's is_ip_address / is_hostname decide it */
+static int disc_host_ok(const val *v) {
+  char text[256];
+  struct in_addr a4;
+  struct in6_addr a6;
+  size_t i, label = 0;
+  if (!v || v->type != V_STR || !v->n || v->n >= sizeof(text))
+    return 0;
+  memcpy(text, v->p, v->n);
+  text[v->n] = 0;
+  if (inet_pton(AF_INET, text, &a4) == 1 || inet_pton(AF_INET6, text, &a6) == 1)
+    return 1;
+  if (v->n > 253)
+    return 0;
+  for (i = 0; i <= v->n; ++i) {
+    if (i == v->n || text[i] == '.') {
+      if (!label || label > 63 || text[i - label] == '-' || text[i - 1] == '-')
+        return 0;
+      label = 0;
+    } else if (isalnum((unsigned char)text[i]) || text[i] == '-')
+      ++label;
+    else
+      return 0;
+  }
+  return 1;
+}
+static int disc_load(const char *dir, disc_record *list, size_t *count, double now, const char *filter) {
+  DIR *d = opendir(dir);
+  struct dirent *entry;
+  *count = 0;
+  if (!d)
+    return 0;
+  while ((entry = readdir(d)) != NULL && *count < DISC_MAX) {
+    char path[1400];
+    disc_record rec;
+    uint8_t *data;
+    size_t size;
+    reader rd;
+    const val *v;
+    double heard_delta;
+    char lower_name[256], lower_filter[256];
+    size_t k;
+    if (entry->d_name[0] == '.')
+      continue;
+    if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) >= (int)sizeof(path) || !read_file(path, &data, &size))
+      continue;
+    memset(&rec, 0, sizeof(rec));
+    rec.data = data;
+    rec.pool = calloc(POOL, sizeof(val));
+    rd.p = data;
+    rd.end = data + size;
+    rd.pool = rec.pool;
+    rd.used = 0;
+    rd.cap = POOL;
+    if (!rec.pool || !parse(&rd, &rec.root, 0) || rec.root.type != V_MAP) {
+      disc_free(&rec);
+      continue;
+    }
+    v = map_get(&rec.root, "last_heard");
+    if (!v) {
+      disc_free(&rec);
+      continue;
+    }
+    rec.heard = as_double(v);
+    rec.discovered = as_double(map_get(&rec.root, "discovered"));
+    rec.value = as_uint(map_get(&rec.root, "value"));
+    disc_name(map_get(&rec.root, "name"), rec.name, sizeof(rec.name));
+    heard_delta = now - rec.heard;
+    {
+      const val *tid = map_get(&rec.root, "transport_id"), *nid = map_get(&rec.root, "network_id");
+      const val *reach = map_get(&rec.root, "reachable_on");
+      int drop = heard_delta > 7 * 86400.0 || !tid || tid->type != V_STR || !tid->n || !nid || nid->type != V_STR ||
+                 !nid->n || !disc_type_ok(map_get(&rec.root, "type")) || (reach && !disc_host_ok(reach));
+      if (drop) {
+        disc_free(&rec);
+        continue;
+      }
+    }
+    rec.status = heard_delta > 3 * 86400.0 ? 0 : heard_delta > 86400.0 ? 1 : 2;
+    if (filter && *filter) {
+      for (k = 0; rec.name[k] && k < sizeof(lower_name) - 1; ++k)
+        lower_name[k] = (char)tolower((unsigned char)rec.name[k]);
+      lower_name[k] = 0;
+      for (k = 0; filter[k] && k < sizeof(lower_filter) - 1; ++k)
+        lower_filter[k] = (char)tolower((unsigned char)filter[k]);
+      lower_filter[k] = 0;
+      if (!strstr(lower_name, lower_filter)) {
+        disc_free(&rec);
+        continue;
+      }
+    }
+    list[(*count)++] = rec;
+  }
+  closedir(d);
+  /* (status, value, last heard), largest first */
+  for (size_t a = 1; a < *count; ++a) {
+    disc_record cur = list[a];
+    size_t b = a;
+    while (b > 0) {
+      const disc_record *o = &list[b - 1];
+      int before = o->status != cur.status ? o->status > cur.status
+                   : o->value != cur.value ? o->value > cur.value
+                                           : o->heard >= cur.heard;
+      if (before)
+        break;
+      list[b] = list[b - 1];
+      --b;
+    }
+    list[b] = cur;
+  }
+  return 1;
+}
+/* RNS.prettytime(t, compact=True) */
+static void disc_pretty(double seconds, char *out, size_t cap) {
+  unsigned long long t = (unsigned long long)(seconds < 0 ? -seconds : seconds);
+  unsigned long long parts[4] = {t / 86400, (t % 86400) / 3600, (t % 3600) / 60, t % 60};
+  static const char unit[4] = {'d', 'h', 'm', 's'};
+  char comp[2][32];
+  int shown = 0, k;
+  for (k = 0; k < 4 && shown < 2; ++k)
+    if (parts[k] > 0)
+      (void)snprintf(comp[shown++], sizeof(comp[0]), "%llu%c", parts[k], unit[k]);
+  if (!shown)
+    (void)snprintf(out, cap, "0s");
+  else if (shown == 1)
+    (void)snprintf(out, cap, "%s", comp[0]);
+  else
+    (void)snprintf(out, cap, "%s and %s", comp[0], comp[1]);
+}
+static size_t utf8_len(const char *s) {
+  size_t n = 0;
+  for (; *s; ++s)
+    if (((unsigned char)*s & 0xc0) != 0x80)
+      ++n;
+  return n;
+}
+static void print_padded(const char *s, size_t width) {
+  size_t n = utf8_len(s);
+  fputs(s, stdout);
+  for (; n < width; ++n)
+    putchar(' ');
+}
+static void disc_str(const val *v, char *out, size_t cap) {
+  size_t n;
+  if (!v || v->type != V_STR) {
+    out[0] = 0;
+    return;
+  }
+  n = v->n < cap - 1 ? v->n : cap - 1;
+  memcpy(out, v->p, n);
+  out[n] = 0;
+}
+static void disc_thousands(uint64_t v, char *out, size_t cap) {
+  char raw[32];
+  size_t n, i, o = 0;
+  (void)snprintf(raw, sizeof(raw), "%llu", (unsigned long long)v);
+  n = strlen(raw);
+  for (i = 0; i < n && o + 2 < cap; ++i) {
+    if (i && (n - i) % 3 == 0)
+      out[o++] = ',';
+    out[o++] = raw[i];
+  }
+  out[o] = 0;
+}
+/* a latitude, longitude or height as Python prints round(x, 4) */
+static void disc_coordinate(const val *v, int digits, char *out, size_t cap) {
+  char tmp[48];
+  if (v->type == V_INT || v->type == V_UINT) {
+    (void)snprintf(out, cap, "%lld", v->type == V_INT ? (long long)v->i : (long long)v->u);
+    return;
+  }
+  (void)snprintf(tmp, sizeof(tmp), "%.*f", digits, as_double(v));
+  py_float_repr(strtod(tmp, NULL), out, cap);
+}
+static int disc_has_number(const val *v) {
+  return v && (v->type == V_INT || v->type == V_UINT || v->type == V_REAL);
+}
+static int discovered_listing(const char *dir, const char *filter, int details, int json, int show_stale,
+                              int show_unknown) {
+  static disc_record list[DISC_MAX];
+  size_t count, k, shown = 0;
+  struct timespec ts;
+  double now;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  now = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+  if (!disc_load(dir, list, &count, now, json ? NULL : filter)) {
+    fprintf(stderr, "Could not read the discovered interfaces in %s\n", dir);
+    return RC_UNKNOWN_ERROR;
+  }
+  putchar('\n');
+  if (json) {
+    putchar('[');
+    for (k = 0; k < count; ++k) {
+      if (k)
+        fputs(", ", stdout);
+      json_value(&list[k].root);
+    }
+    puts("]");
+    for (k = 0; k < count; ++k)
+      disc_free(&list[k]);
+    return RC_OK;
+  }
+  if (!details) {
+    printf("%-25s %-10s   %-10s %-12s %-7s %-16s %-15s\n", "Name", "Type", "Status", "Last Heard", "Value", "Running",
+           "Location");
+    for (k = 0; k < 110; ++k)
+      putchar('-');
+    putchar('\n');
+  }
+  for (k = 0; k < count; ++k) {
+    const val *r = &list[k].root, *impl = map_get(r, "impl_name"), *ver = map_get(r, "version");
+    const val *lat = map_get(r, "latitude"), *lon = map_get(r, "longitude"), *height = map_get(r, "height");
+    char impl_str[200], type[64], name[270], status[24], location[400], tmp[128], tmp2[128];
+    int has_impl = impl && ver && impl->type == V_STR && impl->n && ver->type == V_STR && ver->n;
+    int have_location = disc_has_number(lat) && disc_has_number(lon);
+    if (has_impl) {
+      char a[80], b[80];
+      disc_str(impl, a, sizeof(a));
+      disc_str(ver, b, sizeof(b));
+      (void)snprintf(impl_str, sizeof(impl_str), "%s %s", a, b);
+    } else
+      (void)snprintf(impl_str, sizeof(impl_str), "Unknown");
+    if ((list[k].status == 0 && !show_stale) || (!has_impl && !show_unknown))
+      continue;
+    if (details) {
+      double heard_ago = now - list[k].heard, found_ago = now - list[k].discovered;
+      char disc_text[160], heard_text[160], addr[256];
+      const val *tid = map_get(r, "transport_id"), *nid = map_get(r, "network_id"), *lx = map_get(r, "operator_lxmf_address");
+      const val *hops = map_get(r, "hops"), *tr = map_get(r, "transport"), *cfg = map_get(r, "config_entry");
+      const val *f;
+      char line[256], num[48];
+      disc_pretty(found_ago, tmp, sizeof(tmp));
+      (void)snprintf(disc_text, sizeof(disc_text), "%s ago", tmp);
+      disc_pretty(heard_ago, tmp, sizeof(tmp));
+      (void)snprintf(heard_text, sizeof(heard_text), "%s ago", tmp);
+      if (have_location) {
+        disc_coordinate(lat, 4, tmp, sizeof(tmp));
+        disc_coordinate(lon, 4, tmp2, sizeof(tmp2));
+        if (disc_has_number(height)) {
+          char h[128];
+          disc_coordinate(height, 4, h, sizeof(h));
+          (void)snprintf(location, sizeof(location), "%s, %s, %sm h", tmp, tmp2, h);
+        } else
+          (void)snprintf(location, sizeof(location), "%s, %s", tmp, tmp2);
+      } else
+        (void)snprintf(location, sizeof(location), "Unknown");
+      if (shown++)
+        printf("\n===============================================\n\n");
+      if (tid && nid && tid->type == V_STR && nid->type == V_STR && (tid->n != nid->n || memcmp(tid->p, nid->p, tid->n))) {
+        disc_str(nid, line, sizeof(line));
+        printf("Network   ID : %s\n", line);
+      }
+      if (tid && tid->type == V_STR && tid->n) {
+        disc_str(tid, line, sizeof(line));
+        printf("Transport ID : %s\n", line);
+      }
+      if (lx && lx->type == V_STR && lx->n) {
+        disc_str(lx, line, sizeof(line));
+        printf("LXMF address : %s\n", line);
+      }
+      disc_str(map_get(r, "type"), type, sizeof(type));
+      printf("Name         : %s\nType         : %s\nStack        : %s\n", list[k].name, type, impl_str);
+      printf("Status       : %s\n", list[k].status == 2 ? "Available" : list[k].status == 1 ? "Unknown" : "Stale");
+      printf("Transport    : %s\n", tr && tr->type == V_BOOL && tr->u ? "Enabled" : "Disabled");
+      printf("Distance     : %llu hop%s\n", (unsigned long long)as_uint(hops), as_uint(hops) == 1 ? "" : "s");
+      printf("Discovered   : %s\nLast Heard   : %s\nLocation     : %s\n", disc_text, heard_text, location);
+      if ((f = map_get(r, "frequency")) != NULL) {
+        disc_thousands(as_uint(f), num, sizeof(num));
+        printf("Frequency    : %s Hz\n", num);
+      }
+      if ((f = map_get(r, "bandwidth")) != NULL) {
+        disc_thousands(as_uint(f), num, sizeof(num));
+        printf("Bandwidth    : %s Hz\n", num);
+      }
+      if ((f = map_get(r, "sf")) != NULL)
+        printf("Sprd. Factor : %llu\n", (unsigned long long)as_uint(f));
+      if ((f = map_get(r, "cr")) != NULL)
+        printf("Coding Rate  : %llu\n", (unsigned long long)as_uint(f));
+      if ((f = map_get(r, "modulation")) != NULL && f->type == V_STR) {
+        disc_str(f, line, sizeof(line));
+        printf("Modulation   : %s\n", line);
+      } else if (f && f->type != V_NIL)
+        printf("Modulation   : %llu\n", (unsigned long long)as_uint(f));
+      if ((f = map_get(r, "reachable_on")) != NULL) {
+        disc_str(f, addr, sizeof(addr));
+        printf("Address      : %s\n", addr);
+      }
+      if ((f = map_get(r, "port")) != NULL)
+        printf("Port         : %llu\n", (unsigned long long)as_uint(f));
+      printf("Stamp Value  : %llu\n\nConfiguration Entry:\n", (unsigned long long)list[k].value);
+      if (cfg && cfg->type == V_STR) {
+        const char *at = (const char *)cfg->p, *end = at + cfg->n;
+        while (at <= end) {
+          const char *nl = memchr(at, '\n', (size_t)(end - at));
+          size_t len = nl ? (size_t)(nl - at) : (size_t)(end - at);
+          printf("  %.*s\n", (int)len, at);
+          if (!nl)
+            break;
+          at = nl + 1;
+        }
+      }
+    } else {
+      double diff = now - list[k].heard;
+      char heard_text[24], value_text[24], type_text[64];
+      char *at;
+      if (utf8_len(list[k].name) > 24) { /* the reference cuts at 24 characters and adds an ellipsis */
+        size_t cut = 0, chars = 0;
+        while (list[k].name[cut] && chars < 24) {
+          ++cut;
+          ++chars;
+        }
+        (void)snprintf(name, sizeof(name), "%.*s\xe2\x80\xa6", (int)cut, list[k].name);
+      } else
+        (void)snprintf(name, sizeof(name), "%s", list[k].name);
+      if (utf8_len(impl_str) > 16) {
+        size_t cut = 0, chars = 0; /* the first 15 characters, then an ellipsis */
+        while (impl_str[cut] && chars < 15) {
+          ++cut;
+          while (((unsigned char)impl_str[cut] & 0xc0) == 0x80)
+            ++cut;
+          ++chars;
+        }
+        memcpy(impl_str + cut, "\xe2\x80\xa6", 4);
+      }
+      disc_str(map_get(r, "type"), type_text, sizeof(type_text));
+      while ((at = strstr(type_text, "Interface")) != NULL)
+        memmove(at, at + 9, strlen(at + 9) + 1);
+      (void)snprintf(status, sizeof(status), "%s", list[k].status == 2 ? "\xe2\x9c\x93 Available"
+                                                    : list[k].status == 1 ? "? Unknown" : "\xc3\x97 Stale");
+      if (diff < 60)
+        (void)snprintf(heard_text, sizeof(heard_text), "Just now");
+      else if (diff < 3600)
+        (void)snprintf(heard_text, sizeof(heard_text), "%dm ago", (int)(diff / 60));
+      else if (diff < 86400)
+        (void)snprintf(heard_text, sizeof(heard_text), "%dh ago", (int)(diff / 3600));
+      else
+        (void)snprintf(heard_text, sizeof(heard_text), "%dd ago", (int)(diff / 86400));
+      (void)snprintf(value_text, sizeof(value_text), "%llu", (unsigned long long)list[k].value);
+      if (have_location) {
+        disc_coordinate(lat, 4, tmp, sizeof(tmp));
+        disc_coordinate(lon, 4, tmp2, sizeof(tmp2));
+        (void)snprintf(location, sizeof(location), "%s, %s", tmp, tmp2);
+      } else
+        (void)snprintf(location, sizeof(location), "N/A");
+      print_padded(name, 25);
+      putchar(' ');
+      print_padded(type_text, 10);
+      putchar(' ');
+      print_padded(status, 12);
+      putchar(' ');
+      print_padded(heard_text, 12);
+      putchar(' ');
+      print_padded(value_text, 7);
+      putchar(' ');
+      print_padded(impl_str, 16);
+      putchar(' ');
+      print_padded(location, 15);
+      putchar('\n');
+      ++shown;
+    }
+  }
+  for (k = 0; k < count; ++k)
+    disc_free(&list[k]);
+  return RC_OK;
 }
 
 /* ---- id ----------------------------------------------------------------- */

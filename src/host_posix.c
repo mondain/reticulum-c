@@ -318,7 +318,7 @@ done:
 
 typedef struct host_frame {
   size_t size, offset, wire_size;
-  int announce, control, beacon;
+  int announce, control, beacon, path_request;
   uint8_t data[RNC_HOST_FRAME_MAX];
 } host_frame;
 /* KISS TNCs share one setup sequence, ready-flow control and station ID. */
@@ -1785,6 +1785,10 @@ static rnc_result queue_packet(host_interface *f, const rnc_packet *p) {
   q = &f->queue[f->queue_count];
   memset(q, 0, sizeof(*q));
   q->announce = (p->flags & 3u) == RNC_ANNOUNCE;
+  {
+    rnc_path_request request;
+    q->path_request = !q->announce && rnc_path_request_decode(p, &request) == RNC_OK;
+  }
   q->wire_size = m;
   if (f->status.kind == RNC_HOST_UDP || f->status.kind == RNC_HOST_AUTO) {
     memcpy(q->data, wire, m);
@@ -1919,6 +1923,12 @@ static rnc_result input_packet(rnc_host *h, host_interface *f,
     if ((p.flags & 3u) == RNC_ANNOUNCE) {
       ++f->status.rx_announces;
       f->status.rx_announce_bytes += wire_size;
+    } else {
+      rnc_path_request request;
+      if (rnc_path_request_decode(&p, &request) == RNC_OK) {
+        ++f->status.rx_path_requests;
+        f->status.rx_path_request_bytes += wire_size;
+      }
     }
     f->last_heard = h->now;
   } else
@@ -3206,6 +3216,9 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
         if (q->announce) {
           ++f->status.tx_announces;
           f->status.tx_announce_bytes += q->wire_size;
+        } else if (q->path_request) {
+          ++f->status.tx_path_requests;
+          f->status.tx_path_request_bytes += q->wire_size;
         }
       }
       if ((f->status.kind == RNC_HOST_RNODE || TNC_KIND(f->status.kind)) &&

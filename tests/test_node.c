@@ -457,6 +457,36 @@ static void local_clients(void) {
   rnc_identity_clear(&remote);
   rnc_identity_clear(&child);
 }
+/* A local client's path request for an unknown destination is passed on to the other interfaces even by a node
+ * that is not a transport instance, and without the transport id in it; a request from an ordinary interface is
+ * not passed on by such a node. */
+static void local_path_request(void) {
+  rnc_identity own = identity();
+  rnc_node *n = rnc_node_new(&own, 0, rng, NULL);
+  rnc_packet request, out;
+  rnc_path_request decoded;
+  uint8_t destination[16] = {9}, tag[16] = {1, 2, 3};
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK && rnc_node_add_interface(n, 2, 1000000) == RNC_OK &&
+        rnc_node_add_interface(n, 3, 1000000) == RNC_OK);
+  CHECK(rnc_node_local_interface(n, 2, 1) == RNC_OK);
+  CHECK(rnc_path_request_create(destination, NULL, tag, sizeof(tag), &request) == RNC_OK);
+  CHECK(rnc_node_input(n, 2, &request, 1000, 0) == RNC_OK);
+  out = sent(n, 1);
+  CHECK(rnc_path_request_decode(&out, &decoded) == RNC_OK && !decoded.has_transport &&
+        !memcmp(decoded.destination, destination, 16));
+  out = sent(n, 3);
+  CHECK(!memcmp(out.destination, request.destination, 16));
+  discard(n);
+  tag[0] = 7;
+  CHECK(rnc_path_request_create(destination, NULL, tag, sizeof(tag), &request) == RNC_OK);
+  CHECK(rnc_node_input(n, 1, &request, 1100, 10) == RNC_OK);
+  {
+    rnc_node_event e;
+    CHECK(rnc_node_poll(n, &e) != RNC_OK || e.type != RNC_NODE_SEND); /* nothing is sent on */
+  }
+  rnc_node_free(n);
+  rnc_identity_clear(&own);
+}
 static void destinations(void) {
   rnc_identity id = identity();
   rnc_node *n = rnc_node_new(&id, 0, rng, NULL);
@@ -760,6 +790,8 @@ int main(int argc, char **argv) {
     destinations();
   else if (!strcmp(argv[1], "local"))
     local_clients();
+  else if (!strcmp(argv[1], "local_pr"))
+    local_path_request();
   else if (!strcmp(argv[1], "state"))
     state_test();
   else if (!strcmp(argv[1], "mesh"))
