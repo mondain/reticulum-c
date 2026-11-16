@@ -2120,6 +2120,75 @@ static size_t file_read(const char *path, char *out, size_t size) {
   return (size_t)n;
 }
 static void write_identity(const char *path, uint8_t fill, char hash[33]);
+/* Metadata for signed messages, with a spec: nested sections, quoting, comments, lists, a trailing comma, an empty
+ * value, defaults (including None and a list), and a section only the spec has. */
+static const char meta_fixture[] =
+    "# release notes\n"
+    "title = Release notes\n"
+    "count = 42\n"
+    "ratio = 1.5\n"
+    "tags = alpha, beta, \"gamma, delta\"\n"
+    "flag = yes\n"
+    "quoted = \"it's quoted\"   # trailing comment\n"
+    "empty =\n"
+    "single_list = one,\n"
+    "\n"
+    "[author]\n"
+    "  name = Test User\n"
+    "  email = 'test@example.com'\n"
+    "  [[address]]\n"
+    "    city = Paris\n"
+    "[build]\n"
+    "number = 7\n";
+static const char meta_spec_fixture[] =
+    "title = string(max=40)\n"
+    "count = \"integer(0, 100)\"\n"
+    "ratio = \"float(min=0, max=10)\"\n"
+    "tags = \"string_list(min=1, max=5)\"\n"
+    "flag = boolean\n"
+    "quoted = string\n"
+    "empty = string(default=\"x\")\n"
+    "single_list = list\n"
+    "missing_with_default = integer(default=5)\n"
+    "none_default = string(default=None)\n"
+    "list_default = \"int_list(default=list(1, 2, 3))\"\n"
+    "mode = 'option(\"fast\", \"slow\", default=\"fast\")'\n"
+    "[author]\n"
+    "name = string\n"
+    "email = string\n"
+    "[[address]]\n"
+    "city = string\n"
+    "[build]\n"
+    "number = integer\n"
+    "[extra]\n"
+    "note = string(default=\"n/a\")\n";
+/* Awkward values: signs, a long integer, floats Python formats with an exponent, boolean and empty lists, a quoted
+ * key and section name, UTF-8, and a value longer than the 64 character display rows. */
+static const char meta_edge_fixture[] =
+    "long_text = 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\n"
+    "\"quoted key\" = value\n"
+    "neg = -17\n"
+    "big = 123456789012\n"
+    "small = 1e-5\n"
+    "huge = 1e16\n"
+    "third = 0.1\n"
+    "mid = 12345.678\n"
+    "unicode = caf\xc3\xa9 \xe2\x98\x95\n"
+    "bools = on, no, 1\n"
+    "empty_list = ,\n"
+    "[ \"section one\" ]\n"
+    "x = 1\n";
+static const char meta_edge_spec_fixture[] =
+    "neg = integer\n"
+    "big = integer\n"
+    "small = float\n"
+    "huge = float\n"
+    "third = float\n"
+    "mid = float\n"
+    "bools = bool_list\n"
+    "empty_list = list\n"
+    "[ \"section one\" ]\n"
+    "x = integer\n";
 static void cli_tools_id(const char *ctl, const char *dir) {
   char out[4096], idfile[300], data[300], sig[320], enc[320], dec[320],
       buf[256], hex[40];
@@ -2245,6 +2314,94 @@ static void cli_tools_id(const char *ctl, const char *dir) {
     CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "no destination", NULL) == 250);
     CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "x", "-w", base, "-f", "-b", NULL) == 250);
     CHECK(!unlink(rsm) && !unlink(msgfile));
+  }
+  /* metadata (rnid -E, --meta-spec, --meta): without a spec every value is text, with one the values are typed
+   * and the defaults fill in; --meta lists them, signer and key first, plain values before subsections */
+  {
+    char base[300], rsm[320], meta[320], spec[330], bad[320];
+    CHECK(snprintf(base, sizeof(base), "%s/withmeta", dir) > 0 && snprintf(rsm, sizeof(rsm), "%s.rsm", base) > 0);
+    CHECK(snprintf(meta, sizeof(meta), "%s/note.meta", dir) > 0 && snprintf(spec, sizeof(spec), "%s.spec", meta) > 0);
+    CHECK(snprintf(bad, sizeof(bad), "%s/bad.meta", dir) > 0);
+    file_bytes(meta, meta_fixture, strlen(meta_fixture));
+    /* no spec file: strings all the way */
+    (void)unlink(spec);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", meta, "-w", base, "-f", NULL) == 0 &&
+          strstr(out, "Embedding metadata from") && !strstr(out, "using spec"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", rsm, "--meta", NULL) == 0);
+    CHECK(strstr(out, "RSM Metadata\n============\n\nb  signer=") && strstr(out, "\nb  pubkey=") &&
+          strstr(out, "\ns  title=Release notes\n") && strstr(out, "\ns  count=42\n") &&
+          strstr(out, "\ns  tags=alpha, beta, \"gamma, delta\"") == NULL);
+    CHECK(strstr(out, "\nl  tags=['alpha', 'beta', 'gamma, delta']\n") && strstr(out, "\ns  quoted=it's quoted\n") &&
+          strstr(out, "\ns  empty=\n") && strstr(out, "\nl  single_list=['one']\n"));
+    CHECK(strstr(out, "\nd  author:\ns    name=Test User\ns    email=test@example.com\nd    address:\ns      city=Paris\n") &&
+          strstr(out, "\nd  build:\ns    number=7\n"));
+    CHECK(strstr(out, "\nValidation\n==========\n\nSignature is valid, the message was signed by <") &&
+          strstr(out, ">\n\nMessage\n=======\n\nhello\n"));
+    /* with the spec beside it: typed values, defaults, and a section only the spec has */
+    file_bytes(spec, meta_spec_fixture, strlen(meta_spec_fixture));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", meta, "-w", base, "-f", NULL) == 0 &&
+          strstr(out, "using spec from"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", rsm, "--meta", NULL) == 0);
+    CHECK(strstr(out, "\ni  count=42\n") && strstr(out, "\nf  ratio=1.5\n") && strstr(out, "\nu  flag=True\n") &&
+          strstr(out, "\ni  missing_with_default=5\n") && strstr(out, "\nN  none_default=None\n") &&
+          strstr(out, "\nl  list_default=[1, 2, 3]\n") && strstr(out, "\ns  mode=fast\n") &&
+          strstr(out, "\nd  extra:\ns    note=n/a\n"));
+    CHECK(strstr(out, "mode=fast\nd  author:") != NULL); /* defaults follow the file's values, then the sections */
+    /* a value the spec rejects, and metadata that does not parse, stop the signing */
+    /* an unquoted comma in a check: the reference fails on it, so does this */
+    file_bytes(bad, "count = integer(0, 100)\n", 24);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", meta, "--meta-spec", bad, "-w", base, "-f",
+                  NULL) == 254);
+    file_bytes(bad, "count = 500\n", 12);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", bad, "--meta-spec", spec, "-w", base, "-f",
+                  NULL) == 254);
+    file_bytes(bad, "key = \"unterminated\n", 20);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", bad, "-w", base, "-f", NULL) == 254);
+    file_bytes(bad, "a = 1\na = 2\n", 12);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", bad, "-w", base, "-f", NULL) == 254);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", "/nonexistent/x.meta", "-w", base, "-f",
+                  NULL) == 6);
+    {
+      /* syntax the parser refuses (each would be an error in ConfigObj too), and spec checks that fail */
+      static const char *broken[] = {"[[orphan]]\nkey = 1\n",        /* a subsection with no parent */
+                                     "[a]\nx = 1\n[a]\ny = 2\n",     /* the same section twice */
+                                     "[a]]\nx = 1\n",               /* mismatched brackets */
+                                     "just some words\n",           /* neither a section nor key = value */
+                                     "k = a,, b\n",                 /* an empty list item */
+                                     "k = '''triple'''\n"};         /* unsupported here */
+      static const char *spec_cases[][2] = {
+          {"mode = slow\n", "mode = 'option(\"fast\", \"on\")'\n"},    /* not one of the options */
+          {"x = 1\n", "y = integer\n"},                             /* required, missing, no default */
+          {"x = abc\n", "x = integer\n"},                           /* not an integer */
+          {"x = 1.5\n", "x = integer\n"},                           /* a float is not an integer */
+          {"x = maybe\n", "x = boolean\n"},                         /* not a boolean */
+          {"x = single\n", "x = list\n"},                           /* one value is not a list */
+          {"x = a, b, c\n", "x = 'list(max=2)'\n"},                 /* too many items */
+          {"x = toolong\n", "x = 'string(max=3)'\n"},               /* too long */
+          {"[x]\ny = 1\n", "x = integer\n"},                        /* a section where a value belongs */
+          {"x = 1\n", "[x]\ny = integer\n"},                        /* a value where a section belongs */
+          {"x = 1\n", "x = ip_addr\n"},                             /* a check this port does not cover */
+      };
+      size_t k;
+      for (k = 0; k < sizeof(broken) / sizeof(*broken); ++k) {
+        file_bytes(bad, broken[k], strlen(broken[k]));
+        CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", bad, "-w", base, "-f", NULL) == 254);
+      }
+      for (k = 0; k < sizeof(spec_cases) / sizeof(*spec_cases); ++k) {
+        file_bytes(bad, spec_cases[k][0], strlen(spec_cases[k][0]));
+        file_bytes(spec, spec_cases[k][1], strlen(spec_cases[k][1]));
+        CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", bad, "--meta-spec", spec, "-w", base,
+                      "-f", NULL) == 254);
+      }
+      /* and the cases that look odd but are fine: an unknown key passes through, bounds are inclusive */
+      file_bytes(bad, "x = 100\nextra = whatever\n", 24);
+      file_bytes(spec, "x = \"integer(0, 100)\"\n", 21);
+      CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "hello", "-E", bad, "--meta-spec", spec, "-w", base,
+                    "-f", NULL) == 0);
+      CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", rsm, "--meta", NULL) == 0 && strstr(out, "\ni  x=100\n") &&
+            strstr(out, "\ns  extra=whatever\n"));
+    }
+    CHECK(!unlink(rsm) && !unlink(meta) && !unlink(spec) && !unlink(bad));
   }
   /* base32 and base64 output and import (rnid -B, -b, -m, -M); the private key is the bytes 0..63 so the
    * expected text is fixed */
@@ -2519,6 +2676,54 @@ static void cli_id_reference(const char *ctl, const char *reference,
   CHECK(!unlink(sig));
   ref_args[4] = "-p"; ref_args[5] = "-H"; ref_args[6] = "example.aspect"; ref_args[7] = NULL;
   ref_args[2] = "-i"; ref_args[3] = idfile;
+  /* metadata: the same file (with and without its spec) signed by ours and by the reference gives the same
+   * bytes, signature included, and --meta prints the same text */
+  {
+    char meta[320], spec[330], ours_rsm[340], ref_rsm[340], ours_base[330], ref_base[330], a[4096], b[4096];
+    size_t pass;
+    CHECK(snprintf(meta, sizeof(meta), "%s/diff.meta", dir) > 0 && snprintf(spec, sizeof(spec), "%s.spec", meta) > 0);
+    CHECK(snprintf(ours_base, sizeof(ours_base), "%s/diff_ours", dir) > 0 &&
+          snprintf(ref_base, sizeof(ref_base), "%s/diff_ref", dir) > 0);
+    CHECK(snprintf(ours_rsm, sizeof(ours_rsm), "%s.rsm", ours_base) > 0 && snprintf(ref_rsm, sizeof(ref_rsm), "%s.rsm", ref_base) > 0);
+    /* passes: the first fixture without and with its spec, then the awkward one without and with its spec */
+    for (pass = 0; pass < 4; ++pass) {
+      char ours_bytes[4096], ref_bytes[4096];
+      size_t n_ours, n_ref;
+      const char *from_ours, *from_ref;
+      if (pass == 0 || pass == 2) {
+        const char *text = pass == 0 ? meta_fixture : meta_edge_fixture;
+        file_bytes(meta, text, strlen(text));
+        (void)unlink(spec);
+      } else {
+        const char *text = pass == 1 ? meta_spec_fixture : meta_edge_spec_fixture;
+        file_bytes(spec, text, strlen(text));
+      }
+      (void)unlink(ours_rsm);
+      (void)unlink(ref_rsm);
+      CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-S", "hello", "-E", meta, "-w", ours_base, NULL) == 0);
+      ref_args[4] = "-S"; ref_args[5] = "hello"; ref_args[6] = "-E"; ref_args[7] = meta;
+      ref_args[8] = "-w"; ref_args[9] = ref_base; ref_args[10] = NULL;
+      reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+      n_ours = file_read(ours_rsm, ours_bytes, sizeof(ours_bytes));
+      n_ref = file_read(ref_rsm, ref_bytes, sizeof(ref_bytes));
+      if (n_ours != n_ref || memcmp(ours_bytes, ref_bytes, n_ours))
+        fprintf(stderr, "metadata pass %zu: ours %zu bytes, reference %zu bytes, differ\n", pass, n_ours, n_ref);
+      CHECK(n_ours > 100 && n_ours == n_ref && !memcmp(ours_bytes, ref_bytes, n_ours));
+      /* the display: ours reads the reference's file and the reference reads ours; same text from "RSM Metadata" */
+      CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-V", ref_rsm, "--meta", NULL) == 0);
+      ref_args[4] = "-V"; ref_args[5] = ours_rsm; ref_args[6] = "--meta"; ref_args[7] = NULL;
+      reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+      from_ours = strstr(ours, "RSM Metadata");
+      from_ref = strstr(out, "RSM Metadata");
+      CHECK(from_ours && from_ref);
+      snprintf(a, sizeof(a), "%s", from_ours);
+      snprintf(b, sizeof(b), "%s", from_ref);
+      if (strcmp(a, b))
+        fprintf(stderr, "--meta text differs (pass %zu):\n--- ours\n%s--- reference\n%s\n", pass, a, b);
+      CHECK(!strcmp(a, b));
+    }
+    CHECK(!unlink(meta) && !unlink(spec) && !unlink(ours_rsm) && !unlink(ref_rsm));
+  }
   /* signed messages: the reference validates ours, and ours validates the reference's */
   {
     char base[320], rsm[340];

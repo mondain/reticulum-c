@@ -19,6 +19,7 @@
 #include <openssl/rand.h>
 #include <poll.h>
 #include "msgpack_tree.h"
+#include "rsg_meta.h"
 #include <reticulum_c/rnc.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_ipc.h>
@@ -1304,21 +1305,30 @@ static int ends_with(const char *s, const char *suffix) {
  * "pubkey": 64 byte public key}} in that key order, so the bytes match what the reference signs. */
 /* `message` (NULL for a plain file signature) is embedded after "meta" as a binary value, which is what
  * makes a .rsm: the reference adds it to the dict last, so it is also last on the wire. */
+/* `meta` (NULL for none) adds its entries to the "meta" map after "signer" and "pubkey", skipping those two names,
+ * in ConfigObj's order (plain values, then subsections). */
+/* Nodes available when an envelope is read back: its metadata can have a few hundred entries. */
+#define RSG_POOL 2048u
+/* The whole envelope has to fit one RPC writer message (64 KiB), so a signed message and its metadata share that. */
+#define RSG_MAX_MESSAGE 60000u
 static int rsg_create(const rnc_identity *id, const uint8_t hash[32], const uint8_t *message, size_t message_size,
-                      uint8_t *out, size_t cap, size_t *size) {
-  uint8_t *envelope = malloc(256 + message_size);
+                      const mv *meta, uint8_t *out, size_t cap, size_t *size) {
+  size_t room = RNC_RPC_MESSAGE_MAX;
+  uint8_t *envelope = malloc(room);
   rnc_rpc_writer w;
   size_t n;
   int ok = 0;
   if (!envelope)
     return 0;
-  rnc_rpc_writer_init(&w, envelope, 256 + message_size);
+  rnc_rpc_writer_init(&w, envelope, room);
   if (rnc_rpc_write_map(&w, message ? 4 : 3) == RNC_OK && rnc_rpc_write_string(&w, "hashtype") == RNC_OK &&
       rnc_rpc_write_string(&w, "sha256") == RNC_OK && rnc_rpc_write_string(&w, "hash") == RNC_OK &&
       rnc_rpc_write_bin(&w, hash, 32) == RNC_OK && rnc_rpc_write_string(&w, "meta") == RNC_OK &&
-      rnc_rpc_write_map(&w, 2) == RNC_OK && rnc_rpc_write_string(&w, "signer") == RNC_OK &&
+      rnc_rpc_write_map(&w, 2 + (meta ? mv_visible(meta, "signer", "pubkey") : 0)) == RNC_OK &&
+      rnc_rpc_write_string(&w, "signer") == RNC_OK &&
       rnc_rpc_write_bin(&w, id->hash, 16) == RNC_OK && rnc_rpc_write_string(&w, "pubkey") == RNC_OK &&
       rnc_rpc_write_bin(&w, id->public_key, 64) == RNC_OK &&
+      (!meta || mv_pack_entries(&w, meta, "signer", "pubkey")) &&
       (!message || (rnc_rpc_write_string(&w, "message") == RNC_OK && rnc_rpc_write_bin(&w, message, message_size) == RNC_OK)) &&
       rnc_rpc_writer_finish(&w, &n) == RNC_OK && cap >= 64 + n && rnc_identity_sign(id, envelope, n, out) == RNC_OK) {
     memcpy(out + 64, envelope, n);
@@ -1330,7 +1340,7 @@ static int rsg_create(const rnc_identity *id, const uint8_t hash[32], const uint
 }
 /* The message embedded in an envelope (points into rsg), or 0. */
 static int rsg_message(const uint8_t *rsg, size_t size, const uint8_t **message, size_t *message_size) {
-  static val pool[32];
+  static val pool[RSG_POOL];
   val root;
   reader rd;
   const val *m;
@@ -1340,7 +1350,7 @@ static int rsg_message(const uint8_t *rsg, size_t size, const uint8_t **message,
   rd.end = rsg + size;
   rd.pool = pool;
   rd.used = 0;
-  rd.cap = 32;
+  rd.cap = RSG_POOL;
   if (!parse(&rd, &root, 0) || rd.p != rd.end || root.type != V_MAP)
     return 0;
   m = map_get(&root, "message");
@@ -1354,7 +1364,8 @@ static int rsg_message(const uint8_t *rsg, size_t size, const uint8_t **message,
  * public key the envelope carries); *signer receives the identity that was used. */
 static int rsg_validate(const uint8_t *rsg, size_t size, const uint8_t hash[32], const rnc_identity *required,
                         rnc_identity *signer) {
-  val pool[32], root;
+  static val pool[RSG_POOL];
+  val root;
   reader rd;
   const val *hashtype, *sig_hash, *meta, *pubkey;
   if (size < 65)
@@ -1363,7 +1374,7 @@ static int rsg_validate(const uint8_t *rsg, size_t size, const uint8_t hash[32],
   rd.end = rsg + size;
   rd.pool = pool;
   rd.used = 0;
-  rd.cap = 32;
+  rd.cap = RSG_POOL;
   if (!parse(&rd, &root, 0) || rd.p != rd.end || root.type != V_MAP)
     return 0;
   hashtype = map_get(&root, "hashtype");
@@ -1383,12 +1394,266 @@ static int rsg_validate(const uint8_t *rsg, size_t size, const uint8_t hash[32],
     return 0;
   return rnc_identity_verify(signer, rsg + 64, size - 64, rsg) == RNC_OK;
 }
+/* ---- showing a message's metadata (rnid --meta) -------------------------------
+ * The reference prints every entry as <type letter><indent><key>=<value>, values cut into 64 character rows,
+ * the value as Python would format it (str() of a list is its repr). */
+static void py_repr_string(const uint8_t *s, size_t n, char *out, size_t *o, size_t cap, int bytes) {
+  char quote = '\'';
+  size_t i;
+  if (memchr(s, '\'', n) && !memchr(s, '"', n))
+    quote = '"';
+  if (bytes && *o < cap)
+    out[(*o)++] = 'b';
+  if (*o < cap)
+    out[(*o)++] = quote;
+  for (i = 0; i < n && *o + 5 < cap; ++i) {
+    unsigned char c = s[i];
+    if (c == (unsigned char)quote || c == '\\') {
+      out[(*o)++] = '\\';
+      out[(*o)++] = (char)c;
+    } else if (c == '\n') {
+      out[(*o)++] = '\\';
+      out[(*o)++] = 'n';
+    } else if (c == '\r') {
+      out[(*o)++] = '\\';
+      out[(*o)++] = 'r';
+    } else if (c == '\t') {
+      out[(*o)++] = '\\';
+      out[(*o)++] = 't';
+    } else if (c < 0x20 || c == 0x7f || (bytes && c >= 0x80)) {
+      *o += (size_t)snprintf(out + *o, cap - *o, "\\x%02x", c);
+    } else
+      out[(*o)++] = (char)c;
+  }
+  if (*o < cap)
+    out[(*o)++] = quote;
+}
+/* Python's repr() of a float: the shortest digits that read back the same, positional for exponents -4..15. */
+static void py_float_repr(double v, char *out, size_t cap) {
+  char digits[32], tmp[48];
+  int p, exp10, decpt, nd, k;
+  if (v != v) {
+    (void)snprintf(out, cap, "nan");
+    return;
+  }
+  if (v > 1.7976931348623157e308 || v < -1.7976931348623157e308) {
+    (void)snprintf(out, cap, v < 0 ? "-inf" : "inf");
+    return;
+  }
+  if (v == 0) {
+    (void)snprintf(out, cap, signbit(v) ? "-0.0" : "0.0");
+    return;
+  }
+  for (p = 1; p <= 17; ++p) {
+    (void)snprintf(tmp, sizeof(tmp), "%.*e", p - 1, v);
+    if (strtod(tmp, NULL) == v)
+      break;
+  }
+  {
+    const char *e = strchr(tmp, 'e');
+    char *d = digits;
+    const char *s = tmp + (tmp[0] == '-');
+    for (; s < e; ++s)
+      if (*s != '.')
+        *d++ = *s;
+    *d = 0;
+    exp10 = atoi(e + 1);
+  }
+  nd = (int)strlen(digits);
+  while (nd > 1 && digits[nd - 1] == '0')
+    digits[--nd] = 0;
+  decpt = exp10 + 1;
+  {
+    char *o = out;
+    size_t left = cap;
+    int w;
+    if (v < 0) {
+      *o++ = '-';
+      --left;
+    }
+    if (exp10 < -4 || exp10 >= 16) {
+      w = snprintf(o, left, "%c%s%.*s%se%c%02d", digits[0], nd > 1 ? "." : "", nd > 1 ? nd - 1 : 0, digits + 1, "",
+                   exp10 < 0 ? '-' : '+', abs(exp10));
+    } else if (decpt <= 0) {
+      w = snprintf(o, left, "0.");
+      for (k = 0; k < -decpt && w + 1 < (int)left; ++k)
+        o[w++] = '0';
+      (void)snprintf(o + w, left - (size_t)w, "%s", digits);
+    } else if (decpt >= nd) {
+      w = snprintf(o, left, "%s", digits);
+      for (k = nd; k < decpt && w + 3 < (int)left; ++k)
+        o[w++] = '0';
+      (void)snprintf(o + w, left - (size_t)w, ".0");
+    } else
+      (void)snprintf(o, left, "%.*s.%s", decpt, digits, digits + decpt);
+  }
+}
+/* repr() of a decoded value, for elements of lists and dicts. */
+static void py_repr(const val *v, char *out, size_t *o, size_t cap) {
+  size_t i;
+  char num[48];
+  switch (v->type) {
+  case V_NIL:
+    *o += (size_t)snprintf(out + *o, cap - *o, "None");
+    break;
+  case V_BOOL:
+    *o += (size_t)snprintf(out + *o, cap - *o, v->u ? "True" : "False");
+    break;
+  case V_INT:
+    *o += (size_t)snprintf(out + *o, cap - *o, "%lld", (long long)v->i);
+    break;
+  case V_UINT:
+    *o += (size_t)snprintf(out + *o, cap - *o, "%llu", (unsigned long long)v->u);
+    break;
+  case V_REAL:
+    py_float_repr(v->d, num, sizeof(num));
+    *o += (size_t)snprintf(out + *o, cap - *o, "%s", num);
+    break;
+  case V_STR:
+  case V_BIN:
+    py_repr_string(v->p, v->n, out, o, cap, v->type == V_BIN);
+    break;
+  case V_ARR:
+    if (*o < cap)
+      out[(*o)++] = '[';
+    for (i = 0; i < v->n; ++i) {
+      if (i)
+        *o += (size_t)snprintf(out + *o, cap - *o, ", ");
+      py_repr(&v->kids[i], out, o, cap);
+    }
+    if (*o < cap)
+      out[(*o)++] = ']';
+    break;
+  case V_MAP:
+    if (*o < cap)
+      out[(*o)++] = '{';
+    for (i = 0; i < v->n; ++i) {
+      if (i)
+        *o += (size_t)snprintf(out + *o, cap - *o, ", ");
+      py_repr(&v->kids[2 * i], out, o, cap);
+      *o += (size_t)snprintf(out + *o, cap - *o, ": ");
+      py_repr(&v->kids[2 * i + 1], out, o, cap);
+    }
+    if (*o < cap)
+      out[(*o)++] = '}';
+    break;
+  }
+  if (*o >= cap)
+    *o = cap - 1;
+  out[*o] = 0;
+}
+static size_t utf8_chars(const char *s, size_t n) {
+  size_t c = 0, i;
+  for (i = 0; i < n; ++i)
+    c += ((unsigned char)s[i] & 0xc0) != 0x80;
+  return c;
+}
+static void show_meta_entry(const val *entry, const uint8_t *key, size_t key_len, int level) {
+  char indent[64], text[8192], lead[512];
+  size_t o = 0, i, lead_chars;
+  char etype = 'u';
+  const char *t;
+  size_t left;
+  if (level > 30)
+    return;
+  memset(indent, ' ', (size_t)level * 2 < sizeof(indent) ? (size_t)level * 2 : sizeof(indent) - 1);
+  indent[(size_t)level * 2 < sizeof(indent) ? (size_t)level * 2 : sizeof(indent) - 1] = 0;
+  if (entry->type == V_MAP) {
+    printf("d%s%.*s:\n", indent, (int)key_len, (const char *)key);
+    for (i = 0; i < entry->n; ++i)
+      if (entry->kids[2 * i].type == V_STR)
+        show_meta_entry(&entry->kids[2 * i + 1], entry->kids[2 * i].p, entry->kids[2 * i].n, level + 1);
+    return;
+  }
+  if (entry->type == V_NIL && key_len == 4 && !memcmp(key, "note", 4))
+    return; /* the reference skips an empty "note" */
+  switch (entry->type) {
+  case V_STR:
+    etype = 's';
+    break;
+  case V_BIN:
+    etype = 'b';
+    break;
+  case V_ARR:
+    etype = 'l';
+    break;
+  case V_INT:
+  case V_UINT:
+    etype = 'i';
+    break;
+  case V_REAL:
+    etype = 'f';
+    break;
+  case V_NIL:
+    etype = 'N';
+    break;
+  default:
+    etype = 'u';
+  }
+  if (entry->type == V_BIN) { /* shown as hex */
+    for (i = 0; i < entry->n && o + 3 < sizeof(text); ++i)
+      o += (size_t)snprintf(text + o, sizeof(text) - o, "%02x", entry->p[i]);
+    text[o] = 0;
+  } else if (entry->type == V_STR) {
+    o = entry->n < sizeof(text) - 1 ? entry->n : sizeof(text) - 1;
+    memcpy(text, entry->p, o);
+    text[o] = 0;
+  } else
+    py_repr(entry, text, &o, sizeof(text));
+  (void)snprintf(lead, sizeof(lead), "%c%s%.*s=", etype, indent, (int)key_len, (const char *)key);
+  lead_chars = utf8_chars(lead, strlen(lead));
+  t = text;
+  left = strlen(text);
+  for (i = 0;; ++i) { /* 64 characters per row */
+    size_t chars = 0, bytes = 0;
+    while (bytes < left && chars < 64) {
+      ++bytes;
+      while (bytes < left && ((unsigned char)t[bytes] & 0xc0) == 0x80)
+        ++bytes;
+      ++chars;
+    }
+    if (i == 0)
+      printf("%s%.*s\n", lead, (int)bytes, t);
+    else
+      printf("%*s%.*s\n", (int)lead_chars, "", (int)bytes, t);
+    t += bytes;
+    left -= bytes;
+    if (!left)
+      break;
+  }
+}
+/* Prints the "meta" map of an envelope the way `rnid --meta` does. */
+static int show_rsg_meta(const uint8_t *rsg, size_t size) {
+  static val pool[RSG_POOL];
+  val root;
+  reader rd;
+  const val *meta;
+  size_t i;
+  if (size < 65)
+    return 0;
+  rd.p = rsg + 64;
+  rd.end = rsg + size;
+  rd.pool = pool;
+  rd.used = 0;
+  rd.cap = RSG_POOL;
+  if (!parse(&rd, &root, 0) || rd.p != rd.end || root.type != V_MAP)
+    return 0;
+  meta = map_get(&root, "meta");
+  if (!meta || meta->type != V_MAP)
+    return 0;
+  printf("RSM Metadata\n============\n\n");
+  for (i = 0; i < meta->n; ++i)
+    if (meta->kids[2 * i].type == V_STR)
+      show_meta_entry(&meta->kids[2 * i + 1], meta->kids[2 * i].p, meta->kids[2 * i].n, 1);
+  printf("\nValidation\n==========\n");
+  return 1;
+}
 static int ends_with_nocase(const char *s, const char *suffix) {
   size_t n = strlen(s), m = strlen(suffix);
   return n >= m && !strcasecmp(s + n - m, suffix);
 }
 /* rnid -V on a .rsm: a signed message that carries its own text. `id` as for validate_file. */
-static int validate_message(const rnc_identity *id, const char *path) {
+static int validate_message(const rnc_identity *id, const char *path, int show_meta) {
   uint8_t *rsg, hash[32];
   const uint8_t *message;
   size_t size, message_size;
@@ -1413,7 +1678,11 @@ static int validate_message(const rnc_identity *id, const char *path) {
     return RC_INVALID_SIGNATURE;
   }
   hex_encode(signer.hash, 16, label);
-  printf("\nSignature is valid, the following message was signed by <%s>:\n\n", label);
+  if (show_meta) { /* the metadata comes first, then the verdict and the message under their own headings */
+    (void)show_rsg_meta(rsg, size);
+    printf("\nSignature is valid, the message was signed by <%s>\n\nMessage\n=======\n\n", label);
+  } else
+    printf("\nSignature is valid, the following message was signed by <%s>:\n\n", label);
   fwrite(message, 1, message_size, stdout);
   putchar('\n');
   free(rsg);
@@ -1421,7 +1690,8 @@ static int validate_message(const rnc_identity *id, const char *path) {
 }
 /* rnid -V: a signature file next to the file it covers. `id` is the identity the signature must verify under
  * (NULL: whoever the envelope names). `--raw` signatures are the bare 64 bytes and need `id`. */
-static int validate_file(const rnc_identity *id, const char *validate, const char *read_path, int raw) {
+static int validate_file(const rnc_identity *id, const char *validate, const char *read_path, int raw,
+                         int show_meta) {
   char data_path[1024];
   uint8_t *data, *sig, file_hash[32];
   size_t size, sig_size;
@@ -1429,7 +1699,7 @@ static int validate_file(const rnc_identity *id, const char *validate, const cha
   char label[33];
   int rc = RC_OK, valid;
   if (ends_with_nocase(validate, ".rsm"))
-    return validate_message(id, validate);
+    return validate_message(id, validate, show_meta);
   if (read_path)
     snprintf(data_path, sizeof(data_path), "%s", read_path);
   else if (ends_with(validate, ".rsg") && strlen(validate) - 4 < sizeof(data_path)) {
@@ -1483,11 +1753,12 @@ static int validate_file(const rnc_identity *id, const char *validate, const cha
  * added. The text comes from the command line or, with -r, from a file. The reference can also open an editor
  * when neither is given, and print the result as armoured base32/64 text; neither is offered here. */
 static int sign_message_file(const rnc_identity *id, const char *text, const char *read_path, const char *write_path,
-                             int force, int armoured) {
-  char path[1024], label[33];
+                             int force, int armoured, const char *meta_path, const char *meta_spec) {
+  char path[1024], label[33], spec_default[1100], problem[240];
   uint8_t *file_message = NULL, *rsg, hash[32];
   const uint8_t *message;
-  size_t message_size, rsg_size, n;
+  size_t message_size, rsg_size;
+  mv *meta = NULL;
   int rc;
   if (armoured) {
     fprintf(stderr, "Armoured text output of signed messages is not supported; the message is written to a file\n");
@@ -1510,19 +1781,6 @@ static int sign_message_file(const rnc_identity *id, const char *text, const cha
       fprintf(stderr, "The file %s does not exist\n", read_path);
       return RC_NO_FILE;
     }
-    /* read_file pads to a multiple of four with 0xff for the signing code; the message is the file as it is */
-    {
-      FILE *f = fopen(read_path, "rb");
-      long end;
-      if (!f || fseek(f, 0, SEEK_END) || (end = ftell(f)) < 0) {
-        if (f)
-          fclose(f);
-        free(file_message);
-        return RC_READ_ERROR;
-      }
-      fclose(f);
-      message_size = (size_t)end;
-    }
     message = file_message;
   } else if (text) {
     message = (const uint8_t *)text;
@@ -1531,24 +1789,68 @@ static int sign_message_file(const rnc_identity *id, const char *text, const cha
     fprintf(stderr, "No message specified\n");
     return RC_INVALID_ARGS;
   }
-  if (!message_size || message_size > (1u << 20)) {
+  if (message_size > RSG_MAX_MESSAGE) {
+    fprintf(stderr, "The message is too long: at most %u bytes can be signed this way\n", RSG_MAX_MESSAGE);
+    free(file_message);
+    return RC_INVALID_ARGS;
+  }
+  if (!message_size) {
     fprintf(stderr, "No message specified\n");
     free(file_message);
     return RC_INVALID_ARGS;
   }
-  n = strlen(write_path);
   if (snprintf(path, sizeof(path), "%s%s", write_path, ends_with(write_path, ".rsm") ? "" : ".rsm") >= (int)sizeof(path)) {
     free(file_message);
     return RC_INVALID_ARGS;
   }
-  (void)n;
-  rsg = malloc(message_size + 512);
+  if (meta_path) { /* the metadata file, checked against its spec when there is one */
+    uint8_t *meta_text, *spec_text = NULL;
+    size_t meta_size, spec_size = 0;
+    mv *spec = NULL;
+    const char *spec_path = meta_spec;
+    int loaded;
+    if (!spec_path) {
+      (void)snprintf(spec_default, sizeof(spec_default), "%s.spec", meta_path);
+      spec_path = spec_default;
+    }
+    if (!read_file(meta_path, &meta_text, &meta_size)) {
+      fprintf(stderr, "Metadata file %s does not exist\n", meta_path);
+      free(file_message);
+      return RC_NO_FILE;
+    }
+    if (read_file(spec_path, &spec_text, &spec_size))
+      printf("Embedding metadata from %s using spec from %s\n", meta_path, spec_path);
+    else {
+      spec_text = NULL; /* a spec that is not there is not an error, as in the reference */
+      spec_path = NULL;
+      printf("Embedding metadata from %s\n", meta_path);
+    }
+    problem[0] = 0;
+    loaded = meta_parse((const char *)meta_text, meta_size, &meta, problem, sizeof(problem));
+    if (loaded && spec_text)
+      loaded = meta_parse((const char *)spec_text, spec_size, &spec, problem, sizeof(problem)) &&
+               meta_validate(meta, spec, problem, sizeof(problem));
+    free(meta_text);
+    free(spec_text);
+    mv_free(spec);
+    if (!loaded) {
+      fprintf(stderr, "Could not load metadata from %s: %s\n", meta_path,
+              problem[0] ? problem : "Metadata did not pass spec validation");
+      mv_free(meta);
+      free(file_message);
+      return RC_UNKNOWN_ERROR;
+    }
+  }
+  rsg = malloc(RNC_RPC_MESSAGE_MAX + 128);
   if (!rsg || rnc_hash(message, message_size, hash) != RNC_OK ||
-      !rsg_create(id, hash, message, message_size, rsg, message_size + 512, &rsg_size)) {
+      !rsg_create(id, hash, message, message_size, meta, rsg, RNC_RPC_MESSAGE_MAX + 128, &rsg_size)) {
+    fprintf(stderr, "Could not sign message (the message and its metadata must fit in 64 KiB together)\n");
     free(rsg);
+    mv_free(meta);
     free(file_message);
     return RC_UNKNOWN_ERROR;
   }
+  mv_free(meta);
   rc = write_private_file(path, rsg, rsg_size, force);
   if (rc == RC_FILE_EXISTS)
     fprintf(stderr, "The signature file \"%s\" already exists, not overwriting\n", path);
@@ -1568,13 +1870,18 @@ static int cmd_id(int argc, char **argv) {
          export_prv = 0, rc;
   rnc_identity id;
   char hex[129], out_path[1024];
-  const char *import_pub = NULL, *import_prv = NULL, *how = NULL, *sign_message = NULL;
-  int format = FORMAT_HEX, formats = 0, has_sign_message = 0;
+  const char *import_pub = NULL, *import_prv = NULL, *how = NULL, *sign_message = NULL, *meta_path = NULL,
+             *meta_spec = NULL;
+  int format = FORMAT_HEX, formats = 0, has_sign_message = 0, show_meta = 0;
   for (i = 0; i < argc; ++i) {
     const char *a = argv[i];
     const char **slot = NULL;
     if (!strcmp(a, "-i") || !strcmp(a, "--identity"))
       slot = &identity_path;
+    else if (!strcmp(a, "-E") || !strcmp(a, "--embed-meta"))
+      slot = &meta_path;
+    else if (!strcmp(a, "--meta-spec"))
+      slot = &meta_spec;
     else if (!strcmp(a, "-m") || !strcmp(a, "--import-pub"))
       slot = &import_pub;
     else if (!strcmp(a, "-M") || !strcmp(a, "--import-prv"))
@@ -1618,7 +1925,9 @@ static int cmd_id(int argc, char **argv) {
       has_sign_message = 1; /* the text may follow; without it -r names a file holding the message */
       if (i + 1 < argc && argv[i + 1][0] != '-')
         sign_message = argv[++i];
-    } else if (!strcmp(a, "--raw"))
+    } else if (!strcmp(a, "--meta"))
+      show_meta = 1;
+    else if (!strcmp(a, "--raw"))
       raw = 1;
     else if (!strcmp(a, "-x") || !strcmp(a, "--export-pub"))
       export_pub = 1;
@@ -1648,7 +1957,7 @@ static int cmd_id(int argc, char **argv) {
     return rc;
   }
   if (validate && !raw && !identity_path && !import_pub && !import_prv && !print && !sign && !encrypt && !decrypt)
-    return validate_file(NULL, validate, read_path, 0); /* the envelope names its signer */
+    return validate_file(NULL, validate, read_path, 0, show_meta); /* the envelope names its signer */
   if (import_pub || import_prv) {
     const char *text = import_prv ? import_prv : import_pub;
     if (!import_identity(text, import_prv != NULL, &id, &how)) {
@@ -1723,7 +2032,7 @@ static int cmd_id(int argc, char **argv) {
           else if (rc == RC_OK)
             printf("Signed file %s, signature written to %s\n", sign, out_path);
         }
-      } else if (rnc_hash(data, size, file_hash) != RNC_OK || !rsg_create(&id, file_hash, NULL, 0, rsg, sizeof(rsg), &rsg_size))
+      } else if (rnc_hash(data, size, file_hash) != RNC_OK || !rsg_create(&id, file_hash, NULL, 0, NULL, rsg, sizeof(rsg), &rsg_size))
         rc = RC_UNKNOWN_ERROR;
       else {
         rc = write_private_file(out_path, rsg, rsg_size, force);
@@ -1738,9 +2047,9 @@ static int cmd_id(int argc, char **argv) {
     }
   }
   if (rc == RC_OK && has_sign_message)
-    rc = sign_message_file(&id, sign_message, read_path, write_path, force, formats);
+    rc = sign_message_file(&id, sign_message, read_path, write_path, force, formats, meta_path, meta_spec);
   if (rc == RC_OK && validate)
-    rc = validate_file(&id, validate, read_path, raw);
+    rc = validate_file(&id, validate, read_path, raw, show_meta);
   if (rc == RC_OK && encrypt) {
     if (write_path)
       snprintf(out_path, sizeof(out_path), "%s", write_path);
