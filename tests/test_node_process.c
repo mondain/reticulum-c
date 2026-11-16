@@ -2017,6 +2017,8 @@ static void disc_write(const char *store, const disc_spec *d, unsigned serial) {
 }
 /* five records: a backbone with every field, an RNode of unknown stack, a stale one, an I2P one, and one of a type
  * that is not discoverable (never listed) */
+/* ages are chosen so that RNS.prettytime's two-unit form never shows seconds, and the reference, which runs a second
+ * or two after ctl, prints the same text */
 static void disc_fill(const char *store) {
   static const char tid1[] = "11111111111111111111111111111111", nid1[] = "22222222222222222222222222222222",
                     tid2[] = "33333333333333333333333333333333";
@@ -2027,15 +2029,15 @@ static void disc_fill(const char *store) {
                         "[[Backbone Alpha]]\n  type = BackboneInterface\n  enabled = yes\n  remote = host.example\n"
                         "  target_port = 4242",
                         "host.example", "Reticulum", "1.5.5", "aabbccddeeff00112233445566778899", NULL,
-                        1, 2, 16, 1, 1, 4242, 0, 0, 59.3293, 18.0686, 12.5, 0, 0, 7200, 5 * 86400};
+                        1, 2, 16, 1, 1, 4242, 0, 0, 59.3293, 18.0686, 12.5, 0, 0, 8130, 444030};
   recs[1] = (disc_spec){"LoRa Hill North", "RNodeInterface", tid2, tid2, "[[LoRa Hill North]]\n  type = RNodeInterface",
-                        NULL, NULL, NULL, NULL, NULL, 0, 1, 20, 0, 0, 0, 8, 5, 0, 0, 0, 868000000, 125000, 100000, 2 * 86400};
+                        NULL, NULL, NULL, NULL, NULL, 0, 1, 20, 0, 0, 0, 8, 5, 0, 0, 0, 868000000, 125000, 100000, 174630};
   recs[2] = (disc_spec){"Old Server", "TCPServerInterface", tid1, nid1, "[[Old Server]]\n  type = TCPServerInterface",
                         "192.0.2.7", "Reticulum", "1.4.0", NULL, NULL, 1, 3, 12, 1, 1, 4965, 0, 0, -33.8688, 151.2093, 0,
-                        0, 0, 4 * 86400, 6 * 86400};
+                        0, 0, 347430, 520230};
   recs[3] = (disc_spec){"An Extremely Long Interface Name That Goes On", "I2PInterface", tid2, nid1,
                         "[[Long]]\n  type = I2PInterface", "abcdefghijklmnop.b32.i2p", "SomeStackWithALongName", "0.9.12", NULL, NULL,
-                        0, 4, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 300, 3600};
+                        0, 4, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5430, 12630};
   recs[4] = (disc_spec){"Not Discoverable", "FooInterface", tid1, nid1, "x", NULL, "Reticulum", "1.5.5", NULL, NULL, 1, 1,
                         10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 60};
   for (i = 0; i < 5; ++i)
