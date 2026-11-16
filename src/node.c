@@ -157,6 +157,7 @@ typedef struct node_queued {
   uint32_t iface;
   rnc_packet packet;
   uint64_t due;
+  unsigned heard; /* neighbour rebroadcasts of a pending path response heard so far */
 } node_queued;
 struct rnc_node {
   uint8_t id[16];
@@ -378,6 +379,7 @@ static void queue(rnc_node *n, uint32_t iface, const rnc_packet *p,
       n->queued[i].iface = iface;
       n->queued[i].packet = *p;
       n->queued[i].due = due;
+      n->queued[i].heard = 0;
       return;
     }
 }
@@ -1098,6 +1100,18 @@ static void heard_rebroadcast(rnc_node *n, const rnc_packet *p, uint64_t now) {
   size_t i;
   if (!(p->flags & 0x40u))
     return;
+  /* A path response still waiting out its grace is an announce-table entry in the reference, and
+   * goes the same way: two neighbours passing it on, or one passing it on a further hop. */
+  for (i = 0; i < RNC_NODE_QUEUE; i++) {
+    node_queued *q = &n->queued[i];
+    if (!q->used || (q->packet.flags & 3u) != RNC_ANNOUNCE || q->packet.context != 11 ||
+        !same(q->packet.destination, p->destination) || now >= q->due)
+      continue;
+    if (p->hops == (uint8_t)(q->packet.hops + 1u) && ++q->heard >= LOCAL_REBROADCASTS_MAX)
+      q->used = 0;
+    else if (p->hops == (uint8_t)(q->packet.hops + 2u))
+      q->used = 0;
+  }
   for (i = 0; i < RNC_NODE_ANNOUNCES; i++) {
     node_announce *a = &n->announces[i];
     if (!a->used || !same(a->destination, p->destination))
