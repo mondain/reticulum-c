@@ -300,6 +300,41 @@ static void path_response_grace(void) {
   /* a roaming interface is never told about a path that lies behind itself */
   CHECK(answered_after(RNC_MODE_ROAMING, 0, 1, 5000) == 0);
 }
+/* A pending path response is dropped when neighbours are heard passing the announce on, as the
+ * reference's announce table does: two rebroadcasts one hop further, or one two hops further while
+ * the response is still waiting. `copies` of the rebroadcast are heard on interface 1 during the grace. */
+static size_t response_after_heard(unsigned copies, uint8_t wire_hops) {
+  rnc_identity src;
+  rnc_packet a, request, h;
+  uint8_t tag[16] = {9};
+  rnc_node *n = make(1, 0, NULL);
+  size_t c;
+  unsigned i;
+  CHECK(rnc_identity_generate(&src, rng, NULL) == RNC_OK);
+  a = announce_from(&src, 1000);
+  CHECK(rnc_node_input(n, 1, &a, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1000, 700) == RNC_OK);
+  while (sends_on(n, 1) + sends_on(n, 2) > 0) {
+  }
+  CHECK(rnc_path_request_create(a.destination, NULL, tag, sizeof(tag), &request) == RNC_OK);
+  CHECK(rnc_node_input(n, 2, &request, 1001, 1000) == RNC_OK);
+  for (i = 0; i < copies; i++) {
+    h = heard(&a, wire_hops);
+    h.transport_id[0] ^= (uint8_t)i;
+    CHECK(rnc_node_input(n, 1, &h, 1001, 1100 + 100 * i) == RNC_OK);
+  }
+  CHECK(rnc_node_tick(n, 1001, 1500) == RNC_OK);
+  c = sends_on(n, 2);
+  rnc_node_free(n);
+  return c;
+}
+static void response_cancelled(void) {
+  CHECK(response_after_heard(0, 1) == 1);  /* nobody else answers: ours goes out */
+  CHECK(response_after_heard(1, 1) == 1);  /* one rebroadcast is not enough */
+  CHECK(response_after_heard(2, 1) == 0);  /* two cancel it */
+  CHECK(response_after_heard(1, 2) == 0);  /* one passed on a further hop cancels it */
+  CHECK(response_after_heard(2, 5) == 1);  /* unrelated hop counts do not */
+}
 /* Locally originated announces are never sent on access-point interfaces. */
 static void access_point(void) {
   rnc_interface_policy policy = {0};
@@ -357,6 +392,8 @@ int main(int argc, char **argv) {
     access_point();
   else if (!strcmp(argv[1], "path_response_grace"))
     path_response_grace();
+  else if (!strcmp(argv[1], "response_cancelled"))
+    response_cancelled();
   else if (!strcmp(argv[1], "internal_mode"))
     internal_mode();
   else if (!strcmp(argv[1], "internal_no_cap"))
