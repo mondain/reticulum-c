@@ -223,7 +223,9 @@ static void network(void) {
   CHECK(ah && bh);
   cfg.kind = RNC_HOST_TCP_LISTEN;
   cfg.address = "127.0.0.1";
+  cfg.mode = RNC_MODE_INTERNAL; /* every mode the node knows can be configured (this was refused) */
   CHECK(rnc_host_add(ah, 1, &cfg) == RNC_OK);
+  cfg.mode = RNC_MODE_FULL;
   CHECK(rnc_host_get_status(ah, 1, &st) == RNC_OK && st.bound_port);
   cfg.kind = RNC_HOST_TCP_CONNECT;
   cfg.port = st.bound_port;

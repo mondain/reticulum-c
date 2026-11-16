@@ -1623,10 +1623,11 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
         }
         f->host.i2p_key_path = f->i2p_key;
       }
+      errno = 0;
       if (rnc_host_add(*host, c->interfaces[i].interface_id,
                        &c->interfaces[i].host) != RNC_OK) {
         fprintf(stderr, "Cannot open interface %s: %s\n", c->interfaces[i].name,
-                strerror(errno));
+                errno ? strerror(errno) : "invalid interface configuration");
         /* the reference logs the error and carries on without the interface
          * unless panic_on_interface_error is set */
         if (c->panic_on_interface_error)

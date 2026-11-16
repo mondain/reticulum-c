@@ -1467,8 +1467,12 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
       relay_announce(n, &relay);
       for (i = 0; i < RNC_NODE_INTERFACES; i++)
         if (n->interfaces[i].id &&
-            relay_target(n, ingress, n->interfaces[i].id))
+            relay_target(n, ingress, n->interfaces[i].id)) {
+          char label[33];
+          rnc_logf(RNC_LOG_DEBUG, "node", "relaying announce for %s from interface %u to interface %u",
+                   rnc_hex_label(relay.destination, 16, label), (unsigned)ingress, (unsigned)n->interfaces[i].id);
           queue(n, n->interfaces[i].id, &relay, due);
+        }
       if (!interface(n, ingress)->local)
         schedule_retry(n, &relay, ingress, due);
     }
@@ -2223,6 +2227,12 @@ rnc_result rnc_node_tick(rnc_node *n, uint64_t unix_seconds, uint64_t now) {
       if (iface->mode == RNC_MODE_INTERNAL) {
         wait = 0;
         again = 1;
+      }
+      {
+        char label[33];
+        rnc_logf(RNC_LOG_DEBUG, "node", "announce for %s sent on interface %u, next one in %llu ms",
+                 rnc_hex_label(n->queued[best].packet.destination, 16, label), (unsigned)iface->id,
+                 (unsigned long long)wait);
       }
       emit(n, RNC_NODE_SEND, iface->id, &n->queued[best].packet);
       n->queued[best].used = 0;
