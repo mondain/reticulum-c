@@ -1407,7 +1407,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     return RNC_INVALID;
   if (c->ifac && (!c->ifac->size || c->ifac->size > RNC_IFAC_MAX_SIZE))
     return RNC_INVALID;
-  if (c->mode > RNC_MODE_BOUNDARY || c->announce_cap_permille > 1000u)
+  if (c->mode > RNC_MODE_INTERNAL || c->announce_cap_permille > 1000u)
     return RNC_INVALID;
   f = empty_interface(h);
   if (!f)

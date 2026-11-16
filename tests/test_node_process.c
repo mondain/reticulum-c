@@ -1453,6 +1453,503 @@ static void shared(const char *exe, const char *reference, const char *python) {
   puts(reference ? "unmodified RNS shared-instance test passed"
                  : "native shared-instance tests passed");
 }
+
+/* ---- Live differential: the same scenario against the unmodified reference as a transport node and against
+ * this daemon, with unmodified reference peers around it. Each node under test is a TCP server on a fixed port;
+ * peers are reference processes (stdin commands, stdout lines). What the peers observe must agree. ---- */
+static const char *live_peer =
+    "import RNS, sys, time\n"
+    "r = RNS.Reticulum(configdir=sys.argv[1], loglevel=0)\n"
+    "t0 = time.time()\n"
+    "ms = lambda: int((time.time() - t0) * 1000)\n"
+    "d = RNS.Destination(RNS.Identity(), RNS.Destination.IN, RNS.Destination.SINGLE, 'reticulum_c', 'live')\n"
+    "print('HASH', d.hexhash, flush=True)\n"
+    "class H:\n"
+    "    aspect_filter = None\n"
+    "    def received_announce(self, destination_hash, announced_identity, app_data):\n"
+    "        print('ANN', destination_hash.hex(), RNS.Transport.hops_to(destination_hash), ms(), flush=True)\n"
+    "RNS.Transport.register_announce_handler(H())\n"
+    "for line in sys.stdin:\n"
+    "    p = line.split()\n"
+    "    if p[0] == 'announce':\n"
+    "        w = time.time()\n"
+    "        while not all(i.online for i in RNS.Transport.interfaces) and time.time() - w < 10: time.sleep(0.05)\n"
+    "        d.announce()\n"
+    "        print('SENT', all(i.online for i in RNS.Transport.interfaces), flush=True)\n"
+    "    elif p[0] == 'request':\n"
+    "        h = bytes.fromhex(p[1]); s = time.time(); RNS.Transport.request_path(h)\n"
+    "        while not RNS.Transport.has_path(h) and time.time() - s < 6: time.sleep(0.005)\n"
+    "        print('PATH', p[1], RNS.Transport.hops_to(h) if RNS.Transport.has_path(h) else -1,\n"
+    "              int((time.time() - s) * 1000), flush=True)\n"
+    "    elif p[0] == 'quit':\n"
+    "        break\n";
+static const char *live_transport =
+    "import RNS, sys\n"
+    "r = RNS.Reticulum(configdir=sys.argv[1], loglevel=0)\n"
+    "print('READY', flush=True)\n"
+    "for line in sys.stdin:\n"
+    "    if line.split()[0] == 'dump':\n"
+    "        for h, e in list(RNS.Transport.path_table.items()):\n"
+    "            print('TPATH', h.hex(), e[2], e[5].name, flush=True)\n"
+    "        print('END', flush=True)\n"
+    "    elif line.split()[0] == 'quit':\n"
+    "        break\n";
+typedef struct live_proc {
+  pid_t pid;
+  int in, out;
+  char buf[16384];
+  size_t used;
+} live_proc;
+static void live_spawn(live_proc *p, const char *python, const char *reference, const char *script, const char *dir) {
+  int to[2], from[2];
+  CHECK(!pipe(to) && !pipe(from));
+  p->pid = fork();
+  CHECK(p->pid >= 0);
+  if (!p->pid) {
+    CHECK(dup2(to[0], STDIN_FILENO) >= 0 && dup2(from[1], STDOUT_FILENO) >= 0 && dup2(from[1], STDERR_FILENO) >= 0);
+    close(to[0]); close(to[1]); close(from[0]); close(from[1]);
+    CHECK(!setenv("PYTHONPATH", reference, 1));
+    execl(python, python, "-c", script, dir, (char *)NULL);
+    _exit(127);
+  }
+  close(to[0]);
+  close(from[1]);
+  p->in = to[1];
+  p->out = from[0];
+  p->used = 0;
+  p->buf[0] = 0;
+}
+static void live_send(live_proc *p, const char *line) {
+  signal(SIGPIPE, SIG_IGN);
+  CHECK(write(p->in, line, strlen(line)) == (ssize_t)strlen(line));
+}
+/* the first buffered line that starts with `prefix` (consumed into `line`), waiting up to `ms` for it */
+static int live_expect(live_proc *p, const char *prefix, unsigned ms, char *line, size_t size) {
+  uint64_t end = now_ms() + ms;
+  for (;;) {
+    char *at = p->buf, *nl;
+    while ((nl = strchr(at, '\n'))) {
+      *nl = 0;
+      if (!strncmp(at, prefix, strlen(prefix))) {
+        CHECK(snprintf(line, size, "%s", at) < (int)size);
+        memmove(p->buf, nl + 1, strlen(nl + 1) + 1);
+        p->used = strlen(p->buf);
+        return 1;
+      }
+      *nl = '\n';
+      at = nl + 1;
+    }
+    {
+      uint64_t now = now_ms();
+      struct pollfd pf = {p->out, POLLIN, 0};
+      if (now >= end)
+        return 0;
+      CHECK(poll(&pf, 1, (int)(end - now)) >= 0);
+      if (pf.revents & POLLIN) {
+        ssize_t n = read(p->out, p->buf + p->used, sizeof(p->buf) - 1 - p->used);
+        if (n <= 0)
+          return 0;
+        p->used += (size_t)n;
+        p->buf[p->used] = 0;
+        CHECK(p->used < sizeof(p->buf) - 1);
+      }
+    }
+  }
+}
+static void live_end(live_proc *p) {
+  int status;
+  (void)!write(p->in, "quit\n", 5);
+  close(p->in);
+  (void)kill(p->pid, SIGTERM);
+  CHECK(waitpid(p->pid, &status, 0) == p->pid);
+  close(p->out);
+}
+static void live_sleep(unsigned ms) {
+  struct timespec t = {ms / 1000, (long)(ms % 1000) * 1000000L};
+  nanosleep(&t, NULL);
+}
+/* a reference peer's configuration directory: transport off, no shared instance, one client to the node */
+static void live_peer_config(char *dir, size_t size, const char *base, const char *name, unsigned port) {
+  char path[600], text[600];
+  CHECK(snprintf(dir, size, "%s/%s", base, name) < (int)size);
+  CHECK(!mkdir(dir, 0700));
+  CHECK(snprintf(path, sizeof(path), "%s/config", dir) < (int)sizeof(path));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n[interfaces]\n[[T]]\n"
+                 "type = TCPClientInterface\nenabled = Yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n", port) > 0);
+  config_file(path, text);
+}
+typedef struct live_node {
+  int reference;
+  pid_t pid;
+  int fd;
+  live_proc ref;
+  char admin[300];
+} live_node;
+/* the node under test: the reference as a transport node, or this daemon, listening on `port`; `extra` is added
+ * to the TCPServerInterface section */
+static void live_node_start(live_node *n, int reference, const char *exe, const char *python, const char *ref_dir,
+                            const char *base, unsigned port, const char *extra) {
+  char dir[400], cfg[500], key[500], text[1024], identity[33];
+  memset(n, 0, sizeof(*n));
+  n->reference = reference;
+  CHECK(snprintf(dir, sizeof(dir), "%s/%s-%u", base, reference ? "ref-node" : "c-node", port) < (int)sizeof(dir));
+  CHECK(!mkdir(dir, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) < (int)sizeof(cfg));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[Peers]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n%s", port,
+                 extra ? extra : "") > 0);
+  config_file(cfg, text);
+  if (reference) {
+    char line[256];
+    live_spawn(&n->ref, python, ref_dir, live_transport, dir);
+    CHECK(live_expect(&n->ref, "READY", 20000, line, sizeof(line)));
+    return;
+  }
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) < (int)sizeof(key));
+  CHECK(snprintf(n->admin, sizeof(n->admin), "%s/admin", dir) < (int)sizeof(n->admin));
+  n->pid = start(exe, cfg, key, n->admin, &n->fd);
+  ready_line(n->fd, identity);
+}
+static void live_node_stop(live_node *n) {
+  if (n->reference)
+    live_end(&n->ref);
+  else
+    stop(n->pid, n->fd);
+}
+/* Scenario A: a path response from a known path. A peer announces; a second peer joins afterwards and asks for
+ * the path; the node answers after PATH_REQUEST_GRACE. Returns the milliseconds the asker waited and its hops. */
+static void live_path_response(int reference, const char *exe, const char *python, const char *ref_dir,
+                               const char *base, long *wait_ms, long *hops) {
+  unsigned port = unused_port();
+  live_node node;
+  live_proc announcer, asker;
+  char dir[500], line[512], hash[40];
+  live_node_start(&node, reference, exe, python, ref_dir, base, port, NULL);
+  live_peer_config(dir, sizeof(dir), base, reference ? "a1" : "c1", port);
+  live_spawn(&announcer, python, ref_dir, live_peer, dir);
+  CHECK(live_expect(&announcer, "HASH", 20000, line, sizeof(line)));
+  CHECK(snprintf(hash, sizeof(hash), "%s", line + 5) < (int)sizeof(hash));
+  live_sleep(1500); /* connected */
+  live_send(&announcer, "announce\n");
+  live_sleep(2500); /* the node has learned the path and finished its own rebroadcasts */
+  live_peer_config(dir, sizeof(dir), base, reference ? "a2" : "c2", port);
+  live_spawn(&asker, python, ref_dir, live_peer, dir);
+  CHECK(live_expect(&asker, "HASH", 20000, line, sizeof(line)));
+  live_sleep(1500);
+  CHECK(snprintf(line, sizeof(line), "request %s\n", hash) < (int)sizeof(line));
+  live_send(&asker, line);
+  CHECK(live_expect(&asker, "PATH", 10000, line, sizeof(line)));
+  {
+    char h[40];
+    long w, hp;
+    CHECK(sscanf(line, "PATH %39s %ld %ld", h, &hp, &w) == 3);
+    *wait_ms = w;
+    *hops = hp;
+  }
+  live_end(&asker);
+  live_end(&announcer);
+  live_node_stop(&node);
+}
+static void hex_of(const uint8_t *data, size_t size, char *out);
+/* Scenario B: the hop limit. Announces are injected raw at a given hop count; a reference peer on the node says
+ * which of them arrive and with how many hops. results[i] is -1 when announce i never arrived. */
+#define LIVE_HOPS 9
+static const unsigned live_hop_values[LIVE_HOPS] = {0, 100, 110, 120, 124, 125, 126, 127, 128};
+static void live_hop_limit(int reference, const char *exe, const char *python, const char *ref_dir, const char *base,
+                           long results[LIVE_HOPS], long learned[LIVE_HOPS]) {
+  unsigned port = unused_port();
+  live_node node;
+  live_proc listener;
+  char dir[500], line[512], hashes[LIVE_HOPS][33];
+  int raw;
+  size_t i;
+  live_node_start(&node, reference, exe, python, ref_dir, base, port, NULL);
+  live_peer_config(dir, sizeof(dir), base, reference ? "h1" : "h2", port);
+  live_spawn(&listener, python, ref_dir, live_peer, dir);
+  CHECK(live_expect(&listener, "HASH", 20000, line, sizeof(line)));
+  live_sleep(2000);
+  raw = tcp_connect(port);
+  for (i = 0; i < LIVE_HOPS; ++i) {
+    uint8_t key[64] = {0}, wire[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+    unsigned random = 100u + (unsigned)i;
+    rnc_identity id;
+    rnc_packet packet;
+    size_t n, m;
+    key[10] = (uint8_t)(1 + i); /* X25519 clamping would erase differences in the low bits of key[0] */
+    key[40] = (uint8_t)(1 + i);
+    CHECK(rnc_identity_from_private(&id, key) == RNC_OK &&
+          rnc_announce_create(&id, "reticulum_c.live.hops", NULL, 0, (uint64_t)time(NULL), rng, &random, &packet) ==
+              RNC_OK);
+    packet.hops = 0; /* the encoder refuses 128 and over, so the wire byte is set below */
+    hex_of(packet.destination, 16, hashes[i]);
+    CHECK(rnc_packet_encode(&packet, wire, sizeof(wire), &n) == RNC_OK);
+    wire[1] = (uint8_t)live_hop_values[i];
+    CHECK(rnc_host_frame_encode(RNC_HOST_HDLC, 0, wire, n, framed, sizeof(framed), &m) == RNC_OK);
+    CHECK(write(raw, framed, m) == (ssize_t)m);
+    live_sleep(900); /* slower than a new interface's ingress-control burst frequency */
+    results[i] = -1;
+  }
+  /* collect what arrived, over the rebroadcast window */
+  {
+    uint64_t end = now_ms() + 6000;
+    while (now_ms() < end) {
+      char got[40];
+      long hp, at;
+      if (!live_expect(&listener, "ANN", 300, line, sizeof(line)))
+        continue;
+      CHECK(sscanf(line, "ANN %39s %ld %ld", got, &hp, &at) == 3);
+      if (getenv("LIVE_DEBUG")) fprintf(stderr, "  %s\n", line);
+      for (i = 0; i < LIVE_HOPS; ++i)
+        if (!strcmp(got, hashes[i]))
+          results[i] = hp;
+    }
+  }
+  /* the node's own path table: which announces it learned a path for, and at how many hops */
+  for (i = 0; i < LIVE_HOPS; ++i)
+    learned[i] = -1;
+  if (reference) {
+    live_send(&node.ref, "dump\n");
+    for (;;) {
+      char got[40], iface[64];
+      long hp;
+      if (!live_expect(&node.ref, "", 3000, line, sizeof(line)) || !strncmp(line, "END", 3))
+        break;
+      if (strncmp(line, "TPATH ", 6))
+        continue;
+      CHECK(sscanf(line, "TPATH %39s %ld %63s", got, &hp, iface) >= 2);
+      for (i = 0; i < LIVE_HOPS; ++i)
+        if (!strcmp(got, hashes[i]))
+          learned[i] = hp;
+    }
+  } else {
+    char reply[8192];
+    admin_command(node.admin, "ROUTES", reply, sizeof(reply));
+    for (i = 0; i < LIVE_HOPS; ++i) {
+      char needle[64], *at;
+      CHECK(snprintf(needle, sizeof(needle), "destination=%s ", hashes[i]) > 0);
+      at = strstr(reply, needle);
+      if (at && (at = strstr(at, "hops=")))
+        learned[i] = strtol(at + 5, NULL, 10);
+    }
+  }
+  close(raw);
+  live_end(&listener);
+  live_node_stop(&node);
+}
+/* Scenario C: announce propagation between interface modes. The node has one interface per entry of `modes`
+ * (each with a reference peer on it); every peer announces once; heard[i][j] says whether peer j heard peer i's
+ * announce. `extras[i]` adds config lines to interface i. */
+#define LIVE_IF_MAX 8
+static void live_mode_matrix(int reference, const char *exe, const char *python, const char *ref_dir, const char *base,
+                             size_t n, const char *const *modes, const char *const *extras,
+                             int heard[LIVE_IF_MAX][LIVE_IF_MAX]) {
+  unsigned ports[LIVE_IF_MAX];
+  live_node node;
+  live_proc peers[LIVE_IF_MAX];
+  char hashes[LIVE_IF_MAX][40], extra[4096], dir[500], line[512], name[16];
+  size_t i, j, used = 0;
+  static unsigned serial;
+  CHECK(n <= LIVE_IF_MAX);
+  for (i = 0; i < n; ++i)
+    ports[i] = unused_port();
+  /* interface 0 is the node's first section; the rest follow in `extra` */
+  extra[0] = 0;
+  used += (size_t)snprintf(extra + used, sizeof(extra) - used, "mode = %s\n%s", modes[0], extras[0] ? extras[0] : "");
+  for (i = 1; i < n; ++i) {
+    int w = snprintf(extra + used, sizeof(extra) - used,
+                     "[[If%zu]]\ntype = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n"
+                     "mode = %s\n%s",
+                     i, ports[i], modes[i], extras[i] ? extras[i] : "");
+    CHECK(w > 0 && (size_t)w < sizeof(extra) - used);
+    used += (size_t)w;
+  }
+  if (!reference && getenv("LIVE_LOG")) /* the node's own log, for finding out why a cell differs */
+    used += (size_t)snprintf(extra + used, sizeof(extra) - used, "[logging]\nloglevel = %s\n", getenv("LIVE_LOG"));
+  live_node_start(&node, reference, exe, python, ref_dir, base, ports[0], extra);
+  ++serial;
+  for (i = 0; i < n; ++i) {
+    CHECK(snprintf(name, sizeof(name), "m%u-%zu", serial, i) > 0);
+    live_peer_config(dir, sizeof(dir), base, name, ports[i]);
+    live_spawn(&peers[i], python, ref_dir, live_peer, dir);
+    CHECK(live_expect(&peers[i], "HASH", 20000, line, sizeof(line)));
+    CHECK(snprintf(hashes[i], sizeof(hashes[i]), "%s", line + 5) < (int)sizeof(hashes[i]));
+  }
+  live_sleep(3000);
+  for (i = 0; i < n; ++i) {
+    live_send(&peers[i], "announce\n");
+    live_sleep(2500); /* far enough apart that no peer's ingress control sees a burst */
+  }
+  for (i = 0; i < n; ++i)
+    for (j = 0; j < n; ++j)
+      heard[i][j] = 0;
+  live_sleep(4000);
+  for (j = 0; j < n; ++j)
+    while (live_expect(&peers[j], "ANN", 50, line, sizeof(line))) {
+      char got[40];
+      long hp, at;
+      CHECK(sscanf(line, "ANN %39s %ld %ld", got, &hp, &at) == 3);
+      for (i = 0; i < n; ++i)
+        if (!strcmp(got, hashes[i]) && i != j)
+          heard[i][j] = (int)(at > 0 ? at : 1);
+    }
+  for (i = 0; i < n; ++i)
+    live_end(&peers[i]);
+  live_node_stop(&node);
+}
+static void live_modes(const char *exe, const char *reference, const char *python, const char *base, const char *title,
+                       size_t n, const char *const *modes, const char *const *extras) {
+  int ref[LIVE_IF_MAX][LIVE_IF_MAX], here[LIVE_IF_MAX][LIVE_IF_MAX];
+  size_t i, j;
+  live_mode_matrix(1, exe, python, reference, base, n, modes, extras, ref);
+  live_mode_matrix(0, exe, python, reference, base, n, modes, extras, here);
+  if (getenv("LIVE_REPEAT")) { /* run both again and show them, to see which cells depend on timing */
+    int ref2[LIVE_IF_MAX][LIVE_IF_MAX], here2[LIVE_IF_MAX][LIVE_IF_MAX];
+    live_mode_matrix(1, exe, python, reference, base, n, modes, extras, ref2);
+    live_mode_matrix(0, exe, python, reference, base, n, modes, extras, here2);
+    for (i = 0; i < n; ++i) {
+      fprintf(stderr, "  %-12s", modes[i]);
+      for (j = 0; j < n; ++j)
+        fprintf(stderr, " %c%c", i == j ? '.' : ref[i][j] ? 'Y' : 'n', i == j ? ' ' : ref2[i][j] ? 'Y' : 'n');
+      fprintf(stderr, "  |");
+      for (j = 0; j < n; ++j)
+        fprintf(stderr, " %c%c", i == j ? '.' : here[i][j] ? 'Y' : 'n', i == j ? ' ' : here2[i][j] ? 'Y' : 'n');
+      fprintf(stderr, "\n");
+    }
+  }
+  fprintf(stderr, "%s: rows announce, columns hear (reference | here)\n", title);
+  for (i = 0; i < n; ++i) {
+    fprintf(stderr, "  %-10s", modes[i]);
+    for (j = 0; j < n; ++j) {
+      if (getenv("LIVE_TIMES"))
+        fprintf(stderr, " %5d", ref[i][j]);
+      else
+        fprintf(stderr, " %c", i == j ? '.' : ref[i][j] ? 'Y' : 'n');
+    }
+    fprintf(stderr, "  |");
+    for (j = 0; j < n; ++j) {
+      if (getenv("LIVE_TIMES"))
+        fprintf(stderr, " %5d", here[i][j]);
+      else
+        fprintf(stderr, " %c", i == j ? '.' : here[i][j] ? 'Y' : 'n');
+    }
+    fprintf(stderr, "\n");
+  }
+  for (i = 0; i < n; ++i)
+    for (j = 0; j < n; ++j)
+      CHECK(!ref[i][j] == !here[i][j]);
+}
+/* Scenario D: gravity. Two interfaces, X at gravity 0 and Y at gravity 5. The same announce arrives on both, once
+ * X first and once Y first; the path must end up on Y either way (the later copy on a higher gravity takes the
+ * path over; a later copy on a lower one does not). learned[k] is 'X', 'Y' or '?' for case k. */
+static void live_gravity(int reference, const char *exe, const char *python, const char *ref_dir, const char *base,
+                         char learned[2]) {
+  unsigned px = unused_port(), py = unused_port();
+  live_node node;
+  char extra[1024], line[512], hashes[2][33];
+  int rx, ry, order, k;
+  CHECK(snprintf(extra, sizeof(extra),
+                 "gravity = 0\n[[Y]]\ntype = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = %u\ngravity = 5\n", py) > 0);
+  live_node_start(&node, reference, exe, python, ref_dir, base, px, extra);
+  live_sleep(1500);
+  rx = tcp_connect(px);
+  ry = tcp_connect(py);
+  live_sleep(500);
+  for (k = 0; k < 2; ++k) {
+    uint8_t key[64] = {0}, wire[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+    unsigned random = 200u + (unsigned)k;
+    rnc_identity id;
+    rnc_packet packet;
+    size_t n, m;
+    int first = k ? ry : rx, second = k ? rx : ry;
+    key[10] = (uint8_t)(0x21 + k);
+    key[40] = (uint8_t)(0x21 + k);
+    CHECK(rnc_identity_from_private(&id, key) == RNC_OK &&
+          rnc_announce_create(&id, "reticulum_c.live.gravity", NULL, 0, (uint64_t)time(NULL), rng, &random,
+                              &packet) == RNC_OK);
+    hex_of(packet.destination, 16, hashes[k]);
+    CHECK(rnc_packet_encode(&packet, wire, sizeof(wire), &n) == RNC_OK &&
+          rnc_host_frame_encode(RNC_HOST_HDLC, 0, wire, n, framed, sizeof(framed), &m) == RNC_OK);
+    CHECK(write(first, framed, m) == (ssize_t)m);
+    live_sleep(1500);
+    CHECK(write(second, framed, m) == (ssize_t)m); /* the very same announce, heard again on the other interface */
+    live_sleep(1500);
+  }
+  (void)order;
+  learned[0] = learned[1] = '?';
+  if (reference) {
+    live_send(&node.ref, "dump\n");
+    for (;;) {
+      char got[40], iface[128];
+      long hp;
+      if (!live_expect(&node.ref, "", 3000, line, sizeof(line)) || !strncmp(line, "END", 3))
+        break;
+      if (strncmp(line, "TPATH ", 6))
+        continue;
+      CHECK(sscanf(line, "TPATH %39s %ld %127[^\n]", got, &hp, iface) == 3);
+      for (k = 0; k < 2; ++k)
+        if (!strcmp(got, hashes[k]))
+          learned[k] = strstr(iface, "Client on Y") ? 'Y' : strstr(iface, "Client on Peers") ? 'X' : '?';
+    }
+  } else {
+    char reply[8192];
+    admin_command(node.admin, "ROUTES", reply, sizeof(reply));
+    for (k = 0; k < 2; ++k) {
+      char needle[64], *at;
+      CHECK(snprintf(needle, sizeof(needle), "destination=%s interface=", hashes[k]) > 0);
+      at = strstr(reply, needle);
+      if (at) /* children are numbered in accept order: X was connected first */
+        learned[k] = strtoul(at + strlen(needle), NULL, 10) == 0x80000000u ? 'X' : 'Y';
+    }
+  }
+  close(rx);
+  close(ry);
+  live_node_stop(&node);
+}
+static void live_reference(const char *exe, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-live-XXXXXX";
+  long ref_wait, ref_hops, c_wait, c_hops, ref_hop[LIVE_HOPS], c_hop[LIVE_HOPS], ref_path[LIVE_HOPS], c_path[LIVE_HOPS];
+  size_t i;
+  CHECK(mkdtemp(base));
+  live_path_response(1, exe, python, reference, base, &ref_wait, &ref_hops);
+  live_path_response(0, exe, python, reference, base, &c_wait, &c_hops);
+  fprintf(stderr, "path response: reference %ld ms %ld hops, this daemon %ld ms %ld hops\n", ref_wait, ref_hops,
+          c_wait, c_hops);
+  CHECK(ref_hops == c_hops && ref_hops > 0);
+  /* PATH_REQUEST_GRACE is 0.4 s; both must sit in the same window, and well clear of an immediate answer */
+  /* The reference only sweeps its announce table once a second, so its answer comes between 0.4 s and about
+   * 1.3 s after the request; this daemon answers at the grace itself. */
+  CHECK(ref_wait >= 350 && ref_wait <= 1500);
+  CHECK(c_wait >= 350 && c_wait <= 800);
+  live_hop_limit(1, exe, python, reference, base, ref_hop, ref_path);
+  live_hop_limit(0, exe, python, reference, base, c_hop, c_path);
+  for (i = 0; i < LIVE_HOPS; ++i) {
+    fprintf(stderr,
+            "announce injected at %u hops: forwarded as %ld (reference) / %ld (here); path learned at %ld / %ld\n",
+            live_hop_values[i], ref_hop[i], c_hop[i], ref_path[i], c_path[i]);
+    CHECK(ref_hop[i] == c_hop[i] && ref_path[i] == c_path[i]);
+  }
+  {
+    const char *plain[] = {"full", "access_point", "roaming", "boundary", "internal", "gateway"};
+    const char *none[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
+    const char *flags[] = {"announces_from_internal = No\n", NULL, NULL, "announces_to_internal = Yes\n", NULL, NULL};
+    const char *mixed[] = {"internal", "full", "boundary", "internal", "roaming", "gateway"};
+    live_modes(exe, reference, python, base, "interface modes", 6, plain, none);
+    live_modes(exe, reference, python, base, "internal-mode flags", 6, mixed, flags);
+  }
+  {
+    char ref_g[2], here_g[2];
+    live_gravity(1, exe, python, reference, base, ref_g);
+    live_gravity(0, exe, python, reference, base, here_g);
+    fprintf(stderr, "gravity, announce first on X then Y / first on Y then X: reference path on %c %c, here %c %c\n",
+            ref_g[0], ref_g[1], here_g[0], here_g[1]);
+    CHECK(ref_g[0] == here_g[0] && ref_g[1] == here_g[1] && ref_g[0] != '?' && ref_g[1] != '?');
+  }
+  remove_tree(base);
+  puts("live reference-node comparison passed");
+}
 /* The shared instance as the reference does it on Linux: no shared_instance_type, so abstract Unix sockets named
  * by instance_name, for both the data port and the RPC port. Clients find it by name (ctl through --config, the
  * unmodified reference through its own config), and a second daemon cannot take the name. */
@@ -4681,6 +5178,8 @@ int main(int argc, char **argv) {
     blackhole(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
+  else if (!strcmp(argv[2], "live_ref") && argc == 5)
+    live_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "shared_unix") && argc == 4)
     shared_unix(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "shared_unix_ref") && argc == 6)
