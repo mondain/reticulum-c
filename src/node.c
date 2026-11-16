@@ -489,6 +489,39 @@ rnc_result rnc_node_interface_policy(rnc_node *n, uint32_t id,
   i->ingress = policy->ingress;
   return RNC_OK;
 }
+rnc_result rnc_node_drop_path(rnc_node *n, const uint8_t destination[16]) {
+  size_t i;
+  if (!n || !destination)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_ROUTES; i++)
+    if (n->routes[i].used && same(n->routes[i].route.destination, destination)) {
+      n->routes[i].used = 0;
+      return RNC_OK;
+    }
+  return RNC_STATE;
+}
+size_t rnc_node_drop_via(rnc_node *n, const uint8_t next_hop[16]) {
+  size_t i, dropped = 0;
+  if (!n || !next_hop)
+    return 0;
+  for (i = 0; i < RNC_NODE_ROUTES; i++)
+    if (n->routes[i].used && same(n->routes[i].route.next_hop, next_hop)) {
+      n->routes[i].used = 0;
+      dropped++;
+    }
+  return dropped;
+}
+size_t rnc_node_drop_announce_queues(rnc_node *n) {
+  size_t i, dropped = 0;
+  if (!n)
+    return 0;
+  for (i = 0; i < RNC_NODE_QUEUE; i++)
+    if (n->queued[i].used && (n->queued[i].packet.flags & 3u) == RNC_ANNOUNCE) {
+      n->queued[i].used = 0;
+      dropped++;
+    }
+  return dropped;
+}
 rnc_result rnc_node_remove_interface(rnc_node *n, uint32_t id) {
   node_interface *iface;
   size_t i;

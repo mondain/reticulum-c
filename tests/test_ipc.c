@@ -180,6 +180,28 @@ static void blackhole_rpc(void) {
   CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_OK &&
         c.type == RNC_RPC_BLACKHOLE_IDENTITY && c.until == 4000000000u &&
         !strcmp(c.reason, "spam"));
+  /* the reference's drop calls: a path, everything via a transport, and the announce queues */
+  n = unhex("82a464726f70a470617468b064657374696e6174696f6e5f68617368c410"
+            "11111111111111111111111111111111",
+            msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_OK && c.type == RNC_RPC_DROP_PATH &&
+        !memcmp(c.identity, id, 16));
+  n = unhex("82a464726f70a7616c6c5f766961b064657374696e6174696f6e5f68617368c410"
+            "11111111111111111111111111111111",
+            msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_OK && c.type == RNC_RPC_DROP_ALL_VIA &&
+        !memcmp(c.identity, id, 16));
+  n = unhex("81a464726f70af616e6e6f756e63655f717565756573", msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_OK && c.type == RNC_RPC_DROP_ANNOUNCE_QUEUES);
+  /* a path needs its hash, the queues take none, an unknown target is refused */
+  n = unhex("81a464726f70a470617468", msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_PROTOCOL);
+  n = unhex("82a464726f70af616e6e6f756e63655f717565756573b064657374696e6174696f6e5f68617368"
+            "c41011111111111111111111111111111111",
+            msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_PROTOCOL);
+  n = unhex("81a464726f70a56f74686572", msg);
+  CHECK(rnc_rpc_decode_command(msg, n, &c) == RNC_PROTOCOL);
   /* wrong identity size and queries are rejected without output */
   n = unhex("81b2626c61636b686f6c655f6964656e74697479c4021111", msg);
   memset(&c, 0, sizeof(c));

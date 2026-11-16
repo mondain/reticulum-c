@@ -2178,6 +2178,42 @@ static void cli_tools_id(const char *ctl, const char *dir) {
   }
   CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-d", enc, "-w",
                 dec, "-f", NULL) == 12);
+  /* base32 and base64 output and import (rnid -B, -b, -m, -M); the private key is the bytes 0..63 so the
+   * expected text is fixed */
+  {
+    static const char *b32 = "AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWHA5DYPSAIJCEMSCKJRHFAUSUKZMFUXC6MBRGIZTINJWG44DSOR3HQ6T4PY=";
+    static const char *b64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw==";
+    char fixed[300], imported[300], pub_hex[140], cmp[4096];
+    unsigned char key[64];
+    unsigned k;
+    rnc_identity fixed_id;
+    for (k = 0; k < 64; ++k)
+      key[k] = (unsigned char)k;
+    CHECK(snprintf(fixed, sizeof(fixed), "%s/fixed.id", dir) > 0 && snprintf(imported, sizeof(imported), "%s/imported.id", dir) > 0);
+    file_bytes(fixed, (const char *)key, 64);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", fixed, "-X", "-B", NULL) == 0 && strstr(out, b32));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", fixed, "-X", "-b", NULL) == 0 && strstr(out, b64));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", fixed, "-p", "-P", "-b", NULL) == 0 && strstr(out, b64));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", fixed, "-X", "-B", "-b", NULL) != 0); /* one format only */
+    /* importing the private key in each format gives the same identity */
+    CHECK(rnc_identity_from_private(&fixed_id, key) == RNC_OK);
+    hex_of(fixed_id.public_key, 64, pub_hex);
+    CHECK(ctl_run(ctl, cmp, sizeof(cmp), "id", "-M", b32, "-x", NULL) == 0 && strstr(cmp, pub_hex) && strstr(cmp, "base32"));
+    CHECK(ctl_run(ctl, cmp, sizeof(cmp), "id", "-M", b64, "-x", NULL) == 0 && strstr(cmp, pub_hex) && strstr(cmp, "base64"));
+    {
+      char hexkey[140];
+      hex_of(key, 64, hexkey);
+      CHECK(ctl_run(ctl, cmp, sizeof(cmp), "id", "-M", hexkey, "-x", NULL) == 0 && strstr(cmp, pub_hex) && strstr(cmp, "hex"));
+    }
+    CHECK(ctl_run(ctl, cmp, sizeof(cmp), "id", "-M", fixed, "-x", NULL) == 0 && strstr(cmp, pub_hex));
+    CHECK(ctl_run(ctl, cmp, sizeof(cmp), "id", "-M", "not-an-identity", "-x", NULL) == 8);
+    /* a public identity imports and exports, and cannot sign */
+    CHECK(ctl_run(ctl, cmp, sizeof(cmp), "id", "-m", pub_hex, "-x", NULL) == 0 && strstr(cmp, pub_hex));
+    CHECK(ctl_run(ctl, cmp, sizeof(cmp), "id", "-m", pub_hex, "-p", NULL) == 0 && strstr(cmp, "Not available"));
+    CHECK(ctl_run(ctl, cmp, sizeof(cmp), "id", "-m", pub_hex, "-s", data, "--raw", NULL) != 0);
+    (void)imported;
+    rnc_identity_clear(&fixed_id);
+  }
   rnc_identity_clear(&id);
 }
 /* The operator tools talk to a running daemon over its authenticated RPC port
@@ -2221,6 +2257,31 @@ static void cli_tools(const char *exe, const char *ctl) {
                 "--identity", keypath, NULL) == 0);
   CHECK(out[0] == '{' && strstr(out, "\"interfaces\"") && strstr(out, "\"rxb\"") &&
         strstr(out, "\"hash\": \""));
+  /* a name filter, sorting and reversing */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "External", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 &&
+        strstr(out, "External") && !strstr(out, "Shared Instance"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "no-such-interface", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 && !strstr(out, "Status"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-s", "traffic", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 && strstr(out, "Shared Instance"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-s", "rate", "-r", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 && strstr(out, "External"));
+  {
+    char first[8192];
+    char *a, *b;
+    CHECK(ctl_run(ctl, first, sizeof(first), "status", "-s", "rate", "--port", port_arg,
+                  "--identity", keypath, NULL) == 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-s", "rate", "-r", "--port", port_arg,
+                  "--identity", keypath, NULL) == 0);
+    /* the two interfaces have different rates, so -r puts them the other way round */
+    a = strstr(first, "Shared Instance");
+    b = strstr(first, "External");
+    CHECK(a && b);
+    CHECK((a < b) != (strstr(out, "Shared Instance") < strstr(out, "External")));
+  }
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-s", "bogus", "--port", port_arg,
+                "--identity", keypath, NULL) != 0);
   memset(zero_key, '0', 64);
   zero_key[64] = 0;
   CHECK(ctl_run(ctl, out, sizeof(out), "status", "--port", port_arg,
@@ -2259,6 +2320,32 @@ static void cli_tools(const char *exe, const char *ctl) {
         strstr(out, "No path"));
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "nothex", "--port", port_arg,
                 "--identity", keypath, NULL) != 0);
+
+  /* rate table, then drop a path, drop everything via a next hop, drop the announce queues */
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-r", "--port", port_arg,
+                "--identity", keypath, NULL) == 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-d", hash, "--port", port_arg,
+                "--identity", keypath, NULL) == 0 && strstr(out, "Dropped path"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", hash, "--port", port_arg,
+                "--identity", keypath, NULL) == 1 && strstr(out, "No path"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-d", hash, "--port", port_arg,
+                "--identity", keypath, NULL) == 1 && strstr(out, "No path"));
+  CHECK(rnc_announce_create(&id, "reticulum_c.ctl.test", NULL, 0,
+                            (uint64_t)time(NULL) + 1, rng, &random,
+                            &packet) == RNC_OK);
+  CHECK(rnc_packet_encode(&packet, raw, sizeof(raw), &n) == RNC_OK &&
+        rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed),
+                              &m) == RNC_OK);
+  CHECK(write(local, framed, m) == (ssize_t)m);
+  wait_for(admin, "ROUTES", hash, 5, reply, sizeof(reply));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-x", hash, "--port", port_arg,
+                "--identity", keypath, NULL) == 0 && strstr(out, "Dropped 1 path"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", hash, "--port", port_arg,
+                "--identity", keypath, NULL) == 1);
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-D", "--port", port_arg,
+                "--identity", keypath, NULL) == 0 && strstr(out, "announce"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-d", "--port", port_arg,
+                "--identity", keypath, NULL) != 0); /* -d needs a destination */
 
   /* blackhole list/add/remove through the RPC */
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "-b", "--port", port_arg,

@@ -141,6 +141,14 @@ typedef struct rnc_interface_policy {
 rnc_result rnc_node_interface_policy(rnc_node *node, uint32_t interface_id,
                                      const rnc_interface_policy *policy);
 rnc_result rnc_node_remove_interface(rnc_node *node, uint32_t interface_id);
+/* The reference's drop_path, drop_all_via and drop_announce_queues. A dropped path is forgotten at once and
+ * learned again from the next announce. drop_path returns RNC_STATE when there was no such path; drop_via
+ * returns how many paths used that next hop; drop_announce_queues discards the announces waiting to be sent
+ * on any interface (announces held back by the cap and ones waiting out their rebroadcast delay) and
+ * returns how many. */
+rnc_result rnc_node_drop_path(rnc_node *node, const uint8_t destination[16]);
+size_t rnc_node_drop_via(rnc_node *node, const uint8_t next_hop[16]);
+size_t rnc_node_drop_announce_queues(rnc_node *node);
 /* Copies private material solely for announce generation; clear/free removes
  * it. Keep name <=127 bytes and app data <=316. Outputs commit only on success.
  */

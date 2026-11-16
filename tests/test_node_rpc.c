@@ -33,6 +33,40 @@ static void query(const char *get, rnc_node *node, rnc_host *host,
   CHECK(rnc_rpc_writer_finish(&w, &n) == RNC_OK);
   CHECK(rpc_response(out, 4096, size, data, n, host, node, cfg, id, 0, 0));
 }
+/* The drop calls over the RPC: a known path answers True and is gone, a second drop False, all_via counts. */
+static void drop_rpc_test(void) {
+  uint8_t private_key[64] = {1}, key2[64] = {2}, out[256], data[128];
+  rnc_identity id, src;
+  rnc_packet a;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_route route;
+  rnc_rpc_writer w;
+  config cfg;
+  size_t size, n;
+  memset(&cfg, 0, sizeof(cfg));
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK && rnc_identity_from_private(&src, key2) == RNC_OK);
+  node = rnc_node_new(&id, 0, rng, NULL);
+  CHECK(node && rnc_node_add_interface(node, 1, 1000000) == RNC_OK);
+  host = rnc_host_new(node);
+  CHECK(host && rnc_announce_create(&src, "drop.rpc", NULL, 0, 1000, rng, NULL, &a) == RNC_OK);
+  CHECK(rnc_node_input(node, 1, &a, 1000, 0) == RNC_OK);
+  rnc_rpc_writer_init(&w, data, sizeof(data));
+  CHECK(rnc_rpc_write_map(&w, 2) == RNC_OK && rnc_rpc_write_string(&w, "drop") == RNC_OK &&
+        rnc_rpc_write_string(&w, "path") == RNC_OK && rnc_rpc_write_string(&w, "destination_hash") == RNC_OK &&
+        rnc_rpc_write_bin(&w, a.destination, 16) == RNC_OK && rnc_rpc_writer_finish(&w, &n) == RNC_OK);
+  CHECK(rpc_response(out, sizeof(out), &size, data, n, host, node, &cfg, &id, 0, 0));
+  CHECK(size == 1 && out[0] == 0xc3 && rnc_node_lookup(node, a.destination, 0, &route) == RNC_AGAIN);
+  CHECK(rpc_response(out, sizeof(out), &size, data, n, host, node, &cfg, &id, 0, 0));
+  CHECK(size == 1 && out[0] == 0xc2);
+  rnc_rpc_writer_init(&w, data, sizeof(data));
+  CHECK(rnc_rpc_write_map(&w, 1) == RNC_OK && rnc_rpc_write_string(&w, "drop") == RNC_OK &&
+        rnc_rpc_write_string(&w, "announce_queues") == RNC_OK && rnc_rpc_writer_finish(&w, &n) == RNC_OK);
+  CHECK(rpc_response(out, sizeof(out), &size, data, n, host, node, &cfg, &id, 0, 0));
+  CHECK(size == 1 && out[0] == 0xc0);
+  rnc_host_free(host);
+  rnc_node_free(node);
+}
 static void config_file(const char *path, const char *text) {
   FILE *f = fopen(path, "w");
   CHECK(f && fputs(text, f) >= 0 && !fclose(f));
@@ -314,6 +348,7 @@ int main(void) {
   checkpoint_retry_test();
   stable_interface_test();
   internal_mode_config_test();
+  drop_rpc_test();
   gravity_config_test();
   discovery_types_test();
   auto_options_test();

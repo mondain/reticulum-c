@@ -675,6 +675,40 @@ static void gravity(void) {
         route.hops == 1);
   rnc_node_free(n);
 }
+/* drop_path, drop_all_via and drop_announce_queues, as the reference's RPC and rnpath use them. */
+static void drops(void) {
+  rnc_identity src = identity(), other = identity(), self = identity();
+  rnc_packet a1, a2;
+  rnc_route route;
+  rnc_node_event e;
+  rnc_node *n = rnc_node_new(&self, 1, rng, NULL);
+  unsigned sent = 0;
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK && rnc_node_add_interface(n, 2, 1000000) == RNC_OK);
+  CHECK(rnc_announce_create(&src, "drop.one", NULL, 0, 1000, rng, NULL, &a1) == RNC_OK);
+  CHECK(rnc_announce_create(&other, "drop.two", NULL, 0, 1000, rng, NULL, &a2) == RNC_OK);
+  CHECK(rnc_node_input(n, 1, &a1, 1000, 0) == RNC_OK && rnc_node_input(n, 1, &a2, 1000, 0) == RNC_OK);
+  CHECK(rnc_node_lookup(n, a1.destination, 0, &route) == RNC_OK);
+  /* a path is dropped once; asking again, or for an unknown one, says there was none */
+  CHECK(rnc_node_drop_path(n, a1.destination) == RNC_OK);
+  CHECK(rnc_node_lookup(n, a1.destination, 0, &route) == RNC_AGAIN);
+  CHECK(rnc_node_drop_path(n, a1.destination) == RNC_STATE);
+  CHECK(rnc_node_lookup(n, a2.destination, 0, &route) == RNC_OK);
+  /* everything learned through one next hop; a direct path's next hop is its own destination */
+  CHECK(rnc_node_drop_via(n, a2.destination) == 1u);
+  CHECK(rnc_node_lookup(n, a2.destination, 0, &route) == RNC_AGAIN);
+  CHECK(rnc_node_drop_via(n, a2.destination) == 0u);
+  /* announces waiting to be sent are discarded */
+  CHECK(rnc_announce_create(&src, "drop.three", NULL, 0, 1000, rng, NULL, &a1) == RNC_OK);
+  CHECK(rnc_node_input(n, 1, &a1, 1000, 10) == RNC_OK);
+  CHECK(rnc_node_drop_announce_queues(n) >= 1u);
+  CHECK(rnc_node_tick(n, 1000, 5000) == RNC_OK);
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    if (e.type == RNC_NODE_SEND && e.interface_id == 2)
+      sent++;
+  CHECK(sent == 0);
+  CHECK(rnc_node_drop_announce_queues(n) == 0u);
+  rnc_node_free(n);
+}
 /* Destination.accepts_links: link requests to a destination that does not
  * accept them are dropped before the application sees them. */
 static void accepts_links(void) {
@@ -738,6 +772,8 @@ int main(int argc, char **argv) {
     hops_to();
   else if (!strcmp(argv[1], "announce_hop_limit"))
     announce_hop_limit();
+  else if (!strcmp(argv[1], "drops"))
+    drops();
   else if (!strcmp(argv[1], "gravity"))
     gravity();
   else if (!strcmp(argv[1], "accepts_links"))
