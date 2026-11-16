@@ -25,7 +25,13 @@ typedef struct rnc_requester_result {
   uint8_t destination[16];
   size_t size; /* response bytes (DONE only) */
   size_t metadata_size; /* metadata of a file response (see poll_file), else 0 */
+  /* The link's last physical layer figures (Link.get_rssi, get_snr, get_q), when tracking was switched on with
+   * rnc_requester_track_phy_stats and the link ran over an interface that reports them (an RNode). */
+  int has_signal, rssi;
+  float snr, quality;
 } rnc_requester_result;
+/* Link.track_phy_stats for the links of requests started from now on (default off). */
+void rnc_requester_track_phy_stats(rnc_requester *requester, int track);
 
 /* max_value bounds each request and response (0 = 1 MiB). */
 rnc_requester *rnc_requester_new(rnc_node *node, size_t max_value,

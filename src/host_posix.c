@@ -512,6 +512,10 @@ static int emit_host(rnc_host *h, rnc_host_event_type type, uint32_t id,
       e->rssi = f->status.rssi;
       e->snr = f->status.snr;
       e->quality = f->status.quality;
+      e->node.has_signal = 1; /* for the link managers, which see only the node event */
+      e->node.rssi = e->rssi;
+      e->node.snr = e->snr;
+      e->node.quality = e->quality;
     }
   }
   ++h->count;

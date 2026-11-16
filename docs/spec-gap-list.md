@@ -106,7 +106,7 @@ The native MCU firmware (PlatformIO boards, see [mcu/README.txt](../mcu/README.t
 | IMPL | RTT | `rnc_link_rtt` |
 | N/A | ResourceStrategy | By design the application admits each Resource with `rnc_resource_accept` (the ACCEPT_NONE / APP / ALL choice is the application's own policy before it calls it) |
 | IMPL | `get_age`, `no_inbound_for`, `no_outbound_for`, `no_data_for`, `get_mode`, `get_establishment_rate`, `get_expected_rate` | `rnc_link_age_ms`, `rnc_link_no_inbound_ms`, `rnc_link_no_outbound_ms`, `rnc_link_no_data_ms`, `rnc_link_mode`, `rnc_link_establishment_rate`, `rnc_link_last_resource_eifr` |
-| PART | `track_phy_stats`, rssi/snr/q | The host now collects RSSI, SNR and quality from RNodes and attaches them to each received packet's host event; per-link tracking (`link.get_rssi()`) is not provided |
+| IMPL | `track_phy_stats`, rssi/snr/q | The host collects RSSI, SNR and quality from RNodes and attaches them to each received packet's host event and node event. `rnc_link_track_phy_stats` (default off, as in the reference) and `rnc_link_get_rssi` / `get_snr` / `get_q` (one and the value, or zero for the reference's None) keep the figures of the latest accepted packet per link; `rnc_link_input_phy` feeds them, and the requester, responder and transfer managers pass the node event's figures on. `rnc_requester_track_phy_stats` turns tracking on for new requests and the result carries the link's figures. The responder and transfer managers feed their links but expose no accessor |
 | IMPL | RequestReceipt status and progress | `rnc_requester_progress` / `rnc_service_request_state`: FAILED, SENT, DELIVERED (request Resource arrived), RECEIVING (0..1 response Resource progress), READY. Callbacks are events/polling |
 
 ### Resource

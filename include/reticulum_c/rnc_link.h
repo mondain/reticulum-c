@@ -65,6 +65,20 @@ rnc_result rnc_link_open(rnc_link *link, const rnc_announce *peer, uint64_t now_
 rnc_result rnc_link_accept(rnc_link *link, const rnc_identity *local, const uint8_t destination[16],
                            const rnc_packet *request, uint64_t now_ms);
 rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now_ms);
+/* Physical layer figures of a received packet, as an RNode host reports them. */
+typedef struct rnc_link_phy {
+  int has_signal, rssi; /* RSSI in dBm */
+  float snr, quality;   /* SNR in dB, link quality in percent */
+} rnc_link_phy;
+/* Like rnc_link_input; when the link tracks physical layer statistics and the packet was accepted, `phy` (NULL
+ * or has_signal 0 for none) becomes the link's latest RSSI, SNR and quality. */
+rnc_result rnc_link_input_phy(rnc_link *link, const rnc_packet *packet, const rnc_link_phy *phy, uint64_t now_ms);
+/* Link.track_phy_stats (default off): turning it off forgets the figures. The getters are Link.get_rssi,
+ * get_snr and get_q: 1 and the value when the link tracks and has one, else 0 (the reference's None). */
+rnc_result rnc_link_track_phy_stats(rnc_link *link, int track);
+int rnc_link_get_rssi(const rnc_link *link, int *rssi);
+int rnc_link_get_snr(const rnc_link *link, float *snr);
+int rnc_link_get_q(const rnc_link *link, float *quality);
 rnc_result rnc_link_identify(rnc_link *link, const rnc_identity *identity, uint64_t now_ms);
 rnc_result rnc_link_send(rnc_link *link, uint16_t message_type, const void *data, size_t size,
                          uint64_t now_ms);
