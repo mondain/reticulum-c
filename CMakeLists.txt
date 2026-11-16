@@ -152,7 +152,7 @@ if(BUILD_TESTING)
     endforeach()
     add_executable(test_receipt tests/test_receipt.c)
     target_link_libraries(test_receipt PRIVATE reticulum_c)
-    foreach(case prove_all timeout prove_app forged status recycle default_timeout explicit_proof)
+    foreach(case prove_all timeout prove_app forged status recycle default_timeout explicit_proof send_single send_single_ratchet)
         add_test(NAME reticulum_receipt_${case} COMMAND test_receipt ${case})
     endforeach()
     add_executable(test_i2p tests/test_i2p.c)
@@ -362,6 +362,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
         add_executable(reticulum-c-example-request examples/example_request.c)
         target_link_libraries(reticulum-c-example-request PRIVATE reticulum_c_host OpenSSL::Crypto)
         target_compile_options(reticulum-c-example-request PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        add_executable(reticulum-c-example-echo examples/example_echo.c)
+        target_link_libraries(reticulum-c-example-echo PRIVATE reticulum_c_host OpenSSL::Crypto)
+        target_compile_options(reticulum-c-example-echo PRIVATE -Wall -Wextra -Wpedantic -Werror)
         add_executable(reticulum-c-git examples/reticulum_git.c)
         target_link_libraries(reticulum-c-git PRIVATE reticulum_c_host OpenSSL::Crypto)
         target_compile_options(reticulum-c-git PRIVATE -Wall -Wextra -Wpedantic -Werror ${RNC_NO_FORMAT_TRUNCATION})
@@ -528,7 +531,7 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                 $<TARGET_FILE:reticulum-c-node> ctl_remote $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_ctl_remote PROPERTIES LABELS network TIMEOUT 120)
             add_test(NAME reticulum_node_process_examples COMMAND test_node_process
-                $<TARGET_FILE:reticulum-c-node> examples $<TARGET_FILE:reticulum-c-example-announce> $<TARGET_FILE:reticulum-c-example-request>)
+                $<TARGET_FILE:reticulum-c-node> examples $<TARGET_FILE:reticulum-c-example-announce> $<TARGET_FILE:reticulum-c-example-request> $<TARGET_FILE:reticulum-c-example-echo>)
             set_tests_properties(reticulum_node_process_examples PROPERTIES LABELS network TIMEOUT 120)
             add_test(NAME reticulum_node_process_cp_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cp_tools $<TARGET_FILE:reticulum-c-cp>)
@@ -571,6 +574,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_disc_list_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_echo_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> echo_ref
+                    $<TARGET_FILE:reticulum-c-example-echo> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_echo_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
                 add_test(NAME reticulum_rnodeconf_rns COMMAND ${CMAKE_COMMAND} -E env TZ=UTC
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_rnodeconf> $<TARGET_FILE:reticulum-c-rnodeconf> ref

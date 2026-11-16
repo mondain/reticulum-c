@@ -17,7 +17,7 @@ Concrete remaining gaps include:
 1. Announce propagation: done (2026-11-15). A pending path response is cancelled by neighbour rebroadcasts as the reference does; no known open item remains here.
 2. Host interface options: Auto on several network devices at once (it uses one), address-change handling, and the I2P/RNode Multi/Weave options listed in section 4. Done on 2026-11-15: Auto device lists, scope and address type, `device` on TCP servers and UDP, `i2p_tunneled`. UDP multiple targets, serial hardware flow control and serial port locking are not in the pinned reference (it has one forward address and opens serial ports with `rtscts` off and no locking), so they are not gaps.
 3. Management and discovery details: done (2026-11-15): gravity, `autoconnect_announces_to_internal`, I2P/Weave discovery announcements and the remote-management `rates` query.
-4. API differences: no resend convenience method or per-link physical-signal tracking; event APIs replace Python callbacks. Bounded tables and queues differ from the reference's capacities.
+4. API differences: no per-link physical-signal tracking; event APIs replace Python callbacks. Bounded tables and queues differ from the reference's capacities.
 5. CLI feature subsets and stand-alone protocol examples (sections 5 and 6). The C `rnodeconf` tool does not flash firmware; `reticulum-c-flash` writes this project's ESP32-family firmware through the ROM loader (see the `rnodeconf` row), and the browser flasher under `web/` also targets this project's MCU firmware.
 
 Host RNode/RNode Multi adapters remain unverified against real stock RNode hardware. Separately, this project's native MCU LoRa firmware has a short 2026-11-14 bench exchange on a T-Echo leaf and T-Beam Supreme SX1262 gateway at 915 MHz: three-hop host access, a 10-byte `/echo` reply and a 116-byte `/info` response, with one request retry. This does not establish stock-RNode interoperability, range or sustained-load reliability; see [mcu/radio/README.txt](../mcu/radio/README.txt).
@@ -93,7 +93,7 @@ The native MCU firmware (PlatformIO boards, see [mcu/README.txt](../mcu/README.t
 | --- | --- | --- |
 | IMPL | Send via `rnc_node_send`, `rnc_link_send_packet(_hashed)` | Explicit C send functions in `rnc_node.h` and `rnc_link.h` |
 | IMPL | `PacketReceipt` status, rtt, timeout | `rnc_node_send_tracked` (DELIVERED/FAILED event with rtt), `rnc_node_receipt_status` (SENT/DELIVERED/FAILED, culled = RNC_STATE), `rnc_node_receipt_timeout` and timeout 0 for the reference default (6 s per hop plus first-hop 6 s + MTU at the interface rate). Callbacks are events |
-| MISS | `resend` convenience method | Resend by building and tracking a new packet |
+| IMPL | `send` / `resend` convenience | `rnc_node_send_single` encrypts the data to the destination (to its announced ratchet if it announced one, else its identity key), sends it and tracks the proof as `rnc_node_send_tracked` does; calling it again with the same data is `Packet.resend()`: the payload is encrypted afresh, giving a new packet hash and receipt as the reference's re-pack does (an identical packet would be dropped as a duplicate). Unit tests cover the identity and the ratchet case |
 | PART | Packet `get_rssi/get_snr/get_q` | RNode signal figures are carried by `rnc_host_event` (`has_signal`, `rssi`, `snr`, `quality`), rather than stored on `rnc_packet`; other host kinds do not supply these figures |
 
 ### Link
@@ -236,10 +236,10 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 | Status | Example | Notes |
 | --- | --- | --- |
 | PART | Announce (incl. ratcheted, path request), Broadcast/PLAIN, GROUP, Link, Identification (allow-list), Requests/Responses, Channel, Buffer, Filetransfer | Library behavior and tests exist. Stand-alone examples now cover announce and listen (`examples/example_announce.c`) and a request/response service with its client (`examples/example_request.c`, the answer is the text reversed), both run against the daemon by a process test. Still absent as examples: ratchets, broadcast/PLAIN, GROUP, Link, identification, Channel, Buffer; Filetransfer is `reticulum-c-cp` |
-| PART | Echo | Library encrypt/decrypt, proofs and receipts with RTT, `rnc_node_hops_to`; MCU test client in `mcu/tests/echo_client.c`, but no general host echo example |
+| IMPL | Echo | `examples/example_echo.c` (`reticulum-c-example-echo`): the server's destination proves every packet and announces; the client sends random data encrypted to it and reports the round-trip time from the proof, `--count` times. Run both ways against the unmodified `Examples/Echo.py` (`reticulum_node_process_echo_rns`) and against the daemon by a process test. MCU test client in `mcu/tests/echo_client.c` |
 | N/A | Callback-style APIs | Service, Resource and Link use event dispatch instead of Python callbacks by design |
 
-The repository's executables are `examples/text_peer.c`, the node daemon (`node_daemon.c`) and the tools of section 5 (`reticulum-c-ctl`, `-cp`, `-x`, `-sh`, `-rnodeconf`, `-git`, `-git-remote`, `-git-admin`, `-git-cs`). Two stand-alone protocol examples exist (`reticulum-c-example-announce`, `reticulum-c-example-request`); the rest are covered by library tests only. MCU applications under `mcu/` and the browser tools under `web/` are separate from this manual-example checklist.
+The repository's executables are `examples/text_peer.c`, the node daemon (`node_daemon.c`) and the tools of section 5 (`reticulum-c-ctl`, `-cp`, `-x`, `-sh`, `-rnodeconf`, `-git`, `-git-remote`, `-git-admin`, `-git-cs`). Three stand-alone protocol examples exist (`reticulum-c-example-announce`, `reticulum-c-example-request`, `reticulum-c-example-echo`); the rest are covered by library tests only. MCU applications under `mcu/` and the browser tools under `web/` are separate from this manual-example checklist.
 
 ## 7. Remaining work ordering
 

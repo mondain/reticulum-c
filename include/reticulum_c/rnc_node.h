@@ -214,6 +214,15 @@ rnc_result rnc_node_receipt_timeout(rnc_node *node, const uint8_t destination[16
 rnc_result rnc_node_send_tracked(rnc_node *node, const rnc_packet *packet,
                                  uint64_t timeout_ms, uint64_t unix_seconds,
                                  uint64_t now_ms, uint8_t hash[32]);
+/* Packet(destination, data).send() for a SINGLE destination with a known route: encrypts `data` to the
+ * destination as the reference does (to the ratchet it announced if it announced one, else to its identity
+ * key), sends the packet and tracks its delivery proof like rnc_node_send_tracked (same receipt event, timeout
+ * rule and returned hash). RNC_STATE without a route, RNC_NO_SPACE when the encrypted payload does not fit a
+ * packet. Calling it again with the same data is Packet.resend(): the payload is encrypted afresh, so the new
+ * packet has a new hash and a new receipt, as the reference's re-pack gives; a transport or the destination
+ * would drop an identical packet as a duplicate. */
+rnc_result rnc_node_send_single(rnc_node *node, const uint8_t destination[16], const void *data, size_t size,
+                                uint64_t timeout_ms, uint64_t unix_seconds, uint64_t now_ms, uint8_t hash[32]);
 /* Replaces the app data a SINGLE destination announces (up to 316 bytes), for
  * payloads that change between announces such as interface discovery. */
 rnc_result rnc_node_set_destination_data(rnc_node *node,
