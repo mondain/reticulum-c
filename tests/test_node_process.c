@@ -2916,7 +2916,13 @@ static void cp_tools(const char *exe, const char *cp) {
     read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
     parse_listening(listen_out, dest);
     CHECK(run_cp(cp, out, sizeof(out), send_args) == 0);
-    CHECK(strstr(out, "Transfer complete"));
+    CHECK(strstr(out, "Transfer complete") && !strstr(out, "physical layer"));
+    {
+      /* -P adds the rate the interface carried bytes at, next to the data rate */
+      char *send_p[] = {(char *)cp, "--connect", connect, "--identity", idb, "-P", payload, dest, NULL};
+      CHECK(run_cp(cp, out, sizeof(out), send_p) == 0);
+      CHECK(strstr(out, "Transfer complete") && strstr(out, "at physical layer") && strstr(out, "bps"));
+    }
     CHECK(snprintf(path, sizeof(path), "%s/payload.bin", recv) > 0);
     CHECK(file_read(path, buf, sizeof(buf)) == sizeof(bytes) &&
           !memcmp(buf, bytes, sizeof(bytes)));
