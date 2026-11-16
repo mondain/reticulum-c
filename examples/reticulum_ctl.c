@@ -962,6 +962,12 @@ static int cmd_status(int argc, char **argv) {
     pretty_size((double)as_uint(map_get(f, "txb")), a, sizeof(a));
     pretty_size((double)as_uint(map_get(f, "rxb")), b, sizeof(b));
     printf("    Traffic   : %s sent, %s received\n", a, b);
+    v = map_get(f, "txstalled");
+    if (v && as_uint(v))
+      puts("    Egress    : stalled, nothing is draining to this peer");
+    v = map_get(f, "ingress_gated");
+    if (v && as_uint(v))
+      puts("    Ingress   : throttled, reading from this peer is held back");
     printf("    Announces : %llu sent, %llu received\n",
            (unsigned long long)as_uint(map_get(f, "atxc")),
            (unsigned long long)as_uint(map_get(f, "arxc")));

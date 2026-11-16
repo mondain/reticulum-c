@@ -241,7 +241,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
                                "pr_burst_activated"};
   size_t i;
   (void)rnc_rpc_write_map(w, 25u + 14u + sizeof(zeros) / sizeof(*zeros) +
-                                 sizeof(nils) / sizeof(*nils) + 4u + 3u);
+                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u);
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
   key_string(w, "type", kind_name(s));
@@ -309,7 +309,10 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
     key_nil(w, "snr");
     key_nil(w, "q");
   }
-  key_bool(w, "txstalled", 0);
+  key_bool(w, "txstalled", s->tx_stalled);
+  /* this daemon's own: reading from the peer held back by ingress control, and how often that has happened */
+  key_bool(w, "ingress_gated", s->ingress_gated);
+  key_uint(w, "ingress_throttles", s->ingress_throttles);
   key_bool(w, "burst_active", 0);
   key_bool(w, "pr_burst_active", 0);
   key_int(w, "gravity", s->gravity);

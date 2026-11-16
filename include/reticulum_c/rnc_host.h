@@ -194,6 +194,11 @@ typedef struct rnc_host_status {
   /* path requests (the reference's prxc/ptxc and prxb/ptxb) */
   uint64_t rx_path_requests, tx_path_requests, rx_path_request_bytes, tx_path_request_bytes;
   uint64_t ifac_violations, protocol_violations;
+  /* backpressure on a TCP peer that connected to this host (the reference's Backbone ingress and egress control):
+   * reading from it is held back while the host's event queue is deep and it is the busiest producer, and its
+   * outgoing queue counts as stalled once nothing drains from it */
+  int ingress_gated, tx_stalled;
+  uint64_t ingress_throttles;
   size_t ifac_size;
   uint8_t ifac_signature[64];
   rnc_interface_mode mode;

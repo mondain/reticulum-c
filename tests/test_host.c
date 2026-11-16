@@ -201,6 +201,192 @@ static void unix_socket(void) {
   puts("host Unix socket tests passed (unsupported here)");
 #endif
 }
+/* ---- backpressure: ingress control on peers that connected to this host, and egress control ---- */
+typedef struct bp {
+  rnc_node *node;
+  rnc_host *host;
+  rnc_identity id;
+  unsigned seed;
+  uint64_t now;
+  uint16_t port;
+  uint8_t destination[16];
+} bp;
+static void bp_step(bp *b, unsigned ms) {
+  rnc_host_step(b->host, 0, 1700000000, b->now += ms);
+}
+static void bp_setup(bp *b) {
+  rnc_host_config cfg = {0};
+  rnc_host_status st;
+  uint8_t key[64] = {0};
+  memset(b, 0, sizeof(*b));
+  b->seed = 5;
+  key[10] = key[40] = 9;
+  CHECK(rnc_identity_from_private(&b->id, key) == RNC_OK);
+  b->node = rnc_node_new(&b->id, 1, random_bytes, &b->seed); /* a transport node: it relays */
+  b->host = b->node ? rnc_host_new(b->node) : NULL;
+  CHECK(b->host);
+  CHECK(rnc_node_add_destination(b->node, &b->id, "reticulum_c.bp.local", NULL, 0, b->destination) == RNC_OK);
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.address = "127.0.0.1";
+  CHECK(rnc_host_add(b->host, 1, &cfg) == RNC_OK);
+  CHECK(rnc_host_get_status(b->host, 1, &st) == RNC_OK && st.bound_port);
+  b->port = st.bound_port;
+  b->now = 1000;
+}
+static int bp_connect(bp *b, int rcvbuf) {
+  struct sockaddr_in a;
+  int fd = socket(AF_INET, SOCK_STREAM, 0), flags;
+  CHECK(fd >= 0);
+  if (rcvbuf)
+    CHECK(!setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)));
+  memset(&a, 0, sizeof(a));
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  a.sin_port = htons(b->port);
+  CHECK(!connect(fd, (struct sockaddr *)&a, sizeof(a)));
+  flags = fcntl(fd, F_GETFL);
+  CHECK(!fcntl(fd, F_SETFL, flags | O_NONBLOCK));
+  bp_step(b, 10);
+  bp_step(b, 10);
+  return fd;
+}
+/* the interface the host made for the n-th peer that connected */
+static uint32_t bp_peer(unsigned n) { return 0x80000000u + n; }
+static void bp_send_data(int fd, const uint8_t destination[16], unsigned count, unsigned payload) {
+  unsigned i;
+  for (i = 0; i < count; ++i) {
+    rnc_packet p = {0};
+    uint8_t raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+    size_t n, m;
+    memcpy(p.destination, destination, 16);
+    p.data_size = payload;
+    memset(p.data, (int)i, payload);
+    CHECK(rnc_packet_encode(&p, raw, sizeof(raw), &n) == RNC_OK &&
+          rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK);
+    CHECK(write(fd, framed, m) == (ssize_t)m);
+  }
+}
+static void bp_drain_events(bp *b) {
+  rnc_host_event e;
+  while (rnc_host_poll(b->host, &e) == RNC_OK) {
+  }
+}
+static void ingress_control_test(void) {
+  bp b;
+  int a, quiet, idle;
+  rnc_host_status sa, sq, si;
+  uint64_t before, before_quiet;
+  unsigned i;
+  bp_setup(&b);
+  a = bp_connect(&b, 0);
+  quiet = bp_connect(&b, 0);
+  idle = bp_connect(&b, 0);
+  (void)idle;
+  /* a floods, the second sends a few; nobody takes the events, so the queue behind the host deepens */
+  bp_send_data(quiet, b.destination, 3, 20);
+  bp_send_data(a, b.destination, 400, 20);
+  for (i = 0; i < 60; ++i)
+    bp_step(&b, 10); /* more than one 250 ms look */
+  CHECK(rnc_host_get_status(b.host, bp_peer(0), &sa) == RNC_OK && rnc_host_get_status(b.host, bp_peer(1), &sq) == RNC_OK &&
+        rnc_host_get_status(b.host, bp_peer(2), &si) == RNC_OK);
+  CHECK(sa.ingress_gated && sa.ingress_throttles == 1); /* the busiest producer is held */
+  CHECK(!sq.ingress_gated && !si.ingress_gated && sq.ingress_throttles == 0);
+  /* while it is held, what it sends is not read */
+  before = sa.rx_packets;
+  bp_send_data(a, b.destination, 50, 20);
+  for (i = 0; i < 40; ++i)
+    bp_step(&b, 10);
+  CHECK(rnc_host_get_status(b.host, bp_peer(0), &sa) == RNC_OK && sa.rx_packets == before);
+  /* the application catches up: the peers that are not held are read again at once */
+  bp_drain_events(&b);
+  before_quiet = sq.rx_packets;
+  bp_send_data(quiet, b.destination, 2, 20);
+  for (i = 0; i < 20; ++i)
+    bp_step(&b, 10);
+  CHECK(rnc_host_get_status(b.host, bp_peer(1), &sq) == RNC_OK && sq.rx_packets == before_quiet + 2);
+  CHECK(rnc_host_get_status(b.host, bp_peer(0), &sa) == RNC_OK && sa.ingress_gated);
+  /* below the low mark the hold is lifted, but only once its time is up */
+  for (i = 0; i < 40; ++i) { /* 10 s: shorter than the hold, which is a window times 48 */
+    bp_step(&b, 250);
+    bp_drain_events(&b);
+  }
+  CHECK(rnc_host_get_status(b.host, bp_peer(0), &sa) == RNC_OK && sa.ingress_gated);
+  /* the hold is the window times 48 times 1.5, a little over 20 seconds here */
+  for (i = 0; i < 160 && sa.ingress_gated; ++i) {
+    bp_step(&b, 250);
+    bp_drain_events(&b);
+    CHECK(rnc_host_get_status(b.host, bp_peer(0), &sa) == RNC_OK);
+  }
+  CHECK(!sa.ingress_gated && sa.ingress_throttles == 1);
+  for (i = 0; i < 40; ++i)
+    bp_step(&b, 10);
+  CHECK(rnc_host_get_status(b.host, bp_peer(0), &sa) == RNC_OK && sa.rx_packets > before); /* reading went on */
+  close(a);
+  close(quiet);
+  close(idle);
+  rnc_host_free(b.host);
+  rnc_node_free(b.node);
+  rnc_identity_clear(&b.id);
+  puts("host ingress control tests passed");
+}
+/* a peer that stops reading is first held for a while, then stalled (its packets dropped so the rest of the node
+ * goes on), then dropped as a connection */
+static void bp_flood(bp *b, int healthy, uint64_t *received, unsigned count, unsigned step_ms) {
+  unsigned i;
+  char buf[8192];
+  for (i = 0; i < count; ++i) {
+    rnc_packet p = {0};
+    rnc_result r;
+    p.flags = (uint8_t)(RNC_GROUP << 2); /* broadcast to every interface; no route or proof table is involved */
+    memcpy(p.destination, b->destination, 16);
+    p.data_size = 400;
+    memset(p.data, (int)i, p.data_size);
+    r = rnc_node_send(b->node, &p, 1700000000, b->now);
+    CHECK(r == RNC_OK || r == RNC_AGAIN);
+    bp_step(b, step_ms);
+    bp_drain_events(b);
+    for (;;) {
+      ssize_t got = read(healthy, buf, sizeof(buf));
+      if (got <= 0)
+        break;
+      *received += (uint64_t)got;
+    }
+  }
+}
+static void egress_control_test(void) {
+  bp b;
+  int stuck, healthy;
+  rnc_host_status ss, hs;
+  unsigned i;
+  uint64_t received = 0, before;
+  bp_setup(&b);
+  stuck = bp_connect(&b, 2048); /* a small receive window: the host's side fills up quickly */
+  healthy = bp_connect(&b, 0);
+  /* a flood both of them are sent; only the healthy one reads. The stuck peer's queue fills, the node waits for it
+   * a few seconds (the healthy peer sees nothing new meanwhile), then the peer counts as stalled and the node goes on */
+  for (i = 0; i < 60 && !(rnc_host_get_status(b.host, bp_peer(0), &ss) == RNC_OK && ss.tx_stalled); ++i)
+    bp_flood(&b, healthy, &received, 500, 2);
+  CHECK(rnc_host_get_status(b.host, bp_peer(0), &ss) == RNC_OK && ss.tx_stalled && ss.queued_frames >= 24);
+  before = received;
+  bp_flood(&b, healthy, &received, 100, 5);
+  bp_step(&b, 10);
+  CHECK(rnc_host_get_status(b.host, bp_peer(0), &ss) == RNC_OK && ss.dropped_packets > 0); /* dropped, not held */
+  CHECK(received >= before + 50u * 400u);                                                  /* the other kept receiving */
+  CHECK(rnc_host_get_status(b.host, bp_peer(1), &hs) == RNC_OK && !hs.tx_stalled && hs.dropped_packets == 0);
+  /* twelve seconds without a byte drained and the connection is dropped, the healthy one untouched */
+  for (i = 0; i < 400 && rnc_host_get_status(b.host, bp_peer(0), &ss) == RNC_OK; ++i) {
+    bp_step(&b, 100);
+    bp_drain_events(&b);
+  }
+  CHECK(rnc_host_get_status(b.host, bp_peer(0), &ss) != RNC_OK);
+  CHECK(rnc_host_get_status(b.host, bp_peer(1), &hs) == RNC_OK && hs.online);
+  close(stuck);
+  close(healthy);
+  rnc_host_free(b.host);
+  rnc_node_free(b.node);
+  rnc_identity_clear(&b.id);
+  puts("host egress control tests passed");
+}
 static void network(void) {
   unsigned ar = 0, br = 90;
   uint8_t key[64] = {0}, dest[16];
@@ -2070,6 +2256,10 @@ int main(int argc, char **argv) {
     log_test();
   else if (!strcmp(argv[1], "tunnel"))
     tunnel_test();
+  else if (!strcmp(argv[1], "ingress_control"))
+    ingress_control_test();
+  else if (!strcmp(argv[1], "egress_control"))
+    egress_control_test();
   else if (!strcmp(argv[1], "pressure"))
     serial_pressure_test();
   else if (!strcmp(argv[1], "device"))

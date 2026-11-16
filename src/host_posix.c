@@ -443,6 +443,12 @@ typedef struct host_interface {
   rnc_packet pending_packet;
   size_t pending_wire_size;
   uint64_t retry_at, next_tx, next_announce, discover_at, last_heard;
+  /* ingress control: packets and bytes taken in the current window, and whether reading is held back until
+   * ic_hold_until; egress control: what had been sent at the last look, when something last drained, and the
+   * run of looks without progress */
+  uint64_t ic_packets, ic_bytes, ic_hold_until, ec_sent_prev, ec_last_drain;
+  unsigned ec_zero_ticks;
+  int ic_gated, ec_stalled;
 } host_interface;
 struct rnc_host {
   rnc_node *node;
@@ -454,6 +460,7 @@ struct rnc_host {
   rnc_host_event events[RNC_NODE_EVENTS];
   int held;
   rnc_node_event held_event;
+  uint64_t ic_window_at, ec_at;
 };
 static host_interface *find_interface(rnc_host *h, uint32_t id) {
   size_t i;
@@ -1291,6 +1298,136 @@ rnc_host *rnc_host_new(rnc_node *node) {
   }
   return h;
 }
+/* ---- backpressure (the reference's BackboneInterface dataplane controls) --------------------------------------
+ * Ingress: the host's queue of events nobody has taken yet stands for the reference's inbound data queue, with its
+ * water marks at 90, 68 and 10 percent (at least 4, 2 and 0). Every 250 ms, while the queue is above the middle
+ * mark, the interface that delivered the most packets since the last look is held back (the socket is no longer
+ * read, so TCP pushes back on the peer) for the window's length times max(interfaces, 32) times 1.5; while it is
+ * below the low mark, held interfaces are released as their hold runs out, one per look. Reaching the high mark
+ * holds the busiest one at once. A shared-instance client is never held, and neither is anything but a TCP peer
+ * that connected to us.
+ * Egress: every second, a peer whose queue holds frames but whose sent count has not moved for three looks (with
+ * the queue at three quarters or more) is stalled, and its packets are dropped instead of holding up the whole
+ * node; one that sends nothing for 12 seconds is dropped as a connection. */
+#define IC_INTERVAL_MS 250u
+#define IC_HOLD_FACTOR 1.5
+#define IC_HEADROOM 32u
+#define EC_INTERVAL_MS 1000u
+#define EC_STALL_TICKS 3u
+#define EC_DEAD_TIME_MS 12000u
+static int dp_peer(const host_interface *f) {
+  return f->used && f->accepted && f->status.kind == RNC_HOST_TCP_CONNECT && !f->status.local && !f->sam_role &&
+         f->node_added;
+}
+static size_t wm_high(void) { return RNC_NODE_EVENTS * 90u / 100u < 4u ? 4u : RNC_NODE_EVENTS * 90u / 100u; }
+static size_t wm_mid(void) { return RNC_NODE_EVENTS * 68u / 100u < 2u ? 2u : RNC_NODE_EVENTS * 68u / 100u; }
+static size_t wm_low(void) { return RNC_NODE_EVENTS * 10u / 100u; }
+static host_interface *busiest_peer(rnc_host *h) {
+  host_interface *best = NULL;
+  size_t i;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    host_interface *f = &h->interfaces[i];
+    if (dp_peer(f) && !f->ic_gated && f->ic_packets && (!best || f->ic_packets > best->ic_packets))
+      best = f;
+  }
+  return best;
+}
+static void ic_throttle(rnc_host *h, host_interface *f, uint64_t span_ms) {
+  size_t i, peers = 0;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i)
+    peers += dp_peer(&h->interfaces[i]);
+  f->ic_gated = 1;
+  f->status.ingress_gated = 1;
+  ++f->status.ingress_throttles;
+  f->ic_hold_until = h->now + (uint64_t)((double)span_ms * (peers < IC_HEADROOM ? IC_HEADROOM : peers) * IC_HOLD_FACTOR);
+  rnc_logf(RNC_LOG_NOTICE, "host", "ingress throttled on %s", f->status.name);
+}
+static void ic_release(host_interface *f) {
+  f->ic_gated = 0;
+  f->status.ingress_gated = 0;
+  rnc_logf(RNC_LOG_NOTICE, "host", "released ingress throttle on %s", f->status.name);
+}
+/* once per interval, after the interfaces have been read and before the application has taken its events */
+static void ingress_control(rnc_host *h) {
+  uint64_t span = h->now - h->ic_window_at;
+  size_t i;
+  if (!h->ic_window_at) {
+    h->ic_window_at = h->now;
+    return;
+  }
+  if (span < IC_INTERVAL_MS)
+    return;
+  if (h->count > wm_mid()) {
+    host_interface *top = busiest_peer(h);
+    if (top)
+      ic_throttle(h, top, span);
+  } else if (h->count < wm_low()) {
+    for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+      host_interface *f = &h->interfaces[i];
+      if (f->used && f->ic_gated && h->now >= f->ic_hold_until) {
+        ic_release(f);
+        break;
+      }
+    }
+  }
+  h->ic_window_at = h->now;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i)
+    h->interfaces[i].ic_packets = h->interfaces[i].ic_bytes = 0;
+}
+/* the queue has reached the high mark: hold the busiest producer now, whatever the interval */
+static void ingress_immediate(rnc_host *h) {
+  host_interface *top;
+  if (h->count < wm_high())
+    return;
+  top = busiest_peer(h);
+  if (top)
+    ic_throttle(h, top, h->ic_window_at && h->now > h->ic_window_at ? h->now - h->ic_window_at : IC_INTERVAL_MS);
+}
+static void egress_control(rnc_host *h) {
+  size_t i;
+  if (h->now - h->ec_at < EC_INTERVAL_MS)
+    return;
+  h->ec_at = h->now;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    host_interface *f = &h->interfaces[i];
+    uint64_t drained;
+    if (!dp_peer(f) || f->fd < 0)
+      continue;
+    drained = f->status.tx_packets - f->ec_sent_prev;
+    f->ec_sent_prev = f->status.tx_packets;
+    if (!f->queue_count) {
+      f->ec_zero_ticks = 0;
+      f->ec_last_drain = h->now;
+      f->ec_stalled = f->status.tx_stalled = 0;
+      continue;
+    }
+    if (!f->ec_last_drain)
+      f->ec_last_drain = h->now;
+    if (h->now - f->ec_last_drain >= EC_DEAD_TIME_MS) {
+      rnc_logf(RNC_LOG_NOTICE, "host", "no egress drain progress for %u s on %s, tearing down",
+               (unsigned)(EC_DEAD_TIME_MS / 1000u), f->status.name);
+      disconnect_interface(h, f, ETIMEDOUT);
+      continue;
+    }
+    if (drained) {
+      /* it moves: stalled if emptying the queue at this rate would take over ten seconds with the queue above the
+       * middle mark, and free again below five (the reference's hysteresis) */
+      double eta = (double)f->queue_count * 1000.0 / ((double)drained * 1000.0 / (double)EC_INTERVAL_MS);
+      f->ec_last_drain = h->now;
+      f->ec_zero_ticks = 0;
+      if (f->queue_count * 4u >= RNC_HOST_QUEUE_FRAMES * 3u && eta > 10.0 * 1000.0 / 1000.0)
+        f->ec_stalled = f->status.tx_stalled = 1;
+      else if (eta < 5.0 || f->queue_count * 4u < RNC_HOST_QUEUE_FRAMES * 3u)
+        f->ec_stalled = f->status.tx_stalled = 0;
+    } else if (f->queue_count * 4u >= RNC_HOST_QUEUE_FRAMES * 3u) {
+      if (++f->ec_zero_ticks >= EC_STALL_TICKS && !f->ec_stalled) {
+        rnc_logf(RNC_LOG_DEBUG, "host", "no egress drain progress on %s, gating outbound", f->status.name);
+        f->ec_stalled = f->status.tx_stalled = 1;
+      }
+    } else
+      f->ec_zero_ticks = 0;
+  }
+}
 rnc_result rnc_host_remove(rnc_host *h, uint32_t id) {
   host_interface *f;
   size_t i;
@@ -1772,7 +1909,7 @@ static rnc_result queue_packet(host_interface *f, const rnc_packet *p) {
   rnc_result r;
   host_frame *q;
   if (f->queue_count == RNC_HOST_QUEUE_FRAMES)
-    return RNC_AGAIN;
+    return f->ec_stalled ? RNC_NO_SPACE : RNC_AGAIN; /* a peer that has stopped taking data must not hold up the node */
   r = rnc_packet_encode(p, raw, sizeof(raw), &n);
   if (r != RNC_OK)
     return r;
@@ -1924,6 +2061,8 @@ static rnc_result input_packet(rnc_host *h, host_interface *f,
   if (r == RNC_OK) {
     ++f->status.rx_packets;
     f->status.rx_bytes += wire_size;
+    ++f->ic_packets;
+    f->ic_bytes += wire_size;
     if ((p.flags & 3u) == RNC_ANNOUNCE) {
       ++f->status.rx_announces;
       f->status.rx_announce_bytes += wire_size;
@@ -3453,7 +3592,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
     if (f->fd >= 0) {
       pf[count].fd = f->fd;
       pf[count].events =
-          POLLIN | (f->connecting || f->queue_count ? POLLOUT : 0);
+          (f->ic_gated ? 0 : POLLIN) | (f->connecting || f->queue_count ? POLLOUT : 0);
       pf[count].revents = 0;
       owners[count] = f;
       kinds[count++] = 0;
@@ -3544,15 +3683,20 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         if (!blocked)
           (void)receive_datagram(h, f, unix_seconds);
       } else {
-        r = receive_stream(h, f, unix_seconds);
-        if (r != RNC_OK)
-          return r;
+        ingress_immediate(h);
+        if (!f->ic_gated) { /* the busiest producer may have been this one: it is not read this time */
+          r = receive_stream(h, f, unix_seconds);
+          if (r != RNC_OK)
+            return r;
+        }
       }
     }
     if ((pf[i].revents & POLLHUP) && DEVICE_KIND(f->status.kind) &&
         !f->pending && f->input_offset == f->input_size)
       disconnect_interface(h, f, 0);
   }
+  ingress_control(h);
+  egress_control(h);
   for (i = 0; i < RNC_HOST_SLOTS; ++i) {
     host_interface *f = &h->interfaces[i];
     if (!f->used)
