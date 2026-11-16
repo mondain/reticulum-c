@@ -1543,6 +1543,13 @@ static void shared_unix(const char *exe, const char *ctl, const char *reference,
   unsigned world;
   pid_t process;
   int fd;
+  {
+    struct sockaddr_storage probe;
+    if (!rnc_host_abstract_address("x", "", &probe, sizeof(probe))) { /* abstract sockets are a Linux feature */
+      puts("Unix-socket shared-instance test skipped (not Linux)");
+      return;
+    }
+  }
   CHECK(mkdtemp(dir));
   CHECK(snprintf(name, sizeof(name), "rnc-unix-%d", (int)getpid()) > 0);
   CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
