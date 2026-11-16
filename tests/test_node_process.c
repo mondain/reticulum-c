@@ -3676,6 +3676,40 @@ static void sh_tools(const char *exe, const char *sh) {
           strstr(out, "not allowed by listener"));
     stop_cp(listener, lfd);
   }
+  /* -p prints the identity (and with -l where it listens) without connecting; the allowed identities may come
+   * from ~/.config/rnsh/allowed_identities or ~/.rnsh/allowed_identities (lines of 32 characters); -T forces
+   * pipe mode on the initiator */
+  {
+    char home[400], rnsh_dir[420], allowed[460], want[64], listing[200];
+    char *saved_home = getenv("HOME");
+    char *print_id[] = {(char *)sh, "--identity", idb, "-p", NULL};
+    char *print_listen[] = {(char *)sh, "--identity", idb, "-l", "-p", NULL};
+    char *listen_args[] = {(char *)sh, "--connect", connect, "--identity", idl, "-l", "-b", "0", NULL};
+    uint8_t key_b[64], name_hash[10], dest_b[16];
+    rnc_identity id_b;
+    CHECK(file_read(idb, (char *)key_b, 64) == 64 && rnc_identity_from_private(&id_b, key_b) == RNC_OK);
+    CHECK(rnc_destination_hash("rnsh", &id_b, name_hash, dest_b) == RNC_OK);
+    hex_of(dest_b, 16, want);
+    CHECK(run_cp(sh, out, sizeof(out), print_id) == 0 && strstr(out, "Identity     : <") && strstr(out, hash_b) &&
+          !strstr(out, "Listening on"));
+    CHECK(run_cp(sh, out, sizeof(out), print_listen) == 0 && strstr(out, "Listening on : <") && strstr(out, want));
+    rnc_identity_clear(&id_b);
+    CHECK(snprintf(home, sizeof(home), "%s/home", dir) > 0 && !mkdir(home, 0700));
+    CHECK(snprintf(rnsh_dir, sizeof(rnsh_dir), "%s/.rnsh", home) > 0 && !mkdir(rnsh_dir, 0700));
+    CHECK(snprintf(allowed, sizeof(allowed), "%s/allowed_identities", rnsh_dir) > 0);
+    CHECK(snprintf(listing, sizeof(listing), "short\r\n%s\r\n%s0\r\n", hash_c, hash_b) > 0);
+    file_bytes(allowed, listing, strlen(listing));
+    CHECK(setenv("HOME", home, 1) == 0);
+    listener = spawn_cp(sh, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    CHECK(setenv("HOME", saved_home ? saved_home : "/", 1) == 0);
+    CHECK(sh_run(sh, connect, out, sizeof(out), "", idc, "-T", dest, "--", "echo", "from file", NULL) == 0 &&
+          strstr(out, "from file"));
+    CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "echo", "denied", NULL) != 0 &&
+          !strstr(out, "denied\n"));
+    stop_cp(listener, lfd);
+  }
   stop(daemon, dfd);
   remove_tree(dir);
   puts("sh tool tests passed");
