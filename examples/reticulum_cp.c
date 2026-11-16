@@ -72,7 +72,7 @@ static int hex_decode(const char *text, uint8_t *out, size_t size) {
 /* ---- file handling ------------------------------------------------------ */
 typedef struct options {
   const char *connect, *identity, *save, *jail, *fetch_path;
-  int listen, fetch, no_auth, allow_fetch, overwrite, silent, no_compress, print_identity;
+  int listen, fetch, no_auth, allow_fetch, overwrite, silent, no_compress, print_identity, phy_rates;
   long announce; /* seconds between announces; -1 = never */
   unsigned wait;
   rnc_transfer_config config;
@@ -434,6 +434,40 @@ static int await_path(app *a, const uint8_t destination[16]) {
   return rnc_host_await_path(a->host, destination, opt.wait * 1000u,
                              await_callback, a) == RNC_OK;
 }
+/* -P: the rate the data moves at, and the rate the link's interface carried bytes at (every frame in either
+ * direction, so it includes the protocol's own traffic and any compression), over a window of the last 32
+ * samples as the reference averages. */
+typedef struct rate_sample {
+  double t, data, wire;
+} rate_sample;
+static rate_sample rate_window[32];
+static size_t rate_count;
+static void note_rates(app *a, double data_bytes, double *data_rate, double *wire_rate) {
+  rnc_host_status status;
+  rate_sample now;
+  now.t = (double)monotonic_ms() / 1000.0;
+  now.data = data_bytes;
+  now.wire = rnc_host_get_status(a->host, 1, &status) == RNC_OK ? (double)(status.rx_bytes + status.tx_bytes) : 0.0;
+  if (rate_count == sizeof(rate_window) / sizeof(*rate_window)) {
+    memmove(rate_window, rate_window + 1, sizeof(rate_window) - sizeof(*rate_window));
+    --rate_count;
+  }
+  rate_window[rate_count++] = now;
+  *data_rate = *wire_rate = 0.0;
+  if (now.t > rate_window[0].t) {
+    *data_rate = 8.0 * (now.data - rate_window[0].data) / (now.t - rate_window[0].t);
+    *wire_rate = 8.0 * (now.wire - rate_window[0].wire) / (now.t - rate_window[0].t);
+  }
+}
+static void rate_text(double bits_per_second, char *out, size_t cap) {
+  static const char *units[] = {"bps", "Kbps", "Mbps", "Gbps"};
+  size_t u = 0;
+  while (bits_per_second >= 1000.0 && u < 3) {
+    bits_per_second /= 1000.0;
+    ++u;
+  }
+  (void)snprintf(out, cap, "%.2f %s", bits_per_second, units[u]);
+}
 static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
                       const char *send_path) {
   uint8_t *data = NULL, *result_data = NULL;
@@ -509,7 +543,15 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
     if (rnc_transfer_client_progress(a->client, 1, &progress) == RNC_OK) {
       int percent = (int)(progress * 100.0);
       if (!opt.silent && percent / 10 != last_percent / 10) {
-        fprintf(stderr, "Progress: %d%%\n", percent);
+        if (opt.phy_rates) {
+          double data_rate, wire_rate;
+          char data_text[32], wire_text[32];
+          note_rates(a, progress * (double)size, &data_rate, &wire_rate);
+          rate_text(data_rate, data_text, sizeof(data_text));
+          rate_text(wire_rate, wire_text, sizeof(wire_text));
+          fprintf(stderr, "Progress: %d%% - %s (%s at physical layer)\n", percent, data_text, wire_text);
+        } else
+          fprintf(stderr, "Progress: %d%%\n", percent);
         last_percent = percent;
       }
     }
@@ -585,6 +627,8 @@ int main(int argc, char **argv) {
       opt.no_compress = 1;
     else if (!strcmp(arg, "-p") || !strcmp(arg, "--print-identity"))
       opt.print_identity = 1;
+    else if (!strcmp(arg, "-P") || !strcmp(arg, "--phy-rates"))
+      opt.phy_rates = 1;
     else if (!strcmp(arg, "-s") || !strcmp(arg, "--save"))
       opt.save = VALUE;
     else if (!strcmp(arg, "-j") || !strcmp(arg, "--jail"))
