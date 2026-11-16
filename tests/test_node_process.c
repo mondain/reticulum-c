@@ -2119,6 +2119,7 @@ static size_t file_read(const char *path, char *out, size_t size) {
   close(fd);
   return (size_t)n;
 }
+static void write_identity(const char *path, uint8_t fill, char hash[33]);
 static void cli_tools_id(const char *ctl, const char *dir) {
   char out[4096], idfile[300], data[300], sig[320], enc[320], dec[320],
       buf[256], hex[40];
@@ -2178,6 +2179,40 @@ static void cli_tools_id(const char *ctl, const char *dir) {
   }
   CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-d", enc, "-w",
                 dec, "-f", NULL) == 12);
+  /* signature envelopes: the default (no --raw) form carries the signer, so it validates without -i;
+   * -i then names who must have signed it */
+  {
+    char other[300], other_hash[33];
+    char sigbuf[512];
+    CHECK(snprintf(other, sizeof(other), "%s/other.id", dir) > 0);
+    write_identity(other, 140, other_hash);
+    file_bytes(data, text, strlen(text));
+    CHECK(!unlink(sig));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-s", data, NULL) == 0 && strstr(out, "Signed file") &&
+          strstr(out, hex));
+    CHECK(file_read(sig, sigbuf, sizeof(sigbuf)) > 64 + 60);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", sig, NULL) == 0 && strstr(out, "Signature is valid") &&
+          strstr(out, hex));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-V", sig, NULL) == 0 && strstr(out, "Signature is valid"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", other, "-V", sig, NULL) == 10 && strstr(out, "NOT signed by") &&
+          strstr(out, other_hash));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-s", data, NULL) == 11); /* not overwritten */
+    file_bytes(data, "changed after signing", 21);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", sig, NULL) == 10 && strstr(out, "Invalid signature"));
+    file_bytes(data, text, strlen(text));
+    {
+      size_t sig_size = file_read(sig, sigbuf, sizeof(sigbuf));
+      sigbuf[10] ^= 1; /* a flipped signature byte */
+      file_bytes(sig, sigbuf, sig_size);
+    }
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", sig, NULL) == 10);
+    /* a bare (legacy) signature needs the identity */
+    CHECK(!unlink(sig));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-s", data, "--raw", NULL) == 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", sig, NULL) == 2);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-V", sig, "--raw", NULL) == 0);
+    CHECK(!unlink(sig));
+  }
   /* base32 and base64 output and import (rnid -B, -b, -m, -M); the private key is the bytes 0..63 so the
    * expected text is fixed */
   {
@@ -2437,6 +2472,20 @@ static void cli_id_reference(const char *ctl, const char *reference,
   CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-V", sig, "-r",
                 data, "--raw", NULL) == 0 &&
         strstr(ours, "is valid"));
+  /* envelopes: the reference validates ours, and ours validates the reference's */
+  CHECK(!unlink(sig));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-s", data, NULL) == 0);
+  ref_args[4] = "-V"; ref_args[5] = sig; ref_args[6] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+  CHECK(strstr(out, "Signature is valid") && strstr(out, hex));
+  CHECK(!unlink(sig));
+  ref_args[4] = "-i"; ref_args[5] = idfile; ref_args[6] = "-s"; ref_args[7] = data; ref_args[8] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-V", sig, NULL) == 0 && strstr(ours, "Signature is valid") && strstr(ours, hex));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-V", sig, NULL) == 0);
+  CHECK(!unlink(sig));
+  ref_args[4] = "-p"; ref_args[5] = "-H"; ref_args[6] = "example.aspect"; ref_args[7] = NULL;
+  ref_args[2] = "-i"; ref_args[3] = idfile;
   /* ours encrypts, reference decrypts */
   CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-e", data, NULL) == 0);
   ref_args[4] = "-d"; ref_args[5] = enc; ref_args[6] = "-w"; ref_args[7] = dec;

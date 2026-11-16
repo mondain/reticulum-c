@@ -1297,6 +1297,119 @@ static int ends_with(const char *s, const char *suffix) {
   size_t n = strlen(s), m = strlen(suffix);
   return n >= m && !strcmp(s + n - m, suffix);
 }
+/* ---- signature envelopes (.rsg) -------------------------------------------
+ * The reference's non-raw signature: Ed25519 over a MessagePack envelope, written as signature || envelope.
+ * The envelope is {"hashtype": "sha256", "hash": SHA-256 of the file, "meta": {"signer": identity hash,
+ * "pubkey": 64 byte public key}} in that key order, so the bytes match what the reference signs. */
+static int rsg_create(const rnc_identity *id, const uint8_t hash[32], uint8_t *out, size_t cap, size_t *size) {
+  uint8_t envelope[256];
+  rnc_rpc_writer w;
+  size_t n;
+  rnc_rpc_writer_init(&w, envelope, sizeof(envelope));
+  if (rnc_rpc_write_map(&w, 3) != RNC_OK || rnc_rpc_write_string(&w, "hashtype") != RNC_OK ||
+      rnc_rpc_write_string(&w, "sha256") != RNC_OK || rnc_rpc_write_string(&w, "hash") != RNC_OK ||
+      rnc_rpc_write_bin(&w, hash, 32) != RNC_OK || rnc_rpc_write_string(&w, "meta") != RNC_OK ||
+      rnc_rpc_write_map(&w, 2) != RNC_OK || rnc_rpc_write_string(&w, "signer") != RNC_OK ||
+      rnc_rpc_write_bin(&w, id->hash, 16) != RNC_OK || rnc_rpc_write_string(&w, "pubkey") != RNC_OK ||
+      rnc_rpc_write_bin(&w, id->public_key, 64) != RNC_OK || rnc_rpc_writer_finish(&w, &n) != RNC_OK)
+    return 0;
+  if (cap < 64 + n || rnc_identity_sign(id, envelope, n, out) != RNC_OK)
+    return 0;
+  memcpy(out + 64, envelope, n);
+  *size = 64 + n;
+  return 1;
+}
+/* 1 valid, 0 invalid or unreadable. `required` is the identity the signature must verify under (NULL: the
+ * public key the envelope carries); *signer receives the identity that was used. */
+static int rsg_validate(const uint8_t *rsg, size_t size, const uint8_t hash[32], const rnc_identity *required,
+                        rnc_identity *signer) {
+  val pool[32], root;
+  reader rd;
+  const val *hashtype, *sig_hash, *meta, *pubkey;
+  if (size < 65)
+    return 0;
+  rd.p = rsg + 64;
+  rd.end = rsg + size;
+  rd.pool = pool;
+  rd.used = 0;
+  rd.cap = 32;
+  if (!parse(&rd, &root, 0) || rd.p != rd.end || root.type != V_MAP)
+    return 0;
+  hashtype = map_get(&root, "hashtype");
+  sig_hash = map_get(&root, "hash");
+  meta = map_get(&root, "meta");
+  if (!hashtype || hashtype->type != V_STR || hashtype->n != 6 || memcmp(hashtype->p, "sha256", 6) || !sig_hash ||
+      sig_hash->type != V_BIN || sig_hash->n != 32 || !meta || meta->type != V_MAP || !map_get(meta, "signer"))
+    return 0;
+  pubkey = map_get(meta, "pubkey");
+  if (!pubkey || pubkey->type != V_BIN || pubkey->n != 64)
+    return 0;
+  if (required)
+    *signer = *required;
+  else if (rnc_identity_from_public(signer, pubkey->p) != RNC_OK)
+    return 0;
+  if (memcmp(sig_hash->p, hash, 32))
+    return 0;
+  return rnc_identity_verify(signer, rsg + 64, size - 64, rsg) == RNC_OK;
+}
+/* rnid -V: a signature file next to the file it covers. `id` is the identity the signature must verify under
+ * (NULL: whoever the envelope names). `--raw` signatures are the bare 64 bytes and need `id`. */
+static int validate_file(const rnc_identity *id, const char *validate, const char *read_path, int raw) {
+  char data_path[1024];
+  uint8_t *data, *sig, file_hash[32];
+  size_t size, sig_size;
+  rnc_identity signer;
+  char label[33];
+  int rc = RC_OK, valid;
+  if (read_path)
+    snprintf(data_path, sizeof(data_path), "%s", read_path);
+  else if (ends_with(validate, ".rsg") && strlen(validate) - 4 < sizeof(data_path)) {
+    memcpy(data_path, validate, strlen(validate) - 4);
+    data_path[strlen(validate) - 4] = 0;
+  } else {
+    fprintf(stderr, "Specify the signed file with -r\n");
+    return RC_INVALID_ARGS;
+  }
+  if (!read_file(validate, &sig, &sig_size)) {
+    fprintf(stderr, "The signature file %s does not exist\n", validate);
+    return RC_NO_FILE;
+  }
+  if (!read_file(data_path, &data, &size)) {
+    fprintf(stderr, "The file %s does not exist\n", data_path);
+    free(sig);
+    return RC_NO_FILE;
+  }
+  if (sig_size == 64 && !raw && !id) {
+    fprintf(stderr, "Cannot validate legacy rsg signatures without an explicit required identity\n");
+    rc = RC_NO_IDENTITY;
+  } else if (sig_size == 64 || raw) { /* a bare signature */
+    if (!id) {
+      fprintf(stderr, "Raw signatures need an identity, use -i\n");
+      rc = RC_NO_IDENTITY;
+    } else if (sig_size == 64 && rnc_identity_verify(id, data, size, sig) == RNC_OK)
+      printf("Signature of %s is valid\n", data_path);
+    else {
+      printf("Signature of %s is invalid\n", data_path);
+      rc = RC_INVALID_SIGNATURE;
+    }
+  } else {
+    valid = rnc_hash(data, size, file_hash) == RNC_OK && rsg_validate(sig, sig_size, file_hash, id, &signer);
+    if (valid) {
+      hex_encode(signer.hash, 16, label);
+      printf("Signature is valid, the file %s was signed by <%s>\n", data_path, label);
+    } else {
+      printf("Invalid signature %s for file %s\n", validate, data_path);
+      if (id) {
+        hex_encode(id->hash, 16, label);
+        printf("This file was NOT signed by <%s>\n", label);
+      }
+      rc = RC_INVALID_SIGNATURE;
+    }
+  }
+  free(sig);
+  free(data);
+  return rc;
+}
 static int cmd_id(int argc, char **argv) {
   const char *identity_path = NULL, *generate = NULL, *aspects = NULL,
              *encrypt = NULL, *decrypt = NULL, *sign = NULL, *validate = NULL,
@@ -1380,6 +1493,8 @@ static int cmd_id(int argc, char **argv) {
     rnc_identity_clear(&id);
     return rc;
   }
+  if (validate && !raw && !identity_path && !import_pub && !import_prv && !print && !sign && !encrypt && !decrypt)
+    return validate_file(NULL, validate, read_path, 0); /* the envelope names its signer */
   if (import_pub || import_prv) {
     const char *text = import_prv ? import_prv : import_pub;
     if (!import_identity(text, import_prv != NULL, &id, &how)) {
@@ -1433,66 +1548,43 @@ static int cmd_id(int argc, char **argv) {
     }
   }
   if (rc == RC_OK && sign) {
-    uint8_t *data, signature[64];
-    size_t size;
-    if (!raw) {
-      fprintf(stderr, "Only raw signatures are supported, add --raw\n");
+    uint8_t *data, signature[64], file_hash[32], rsg[512];
+    size_t size, rsg_size;
+    if (snprintf(out_path, sizeof(out_path), "%s.rsg", sign) >= (int)sizeof(out_path))
       rc = RC_INVALID_ARGS;
-    } else if (snprintf(out_path, sizeof(out_path), "%s.rsg", sign) >= (int)sizeof(out_path))
-      rc = RC_INVALID_ARGS;
-    else if (!read_file(sign, &data, &size)) {
+    else if (!id.has_private) {
+      fprintf(stderr, "Cannot sign \"%s\", the identity does not hold a private key\n", sign);
+      rc = RC_NO_PRVKEY;
+    } else if (!read_file(sign, &data, &size)) {
       fprintf(stderr, "The file %s does not exist\n", sign);
       rc = RC_NO_FILE;
     } else {
-      if (rnc_identity_sign(&id, data, size, signature) != RNC_OK)
+      if (raw) { /* the reference's legacy form: the bare signature */
+        if (rnc_identity_sign(&id, data, size, signature) != RNC_OK)
+          rc = RC_UNKNOWN_ERROR;
+        else {
+          rc = write_private_file(out_path, signature, 64, force);
+          if (rc == RC_FILE_EXISTS)
+            fprintf(stderr, "The signature file %s already exists, not overwriting\n", out_path);
+          else if (rc == RC_OK)
+            printf("Signed file %s, signature written to %s\n", sign, out_path);
+        }
+      } else if (rnc_hash(data, size, file_hash) != RNC_OK || !rsg_create(&id, file_hash, rsg, sizeof(rsg), &rsg_size))
         rc = RC_UNKNOWN_ERROR;
       else {
-        rc = write_private_file(out_path, signature, 64, force);
+        rc = write_private_file(out_path, rsg, rsg_size, force);
         if (rc == RC_FILE_EXISTS)
           fprintf(stderr, "The signature file %s already exists, not overwriting\n", out_path);
-        else if (rc == RC_OK)
-          printf("Signed file %s, signature written to %s\n", sign, out_path);
+        else if (rc == RC_OK) {
+          hex_encode(id.hash, 16, hex);
+          printf("Signed file %s with <%s>\n", sign, hex);
+        }
       }
       free(data);
     }
   }
-  if (rc == RC_OK && validate) {
-    uint8_t *data, *sig;
-    size_t size, sig_size;
-    const char *data_path = read_path;
-    if (!raw) {
-      fprintf(stderr, "Only raw signatures are supported, add --raw\n");
-      rc = RC_INVALID_ARGS;
-    } else if (!data_path && ends_with(validate, ".rsg") &&
-               strlen(validate) - 4 < sizeof(out_path)) {
-      memcpy(out_path, validate, strlen(validate) - 4);
-      out_path[strlen(validate) - 4] = 0;
-      data_path = out_path;
-    }
-    if (rc == RC_OK && !data_path) {
-      fprintf(stderr, "Specify the signed file with -r\n");
-      rc = RC_INVALID_ARGS;
-    } else if (rc == RC_OK) {
-      if (!read_file(validate, &sig, &sig_size)) {
-        fprintf(stderr, "The signature file %s does not exist\n", validate);
-        rc = RC_NO_FILE;
-      } else if (!read_file(data_path, &data, &size)) {
-        fprintf(stderr, "The file %s does not exist\n", data_path);
-        free(sig);
-        rc = RC_NO_FILE;
-      } else {
-        if (sig_size == 64 &&
-            rnc_identity_verify(&id, data, size, sig) == RNC_OK)
-          printf("Signature of %s is valid\n", data_path);
-        else {
-          printf("Signature of %s is invalid\n", data_path);
-          rc = RC_INVALID_SIGNATURE;
-        }
-        free(sig);
-        free(data);
-      }
-    }
-  }
+  if (rc == RC_OK && validate)
+    rc = validate_file(&id, validate, read_path, raw);
   if (rc == RC_OK && encrypt) {
     if (write_path)
       snprintf(out_path, sizeof(out_path), "%s", write_path);
