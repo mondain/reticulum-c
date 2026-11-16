@@ -58,6 +58,14 @@ struct rnc_resource {
   rnc_random_fn random;
   void *random_context;
   size_t limit, sdu;
+  int streaming;             /* made by rnc_resource_new_streaming: a source or a sink may be used */
+  rnc_resource_sink sink;    /* configuration: survives from one transfer to the next */
+  rnc_resource_source_fn source; /* this outgoing transfer's data, else the data is in `data` */
+  void *source_context;
+  uint8_t *meta_bytes;       /* outgoing: the 3 byte length and the metadata; incoming with a sink: the metadata */
+  size_t meta_size;
+  int sink_begun;
+  uint8_t seg_proof[32];     /* outgoing: what the receiver's proof of the current segment must contain */
   enum resource_state state;
   int outgoing, compress;
   resource_adv adv;
@@ -74,7 +82,7 @@ struct rnc_resource {
       cache_pending, proof_pending;
   uint8_t cached_proof[64], cache_hash[32];
   proof_record *proofs;
-  size_t proof_count, proof_capacity;
+  size_t proof_count, proof_capacity, proof_alloc; /* capacity: most segments allowed; alloc: what is allocated */
   uint64_t now, last_activity;
   unsigned retries;
   int progress_pending, terminal_pending;
@@ -112,6 +120,15 @@ static void clear_transfer(rnc_resource *r) {
     free(r->data);
   }
   r->data = NULL;
+  if (r->meta_bytes) {
+    rnc_cleanse(r->meta_bytes, r->meta_size);
+    free(r->meta_bytes);
+  }
+  r->meta_bytes = NULL;
+  r->meta_size = 0;
+  r->source = NULL;
+  r->source_context = NULL;
+  r->sink_begun = 0;
   r->data_size = r->assembled = r->metadata_size = r->metadata_prefix = 0;
   r->proof_count = 0;
   r->progress_pending = r->terminal_pending = r->proof_pending =
@@ -341,9 +358,21 @@ static rnc_result allocate_segment(rnc_resource *r, size_t wire_size,
   r->wire_capacity = wire_size;
   return RNC_OK;
 }
+/* Bytes [off, off + n) of the outgoing stream: the length-prefixed metadata, then the data. */
+static rnc_result stream_read(rnc_resource *r, size_t off, uint8_t *out, size_t n) {
+  size_t from_prefix = 0;
+  if (off < r->meta_size) {
+    from_prefix = r->meta_size - off < n ? r->meta_size - off : n;
+    memcpy(out, r->meta_bytes + off, from_prefix);
+  }
+  if (from_prefix == n)
+    return RNC_OK;
+  return r->source(r->source_context, (uint64_t)(off + from_prefix - r->meta_size), out + from_prefix, n - from_prefix);
+}
 static rnc_result prepare_segment(rnc_resource *r) {
   size_t off = (r->adv.index - 1u) * RNC_RESOURCE_SEGMENT_MAX,
          len = r->data_size - off, n, compressed_n, parts, i, j;
+  uint8_t *segment = NULL, *segment_copy = NULL; /* the segment's bytes: in `data`, or read from the source */
 #ifdef RNC_HAVE_BZIP2
   unsigned int bzsize;
 #endif
@@ -360,12 +389,30 @@ static rnc_result prepare_segment(rnc_resource *r) {
     free(compressed);
     return RNC_NO_SPACE;
   }
+  if (r->data)
+    segment = r->data + off;
+  else {
+    segment_copy = malloc(len ? len : 1);
+    if (!segment_copy) {
+      free(packed);
+      free(compressed);
+      return RNC_NO_SPACE;
+    }
+    result = len ? stream_read(r, off, segment_copy, len) : RNC_OK;
+    if (result != RNC_OK) {
+      free(segment_copy);
+      free(packed);
+      free(compressed);
+      return result;
+    }
+    segment = segment_copy;
+  }
   compressed_n = len;
 #ifdef RNC_HAVE_BZIP2
   if (r->compress && len) {
     bzsize = (unsigned int)(len + len / 100u + 601u);
     if (BZ2_bzBuffToBuffCompress((char *)compressed, &bzsize,
-                                 (char *)r->data + off, (unsigned int)len, 9, 0,
+                                 (char *)segment, (unsigned int)len, 9, 0,
                                  30) == BZ_OK &&
         bzsize < len)
       compressed_n = bzsize;
@@ -376,7 +423,7 @@ static rnc_result prepare_segment(rnc_resource *r) {
     memcpy(packed + 4, compressed, compressed_n);
   } else {
     r->adv.flags &= ~2u;
-    memcpy(packed + 4, r->data + off, len);
+    memcpy(packed + 4, segment, len);
   }
   result = r->random(r->random_context, random_prefix, 4);
   if (result != RNC_OK)
@@ -398,7 +445,7 @@ static rnc_result prepare_segment(rnc_resource *r) {
     result = r->random(r->random_context, r->adv.random, 4);
     if (result != RNC_OK)
       goto done;
-    result = digest2(r->data + off, len, r->adv.random, 4, r->adv.hash);
+    result = digest2(segment, len, r->adv.random, 4, r->adv.hash);
     if (result != RNC_OK)
       goto done;
     for (i = 0; i < parts; i++) {
@@ -425,6 +472,9 @@ static rnc_result prepare_segment(rnc_resource *r) {
   }
   if (r->adv.index == 1)
     memcpy(r->adv.original, r->adv.hash, 32);
+  result = digest2(segment, len, r->adv.hash, 32, r->seg_proof);
+  if (result != RNC_OK)
+    goto done;
   memcpy(r->adv.map, r->map, r->adv.map_size);
   r->known = parts;
   r->advertise_pending = 1;
@@ -436,12 +486,15 @@ done:
   rnc_cleanse(packed, len + 4u);
   free(packed);
   free(compressed);
+  if (segment_copy) {
+    rnc_cleanse(segment_copy, len ? len : 1);
+    free(segment_copy);
+  }
   return result;
 }
-rnc_resource *rnc_resource_new(rnc_link *link, size_t max_size,
-                               rnc_random_fn random, void *ctx) {
+static rnc_resource *resource_make(rnc_link *link, size_t max_size, rnc_random_fn random, void *ctx, int streaming) {
   rnc_resource *r;
-  if (!link || !random || max_size > RESOURCE_LIMIT)
+  if (!link || !random)
     return NULL;
   if (!max_size)
     max_size = RNC_RESOURCE_DEFAULT_LIMIT;
@@ -451,16 +504,43 @@ rnc_resource *rnc_resource_new(rnc_link *link, size_t max_size,
   r->link = link;
   r->sdu = rnc_link_mtu(link) - 36u;
   r->limit = max_size;
+  r->streaming = streaming;
   r->random = random;
   r->random_context = ctx;
-  r->proof_capacity =
-      (max_size + RNC_RESOURCE_SEGMENT_MAX - 1u) / RNC_RESOURCE_SEGMENT_MAX;
-  r->proofs = calloc(r->proof_capacity, sizeof(*r->proofs));
-  if (!r->proofs) {
-    free(r);
-    return NULL;
-  }
+  /* one proof of 96 bytes per segment, grown as segments arrive */
+  r->proof_capacity = (max_size + RNC_RESOURCE_SEGMENT_MAX - 1u) / RNC_RESOURCE_SEGMENT_MAX;
   return r;
+}
+rnc_resource *rnc_resource_new(rnc_link *link, size_t max_size,
+                               rnc_random_fn random, void *ctx) {
+  if (max_size > RESOURCE_LIMIT)
+    return NULL;
+  return resource_make(link, max_size, random, ctx, 0);
+}
+rnc_resource *rnc_resource_new_streaming(rnc_link *link, uint64_t max_size, rnc_random_fn random, void *ctx) {
+  /* 1 TiB (2 GiB on a 32 bit target) of data, with room for a transfer layer's metadata on top */
+  const uint64_t ceiling = (sizeof(size_t) > 4 ? UINT64_C(1) << 40 : UINT64_C(0x7fffffff)) + UINT64_C(0x1000000);
+  if (max_size > ceiling)
+    return NULL;
+  return resource_make(link, (size_t)max_size, random, ctx, 1);
+}
+/* A fresh resource with the configuration of `r` (limit, streaming, sink) for the next transfer */
+static rnc_resource *resource_like(const rnc_resource *r) {
+  rnc_resource *n = resource_make(r->link, r->limit, r->random, r->random_context, r->streaming);
+  if (n)
+    n->sink = r->sink;
+  return n;
+}
+rnc_result rnc_resource_set_sink(rnc_resource *r, const rnc_resource_sink *sink) {
+  if (!r || !r->streaming || (sink && !sink->write))
+    return RNC_INVALID;
+  if (active(r))
+    return RNC_STATE;
+  if (sink)
+    r->sink = *sink;
+  else
+    memset(&r->sink, 0, sizeof(r->sink));
+  return RNC_OK;
 }
 void rnc_resource_free(rnc_resource *r) {
   if (r) {
@@ -473,11 +553,12 @@ void rnc_resource_free(rnc_resource *r) {
 static rnc_result resource_send_prepared(rnc_resource *r, const void *data,
                                          size_t size,
                                          const rnc_resource_options *o,
-                                         uint64_t now) {
+                                         uint64_t now, rnc_resource_source_fn source,
+                                         void *source_context) {
   rnc_resource_options empty = {0};
   rnc_result result;
   size_t prefix;
-  if (!r || (!data && size) || now < r->now)
+  if (!r || (!data && size && !source) || now < r->now)
     return RNC_INVALID;
   if (active(r))
     return RNC_AGAIN;
@@ -499,16 +580,29 @@ static rnc_result resource_send_prepared(rnc_resource *r, const void *data,
   r->sdu = rnc_link_mtu(r->link) - 36u;
   memset(&r->adv, 0, sizeof(r->adv));
   r->data_size = size + prefix;
-  r->data = malloc(r->data_size ? r->data_size : 1);
-  if (!r->data)
-    return RNC_NO_SPACE;
-  if (prefix) {
-    r->data[0] = (uint8_t)(o->metadata_size >> 16);
-    r->data[1] = (uint8_t)(o->metadata_size >> 8);
-    r->data[2] = (uint8_t)o->metadata_size;
-    memcpy(r->data + 3, o->metadata, o->metadata_size);
+  if (source) {
+    /* streamed: only the length-prefixed metadata is kept; the data is read segment by segment */
+    r->source = source;
+    r->source_context = source_context;
+    if (prefix) {
+      r->meta_bytes = malloc(prefix);
+      if (!r->meta_bytes)
+        return RNC_NO_SPACE;
+      r->meta_size = prefix;
+    }
+  } else {
+    r->data = malloc(r->data_size ? r->data_size : 1);
+    if (!r->data)
+      return RNC_NO_SPACE;
   }
-  if (size)
+  if (prefix) {
+    uint8_t *head = source ? r->meta_bytes : r->data;
+    head[0] = (uint8_t)(o->metadata_size >> 16);
+    head[1] = (uint8_t)(o->metadata_size >> 8);
+    head[2] = (uint8_t)o->metadata_size;
+    memcpy(head + 3, o->metadata, o->metadata_size);
+  }
+  if (size && !source)
     memcpy(r->data + prefix, data, size);
   r->outgoing = 1;
   r->compress = o->compress;
@@ -586,9 +680,11 @@ static rnc_result resource_accept_prepared(rnc_resource *r, const uint8_t *data,
     clear_segment(r);
   else {
     clear_transfer(r);
-    r->data = malloc(a.total ? a.total : 1);
-    if (!r->data)
-      return RNC_NO_SPACE;
+    if (!r->sink.write) { /* without a sink the whole resource is assembled in memory */
+      r->data = malloc(a.total ? a.total : 1);
+      if (!r->data)
+        return RNC_NO_SPACE;
+    }
     r->data_size = a.total;
   }
   result = allocate_segment(r, a.transfer, a.parts);
@@ -635,11 +731,30 @@ rnc_result rnc_resource_send(rnc_resource *r, const void *data, size_t size,
     return RNC_INVALID;
   if (active(r))
     return RNC_AGAIN;
-  prepared = rnc_resource_new(r->link, r->limit, r->random, r->random_context);
+  prepared = resource_like(r);
   if (!prepared)
     return RNC_NO_SPACE;
   prepared->now = r->now;
-  result = resource_send_prepared(prepared, data, size, options, now);
+  result = resource_send_prepared(prepared, data, size, options, now, NULL, NULL);
+  if (result == RNC_OK)
+    commit_transfer(r, prepared);
+  else
+    rnc_resource_free(prepared);
+  return result;
+}
+rnc_result rnc_resource_send_stream(rnc_resource *r, rnc_resource_source_fn source, void *source_context,
+                                    uint64_t size, const rnc_resource_options *options, uint64_t now) {
+  rnc_resource *prepared;
+  rnc_result result;
+  if (!r || !source || !r->streaming || now < r->now || size > (uint64_t)r->limit)
+    return RNC_INVALID;
+  if (active(r))
+    return RNC_AGAIN;
+  prepared = resource_like(r);
+  if (!prepared)
+    return RNC_NO_SPACE;
+  prepared->now = r->now;
+  result = resource_send_prepared(prepared, NULL, (size_t)size, options, now, source, source_context);
   if (result == RNC_OK)
     commit_transfer(r, prepared);
   else
@@ -659,7 +774,7 @@ rnc_result rnc_resource_accept(rnc_resource *r, const uint8_t *data,
   if (active(r) || (!r->outgoing && r->state == RES_DONE &&
                     !memcmp(a.hash, r->adv.hash, 32)))
     return resource_accept_prepared(r, data, size, now);
-  prepared = rnc_resource_new(r->link, r->limit, r->random, r->random_context);
+  prepared = resource_like(r);
   if (!prepared)
     return RNC_NO_SPACE;
   prepared->now = r->now;
@@ -744,11 +859,61 @@ static rnc_result finish_segment(rnc_resource *r) {
     result = RNC_NO_SPACE;
     goto done;
   }
+  if (r->proof_count == r->proof_alloc) { /* grow the proof list a segment at a time, doubling */
+    size_t wanted = r->proof_alloc ? r->proof_alloc * 2u : 4u;
+    proof_record *grown;
+    if (wanted > r->proof_capacity)
+      wanted = r->proof_capacity;
+    grown = realloc(r->proofs, wanted * sizeof(*grown));
+    if (!grown) {
+      result = RNC_NO_SPACE;
+      goto done;
+    }
+    r->proofs = grown;
+    r->proof_alloc = wanted;
+  }
   memcpy(r->proofs[r->proof_count].data, proof, 64);
   result = proof_hash(r, proof, r->proofs[r->proof_count].packet_hash);
   if (result != RNC_OK)
     goto done;
-  if (len)
+  if (r->sink.write) {
+    /* hand the segment over; the first one carries the metadata prefix, which goes to begin() instead */
+    size_t skip = 0;
+    if (r->adv.index == 1) {
+      if (r->adv.flags & 32) {
+        size_t meta;
+        if (len < 3) {
+          result = RNC_PROTOCOL;
+          goto done;
+        }
+        meta = ((size_t)uncompressed[0] << 16) | ((size_t)uncompressed[1] << 8) | uncompressed[2];
+        if (!meta || meta > len - 3u || !rmp_value(uncompressed + 3, meta)) {
+          result = RNC_PROTOCOL; /* the metadata must lie within the first segment */
+          goto done;
+        }
+        r->meta_bytes = malloc(meta);
+        if (!r->meta_bytes) {
+          result = RNC_NO_SPACE;
+          goto done;
+        }
+        memcpy(r->meta_bytes, uncompressed + 3, meta);
+        r->meta_size = r->metadata_size = meta;
+        r->metadata_prefix = meta + 3u;
+        skip = r->metadata_prefix;
+      }
+      if (r->sink.begin) {
+        result = r->sink.begin(r->sink.context, r->meta_bytes, r->metadata_size, (uint64_t)(r->data_size - r->metadata_prefix));
+        if (result != RNC_OK)
+          goto done;
+      }
+      r->sink_begun = 1;
+    }
+    if (len > skip) {
+      result = r->sink.write(r->sink.context, (uint64_t)(r->assembled + skip - r->metadata_prefix), uncompressed + skip, len - skip);
+      if (result != RNC_OK)
+        goto done;
+    }
+  } else if (len)
     memcpy(r->data + r->assembled, uncompressed, len);
   r->assembled += len;
   r->proof_count++;
@@ -761,7 +926,7 @@ static rnc_result finish_segment(rnc_resource *r) {
       result = RNC_AUTH;
       goto done;
     }
-    if (r->adv.flags & 32) {
+    if ((r->adv.flags & 32) && !r->sink.write) {
       if (r->data_size < 3) {
         result = RNC_PROTOCOL;
         goto done;
@@ -1019,9 +1184,7 @@ rnc_result rnc_resource_input(rnc_resource *r, const rnc_link_event *e,
     len = r->data_size - off;
     if (len > RNC_RESOURCE_SEGMENT_MAX)
       len = RNC_RESOURCE_SEGMENT_MAX;
-    result = digest2(r->data + off, len, r->adv.hash, 32, expected);
-    if (result != RNC_OK)
-      return result;
+    memcpy(expected, r->seg_proof, 32); /* worked out when the segment was prepared */
     if (rnc_ct_memcmp(expected, p + 32, 32))
       return RNC_AUTH;
     r->assembled = off + len;
@@ -1313,15 +1476,9 @@ rnc_result rnc_resource_tick(rnc_resource *r, uint64_t now) {
     }
     else if (r->state == RES_TX_PROOF) {
       uint8_t proof[64];
-      size_t off = (r->adv.index - 1u) * RNC_RESOURCE_SEGMENT_MAX,
-             len = r->data_size - off;
       rnc_result result;
-      if (len > RNC_RESOURCE_SEGMENT_MAX)
-        len = RNC_RESOURCE_SEGMENT_MAX;
       memcpy(proof, r->adv.hash, 32);
-      result = digest2(r->data + off, len, r->adv.hash, 32, proof + 32);
-      if (result != RNC_OK)
-        return result;
+      memcpy(proof + 32, r->seg_proof, 32);
       result = proof_hash(r, proof, r->cache_hash);
       if (result != RNC_OK)
         return result;
@@ -1385,6 +1542,8 @@ rnc_result rnc_resource_read(const rnc_resource *r, void *data, size_t cap,
     return RNC_INVALID;
   if (r->outgoing || r->state != RES_DONE)
     return RNC_STATE;
+  if (r->sink.write)
+    return RNC_UNSUPPORTED; /* the data went to the sink */
   n = r->data_size - r->metadata_prefix;
   if (cap < n)
     return RNC_NO_SPACE;
@@ -1409,7 +1568,7 @@ rnc_result rnc_resource_metadata(const rnc_resource *r, void *data, size_t cap,
   if (cap < r->metadata_size)
     return RNC_NO_SPACE;
   if (r->metadata_size)
-    memcpy(data, r->data + 3, r->metadata_size);
+    memcpy(data, r->sink.write ? r->meta_bytes : r->data + 3, r->metadata_size);
   *written = r->metadata_size;
   return RNC_OK;
 }
