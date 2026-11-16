@@ -405,8 +405,8 @@ static rnc_result handle_command(void *context, const char *path,
 /* ---- node setup (as in reticulum-c-cp) ----------------------------------- */
 typedef struct options {
   const char *connect, *identity, *stdin_text;
-  int listen, no_announce, mirror, detailed, no_id;
-  double timeout;
+  int listen, no_announce, mirror, detailed, no_id, print_identity;
+  double timeout, result_timeout; /* result_timeout 0 = none given (-W) */
   long stdout_limit, stderr_limit; /* -1 = none */
   uint8_t allowed[8][16];
   size_t allowed_count;
@@ -475,6 +475,39 @@ static int pump(app *a) {
   return 1;
 }
 
+/* Extra allowed identities from the first of /etc/rnx, ~/.config/rnx and ~/.rnx that has an
+ * allowed_identities file, as the reference reads it: one hash per line, other lengths ignored. */
+static int load_allowed_file(void) {
+  static const char *places[] = {"/etc/rnx/allowed_identities", "~/.config/rnx/allowed_identities",
+                                 "~/.rnx/allowed_identities"};
+  const char *home = getenv("HOME");
+  char path[1024], line[256];
+  FILE *f = NULL;
+  size_t k;
+  for (k = 0; k < sizeof(places) / sizeof(*places) && !f; ++k) {
+    if (places[k][0] == '~')
+      (void)snprintf(path, sizeof(path), "%s%s", home ? home : "", places[k] + 1);
+    else
+      (void)snprintf(path, sizeof(path), "%s", places[k]);
+    f = fopen(path, "r");
+  }
+  if (!f)
+    return 1;
+  while (fgets(line, sizeof(line), f)) {
+    size_t n = strcspn(line, "\r\n");
+    line[n] = 0;
+    if (n != 32)
+      continue;
+    if (opt.allowed_count >= 8 || !hex_decode(line, opt.allowed[opt.allowed_count], 16)) {
+      fprintf(stderr, "Could not apply allowed identity %s from %s\n", line, path);
+      fclose(f);
+      return 0;
+    }
+    ++opt.allowed_count;
+  }
+  fclose(f);
+  return 1;
+}
 static int listen_mode(rnc_identity *id, app *a) {
   uint8_t destination[16];
   int announced = opt.no_announce;
@@ -640,7 +673,9 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
   uint8_t *request, *response;
   size_t request_size, capacity = RNC_RPC_MESSAGE_MAX;
   rnc_requester_result r;
-  uint64_t timeout_ms = (uint64_t)((opt.timeout + REPLY_GRACE_SECONDS + 5.0) * 1000.0);
+  uint64_t timeout_ms = (uint64_t)((opt.result_timeout > 0 ? opt.result_timeout
+                                                           : opt.timeout + REPLY_GRACE_SECONDS + 5.0) *
+                                   1000.0);
   int rc;
   a->requester = rnc_requester_new(a->node, RNC_RPC_MESSAGE_MAX, secure_random, NULL);
   if (!a->requester)
@@ -742,7 +777,14 @@ int main(int argc, char **argv) {
       opt.timeout = strtod(VALUE, &end);
       if (*end || !(opt.timeout > 0) || opt.timeout > 3600)
         return usage(), EXIT_USAGE;
-    } else if (!strcmp(arg, "-a") || !strcmp(arg, "--allowed")) {
+    } else if (!strcmp(arg, "-W")) {
+      char *end;
+      opt.result_timeout = strtod(VALUE, &end);
+      if (*end || !(opt.result_timeout > 0) || opt.result_timeout > 3600)
+        return usage(), EXIT_USAGE;
+    } else if (!strcmp(arg, "-p") || !strcmp(arg, "--print-identity"))
+      opt.print_identity = 1;
+    else if (!strcmp(arg, "-a") || !strcmp(arg, "--allowed")) {
       if (opt.allowed_count >= 8 ||
           !hex_decode(VALUE, opt.allowed[opt.allowed_count], 16)) {
         fprintf(stderr,
@@ -755,6 +797,26 @@ int main(int argc, char **argv) {
     else
       return usage(), EXIT_USAGE;
   }
+  if (opt.print_identity) {
+    uint8_t name_hash[10];
+    char label[33];
+    size_t k;
+    if (!opt.identity || positional_count)
+      return usage(), EXIT_USAGE;
+    if (rnc_host_identity_load(opt.identity, secure_random, NULL, &id) != RNC_OK ||
+        rnc_destination_hash(APP_NAME, &id, name_hash, destination) != RNC_OK) {
+      fprintf(stderr, "Cannot load or create the identity file %s\n", opt.identity);
+      return 1;
+    }
+    for (k = 0; k < 16; ++k)
+      (void)snprintf(label + 2 * k, 3, "%02x", id.hash[k]);
+    printf("Identity     : <%s>\n", label);
+    fputs("Listening on : <", stdout);
+    print_hex(destination, 16);
+    puts(">");
+    rnc_identity_clear(&id);
+    return 0;
+  }
   if (!opt.connect || !opt.identity)
     return usage(), EXIT_USAGE;
   if (opt.listen ? positional_count != 0 : positional_count != 2)
@@ -763,6 +825,8 @@ int main(int argc, char **argv) {
   signal(SIGTERM, on_signal);
   signal(SIGPIPE, SIG_IGN);
   if (!open_node(&id, &a))
+    return 1;
+  if (opt.listen && !load_allowed_file())
     return 1;
   if (opt.listen)
     rc = listen_mode(&id, &a);

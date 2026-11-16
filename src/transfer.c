@@ -279,7 +279,7 @@ static void listener_requests(rnc_transfer_listener *l, listener_slot *s,
                name_size <= RNC_TRANSFER_NAME_MAX) {
       uint8_t meta[RNC_TRANSFER_NAME_MAX + 16];
       rnc_resource_options o = {0};
-      o.compress = rnc_stream_compression_available();
+      o.compress = rnc_stream_compression_available() && !l->config.no_compress;
       o.metadata = meta;
       o.metadata_size = metadata_encode(name, name_size, meta);
       if (rnc_resource_send(s->c.tx, data, size, &o, now) == RNC_OK)
@@ -400,6 +400,7 @@ struct rnc_transfer_client {
   size_t max_size;
   rnc_random_fn random;
   void *random_context;
+  int no_compress;
   client_job jobs[RNC_TRANSFER_JOBS];
 };
 rnc_transfer_client *rnc_transfer_client_new(rnc_node *node, size_t max_size,
@@ -416,6 +417,10 @@ rnc_transfer_client *rnc_transfer_client_new(rnc_node *node, size_t max_size,
   c->random = random;
   c->random_context = random_context;
   return c;
+}
+void rnc_transfer_client_set_compression(rnc_transfer_client *c, int enabled) {
+  if (c)
+    c->no_compress = !enabled;
 }
 static void job_release_link(rnc_transfer_client *c, client_job *j) {
   if (j->released)
@@ -631,7 +636,7 @@ rnc_result rnc_transfer_client_tick(rnc_transfer_client *c,
       if (j->kind == JOB_SEND) {
         uint8_t meta[RNC_TRANSFER_NAME_MAX + 16];
         rnc_resource_options o = {0};
-        o.compress = rnc_stream_compression_available();
+        o.compress = rnc_stream_compression_available() && !c->no_compress;
         o.metadata = meta;
         o.metadata_size = metadata_encode(j->name, j->name_size, meta);
         if (rnc_resource_send(j->c.tx, j->input, j->input_size, &o, now_ms) ==

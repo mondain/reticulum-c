@@ -72,7 +72,7 @@ static int hex_decode(const char *text, uint8_t *out, size_t size) {
 /* ---- file handling ------------------------------------------------------ */
 typedef struct options {
   const char *connect, *identity, *save, *jail, *fetch_path;
-  int listen, fetch, no_auth, allow_fetch, overwrite;
+  int listen, fetch, no_auth, allow_fetch, overwrite, silent, no_compress, print_identity;
   long announce; /* seconds between announces; -1 = never */
   unsigned wait;
   rnc_transfer_config config;
@@ -342,6 +342,35 @@ static void flush_out(app *a) {
   while (monotonic_ms() - start < 300u && pump(a)) {
   }
 }
+/* The reference reads extra allowed identities from the first of /etc/rncp, ~/.config/rncp and ~/.rncp that
+ * has an allowed_identities file: one hash per line, lines of other lengths are ignored. */
+static int load_allowed_file(void) {
+  static const char *places[] = {"/etc/rncp/allowed_identities", "~/.config/rncp/allowed_identities",
+                                 "~/.rncp/allowed_identities"};
+  char path[PATH_MAX], line[256];
+  FILE *f = NULL;
+  size_t k;
+  for (k = 0; k < sizeof(places) / sizeof(*places) && !f; ++k)
+    if (expand_home(places[k], path, sizeof(path)))
+      f = fopen(path, "r");
+  if (!f)
+    return 1;
+  while (fgets(line, sizeof(line), f)) {
+    size_t n = strcspn(line, "\r\n");
+    line[n] = 0;
+    if (n != 32)
+      continue;
+    if (opt.config.allowed_count >= RNC_TRANSFER_ALLOWED ||
+        !hex_decode(line, opt.config.allowed[opt.config.allowed_count], 16)) {
+      fprintf(stderr, "Could not apply allowed identity %s from %s\n", line, path);
+      fclose(f);
+      return 0;
+    }
+    ++opt.config.allowed_count;
+  }
+  fclose(f);
+  return 1;
+}
 static int listen_mode(rnc_identity *id, app *a) {
   uint8_t destination[16];
   uint64_t next_announce = 0;
@@ -353,6 +382,7 @@ static int listen_mode(rnc_identity *id, app *a) {
   opt.config.received = on_received;
   opt.config.fetch = opt.allow_fetch ? on_fetch : NULL;
   opt.config.allow_all = opt.no_auth;
+  opt.config.no_compress = opt.no_compress;
   a->listener = rnc_transfer_listener_new(a->node, id, destination, &opt.config,
                                           secure_random, NULL);
   if (!a->listener)
@@ -414,6 +444,8 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
   int last_percent = -1, rc = 1;
   char base[PATH_MAX], saved[PATH_MAX];
   a->client = rnc_transfer_client_new(a->node, 0, secure_random, NULL);
+  if (a->client)
+    rnc_transfer_client_set_compression(a->client, !opt.no_compress);
   if (!a->client)
     return 1;
   if (!await_path(a, destination)) {
@@ -476,7 +508,7 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
       break;
     if (rnc_transfer_client_progress(a->client, 1, &progress) == RNC_OK) {
       int percent = (int)(progress * 100.0);
-      if (percent / 10 != last_percent / 10) {
+      if (!opt.silent && percent / 10 != last_percent / 10) {
         fprintf(stderr, "Progress: %d%%\n", percent);
         last_percent = percent;
       }
@@ -547,6 +579,12 @@ int main(int argc, char **argv) {
       opt.allow_fetch = 1;
     else if (!strcmp(arg, "-O") || !strcmp(arg, "--overwrite"))
       opt.overwrite = 1;
+    else if (!strcmp(arg, "-S") || !strcmp(arg, "--silent"))
+      opt.silent = 1;
+    else if (!strcmp(arg, "-C") || !strcmp(arg, "--no-compress"))
+      opt.no_compress = 1;
+    else if (!strcmp(arg, "-p") || !strcmp(arg, "--print-identity"))
+      opt.print_identity = 1;
     else if (!strcmp(arg, "-s") || !strcmp(arg, "--save"))
       opt.save = VALUE;
     else if (!strcmp(arg, "-j") || !strcmp(arg, "--jail"))
@@ -576,6 +614,26 @@ int main(int argc, char **argv) {
     else
       return usage(), 2;
   }
+  if (opt.print_identity) {
+    uint8_t name_hash[10];
+    char label[33];
+    size_t k;
+    if (!opt.identity || positional_count)
+      return usage(), 2;
+    if (rnc_host_identity_load(opt.identity, secure_random, NULL, &id) != RNC_OK ||
+        rnc_destination_hash(APP_NAME, &id, name_hash, destination) != RNC_OK) {
+      fprintf(stderr, "Cannot load or create the identity file %s\n", opt.identity);
+      return 1;
+    }
+    for (k = 0; k < 16; ++k)
+      (void)snprintf(label + 2 * k, 3, "%02x", id.hash[k]);
+    printf("Identity     : <%s>\n", label);
+    fputs("Listening on : <", stdout);
+    print_hex(destination, 16);
+    puts(">");
+    rnc_identity_clear(&id);
+    return 0;
+  }
   if (!opt.connect || !opt.identity)
     return usage(), 2;
   if (opt.listen ? positional_count != 0 || opt.fetch : positional_count != 2)
@@ -600,6 +658,8 @@ int main(int argc, char **argv) {
   signal(SIGTERM, on_signal);
   signal(SIGPIPE, SIG_IGN);
   if (!open_node(&id, &a.node, &a.host))
+    return 1;
+  if (opt.listen && !load_allowed_file())
     return 1;
   if (opt.listen)
     rc = listen_mode(&id, &a);
