@@ -3339,8 +3339,15 @@ static void cli_tools_id(const char *ctl, const char *dir) {
     CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", rsm, NULL) == 0 && strstr(out, "from a file\nsecond line"));
     CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "x", "-r", msgfile, "-w", base, "-f", NULL) == 250);
     CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "no destination", NULL) == 250);
-    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "x", "-w", base, "-f", "-b", NULL) == 250);
-    CHECK(!unlink(rsm) && !unlink(msgfile));
+    CHECK(!unlink(rsm)); /* the text forms print and write nothing, even given a write path */
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "x", "-w", base, "-f", "-b", NULL) == 0 &&
+          strstr(out, "#### Start of rsg data ####") && strstr(out, " End of rsg data ####") &&
+          strstr(out, "Message signed with <") && access(rsm, F_OK) != 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "x", "-U", NULL) == 0 &&
+          strstr(out, "Start of rsg data") && strstr(out, "Message signed with"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-S", "x", "-b", "-U", NULL) != 0 &&
+          strstr(out, "mutually exclusive"));
+    CHECK(!unlink(msgfile));
   }
   /* metadata (rnid -E, --meta-spec, --meta): without a spec every value is text, with one the values are typed
    * and the defaults fill in; --meta lists them, signer and key first, plain values before subsections */
@@ -3884,6 +3891,34 @@ static void cli_id_reference(const char *ctl, const char *reference,
       CHECK(!strcmp(a, b));
     }
     CHECK(!unlink(meta) && !unlink(spec) && !unlink(ours_rsm) && !unlink(ref_rsm));
+  }
+  /* the text form of a signature, for each encoding, for a file and for a message: the same bytes as the reference's */
+  {
+    static const char *const flags[] = {"-F", "-B", "-b", "-U"};
+    size_t f;
+    char a[8192], b[8192];
+    for (f = 0; f < sizeof(flags) / sizeof(*flags); ++f) {
+      ref_args[4] = "-s"; ref_args[5] = data; ref_args[6] = (char *)flags[f]; ref_args[7] = NULL;
+      CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-s", data, flags[f], NULL) == 0);
+      reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+      snprintf(a, sizeof(a), "%s", ours);
+      snprintf(b, sizeof(b), "%s", out);
+      if (strcmp(a, b))
+        fprintf(stderr, "signature text %s differs\n--- ours\n%s--- reference\n%s\n", flags[f], a, b);
+      CHECK(!strcmp(a, b) && strstr(a, "#### Start of rsg data ") && strstr(a, " End of rsg data ####"));
+      CHECK(access(sig, F_OK) != 0); /* nothing was written */
+      ref_args[4] = "-S"; ref_args[5] = "a message to sign, long enough to need more than one row of text output";
+      ref_args[6] = (char *)flags[f]; ref_args[7] = NULL;
+      CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-S",
+                    "a message to sign, long enough to need more than one row of text output", flags[f], NULL) == 0);
+      reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+      snprintf(a, sizeof(a), "%s", ours);
+      snprintf(b, sizeof(b), "%s", out);
+      if (strcmp(a, b))
+        fprintf(stderr, "message text %s differs\n--- ours\n%s--- reference\n%s\n", flags[f], a, b);
+      CHECK(!strcmp(a, b));
+    }
+    ref_args[4] = "-p"; ref_args[5] = "-H"; ref_args[6] = "example.aspect"; ref_args[7] = NULL;
   }
   /* signed messages: the reference validates ours, and ours validates the reference's */
   {
