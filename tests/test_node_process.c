@@ -4142,6 +4142,27 @@ static void interface_mtu(const char *exe) {
 /* The I2PInterface section against a fake SAM router: the key file is named
  * as the reference names it (the old name wins when such a file exists), the
  * address comes up in STATUS, and each peer gets a dialler. */
+/* This test twice timed out at 60 s on CI (sanitizer job only, never reproduced locally in 200 runs, where it takes
+ * 0.4 s) without printing anything. The watchdog turns the next occurrence into a message: after 45 s it says
+ * which step it was in, kills the two processes the test started, and fails. */
+static volatile const char *i2p_stage = "starting";
+static volatile pid_t i2p_router_pid, i2p_daemon_pid;
+static void i2p_stuck(int sig) {
+  static const char head[] = "node I2P test stuck at: ";
+  const char *stage = (const char *)i2p_stage;
+  size_t n = 0;
+  (void)sig;
+  while (stage[n])
+    ++n;
+  (void)!write(2, head, sizeof(head) - 1);
+  (void)!write(2, stage, n);
+  (void)!write(2, "\n", 1);
+  if (i2p_daemon_pid > 0)
+    kill(i2p_daemon_pid, SIGKILL);
+  if (i2p_router_pid > 0)
+    kill(i2p_router_pid, SIGKILL);
+  _exit(2);
+}
 static pid_t start_fake_sam(const char *fake, const char *log, unsigned *port) {
   int fds[2];
   pid_t p;
@@ -4158,6 +4179,7 @@ static pid_t start_fake_sam(const char *fake, const char *log, unsigned *port) {
     _exit(127);
   }
   close(fds[1]);
+  i2p_router_pid = p; /* known to the watchdog before the blocking read below */
   got = read(fds[0], text, sizeof(text) - 1);
   CHECK(got > 0);
   text[got] = 0;
@@ -4185,6 +4207,8 @@ static void i2p_daemon(const char *exe, const char *fake) {
   FILE *f;
   int fd;
   pid_t p, router;
+  signal(SIGALRM, i2p_stuck);
+  alarm(45);
   CHECK(mkdtemp(dir));
   CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
   CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
@@ -4192,6 +4216,7 @@ static void i2p_daemon(const char *exe, const char *fake) {
   CHECK(snprintf(state, sizeof(state), "%s/state", dir) > 0);
   CHECK(snprintf(keydir, sizeof(keydir), "%s.i2p", state) > 0);
   CHECK(snprintf(log, sizeof(log), "%s/sam.log", dir) > 0);
+  i2p_stage = "starting the fake SAM router (waiting for its port)";
   router = start_fake_sam(fake, log, &port);
   /* the old-format name, SHA256(SHA256(name)), already holds a key */
   SHA256((const unsigned char *)"I2P", 3, name_hash);
@@ -4210,8 +4235,11 @@ static void i2p_daemon(const char *exe, const char *fake) {
                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") > 0);
   config_file(cfg, text);
+  i2p_stage = "starting the daemon (waiting for its Ready line)";
   p = start_with_state(exe, cfg, key, admin, state, &fd);
+  i2p_daemon_pid = p;
   ready_line(fd, identity);
+  i2p_stage = "waiting for the I2P address in STATUS";
   for (tries = 0; tries < 100; ++tries) {
     struct timespec t = {0, 100000000};
     admin_command(admin, "STATUS", reply, sizeof(reply));
@@ -4236,7 +4264,9 @@ static void i2p_daemon(const char *exe, const char *fake) {
   hex_of(digest, 32, hex);
   CHECK(snprintf(path, sizeof(path), "%s/%s.i2p", keydir, hex) > 0);
   CHECK(stat(path, &sb) != 0);
+  i2p_stage = "stopping the first daemon";
   stop(p, fd);
+  i2p_daemon_pid = 0;
   /* with no stored key, one is generated under the new name */
   {
     DIR *d;
@@ -4252,8 +4282,11 @@ static void i2p_daemon(const char *exe, const char *fake) {
     }
     closedir(d);
   }
+  i2p_stage = "restarting the daemon (waiting for its Ready line)";
   p = start_with_state(exe, cfg, key, admin, state, &fd);
+  i2p_daemon_pid = p;
   ready_line(fd, identity);
+  i2p_stage = "waiting for the new key file";
   hex_of(digest, 32, hex);
   CHECK(snprintf(path, sizeof(path), "%s/%s.i2p", keydir, hex) > 0);
   for (tries = 0; tries < 100 && stat(path, &sb) != 0; ++tries) {
@@ -4261,7 +4294,10 @@ static void i2p_daemon(const char *exe, const char *fake) {
     nanosleep(&t, NULL);
   }
   CHECK(tries < 100 && (sb.st_mode & 077) == 0);
+  i2p_stage = "stopping the second daemon";
   stop(p, fd);
+  i2p_daemon_pid = 0;
+  alarm(0);
   kill(router, SIGKILL);
   waitpid(router, NULL, 0);
   remove_tree(dir);
