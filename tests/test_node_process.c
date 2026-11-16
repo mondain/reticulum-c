@@ -3126,6 +3126,23 @@ static void x_tools(const char *exe, const char *x) {
     CHECK(rc_ == 0);
   }
   CHECK(access(marker, F_OK) == 0);
+  /* -x: a prompt, one command per line over the same listener, the last exit code shown in the prompt,
+   * ending on exit, quit or end of input */
+  {
+    char script[1024];
+    char *args[] = {"/bin/sh", "-c", script, NULL};
+    CHECK(snprintf(script, sizeof(script),
+                   "printf 'echo first\\nsh -c \"exit 3\"\\necho third\\nclear\\nexit\\necho never\\n' | %s --connect %s "
+                   "--identity %s -x %s",
+                   x, connect, idb, dest) > 0);
+    CHECK(run_cp("/bin/sh", out, sizeof(out), args) == 0);
+    CHECK(strstr(out, "first"));
+    CHECK(strstr(out, "3> ") && strstr(out, "third") && !strstr(out, "never"));
+    CHECK(snprintf(script, sizeof(script), "printf 'echo only\\n' | %s --connect %s --identity %s -x %s", x, connect,
+                   idb, dest) > 0);
+    CHECK(run_cp("/bin/sh", out, sizeof(out), args) == 0 && strstr(out, "only")); /* end of input ends it too */
+    CHECK(x_run(x, connect, out, sizeof(out), idb, "-x", dest, "echo extra", NULL) != 0); /* no command with -x */
+  }
   /* -W caps how long the result may take: the command outlasts it and the run ends at once */
   started = time(NULL);
   CHECK(x_run(x, connect, out, sizeof(out), idb, "-w", "30", "-W", "2", dest, "sleep 6", NULL) == 244);
