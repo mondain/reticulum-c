@@ -114,6 +114,7 @@ The native MCU firmware (PlatformIO boards, see [mcu/README.txt](../mcu/README.t
 | Status | Feature | Notes |
 | --- | --- | --- |
 | IMPL | Advertisement, hashmap/HMU, part requests, proof, cancel, cache request parsing, bz2, metadata, request-id/response flags, multi-segment | `src/resource.c` |
+| IMPL | Streamed transfers (no whole resource in memory) | `rnc_resource_new_streaming`, `rnc_resource_send_stream` (a source called segment by segment, in order) and `rnc_resource_set_sink` (each segment handed over as soon as it is decrypted, decompressed and its hash checked): only the segment in flight, about 1 MiB, is held, for resources up to 1 TiB; the sender works out the segment's proof when it prepares it, and the receiver's proof list grows with the segments. Checked against both memory-bound and streaming peers, with a 20 MiB resource, failure of a source, a sink and a begin, and (for rncp) against the reference |
 | IMPL | Window sizing | Receiver window 4 (or the link's previous window), +1 per completed round up to 10, 75 after 4 fast rounds (>6.25 kB/s), 4 after 2 very slow rounds (<250 B/s), shrinks on a timed-out round; remembered per link |
 | IMPL | Retry/timeout logic | Receiver part timeout from the expected inflight rate (`update_eifr`, factor 4 then 2, HMU wait 3.5, grace 0.25 s, +0.5 s per retry); sender advertisement (RTT x 6 + 1 s), part-request (RTT x 96 + 78 s, then cancel) and proof (RTT x 3 + 10 s) timeouts |
 

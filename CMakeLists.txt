@@ -549,9 +549,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             add_test(NAME reticulum_node_process_disc_list COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> disc_list $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_disc_list PROPERTIES LABELS network TIMEOUT 60)
-            add_test(NAME reticulum_node_process_cp_big COMMAND test_node_process
-                $<TARGET_FILE:reticulum-c-node> cp_big $<TARGET_FILE:reticulum-c-cp>)
-            set_tests_properties(reticulum_node_process_cp_big PROPERTIES LABELS network TIMEOUT 600)
+            # it measures peak memory, which the sanitizers inflate many times over, so it runs in normal builds only
+            if(NOT RNC_SANITIZERS)
+                add_test(NAME reticulum_node_process_cp_big COMMAND test_node_process
+                    $<TARGET_FILE:reticulum-c-node> cp_big $<TARGET_FILE:reticulum-c-cp>)
+                set_tests_properties(reticulum_node_process_cp_big PROPERTIES LABELS network TIMEOUT 600)
+            endif()
             add_test(NAME reticulum_node_process_cli_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cli_tools $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
@@ -596,6 +599,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_rnid_announce_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_cp_big_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> cp_big_ref
+                    $<TARGET_FILE:reticulum-c-cp> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_cp_big_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 900)
                 add_test(NAME reticulum_rnodeconf_rns COMMAND ${CMAKE_COMMAND} -E env TZ=UTC
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_rnodeconf> $<TARGET_FILE:reticulum-c-rnodeconf> ref

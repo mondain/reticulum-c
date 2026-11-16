@@ -56,7 +56,8 @@ typedef int (*rnc_transfer_fetch_stream_fn)(void *context, const uint8_t *path, 
  * False (not found) or 240 (not allowed), and the file follows as a Resource.
  * A client pushes a file (send) or pulls one (fetch). Sans-I/O like
  * rnc_responder: feed LOCAL node events, tick, poll. Thread-confined; the node
- * and RNG are borrowed. Files are held in memory, bounded by max_size. */
+ * and RNG are borrowed. Files are held in memory, bounded by max_size, unless the streaming calls and
+ * configuration further down are used. */
 typedef struct rnc_transfer_listener rnc_transfer_listener;
 typedef struct rnc_transfer_client rnc_transfer_client;
 

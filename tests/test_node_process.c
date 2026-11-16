@@ -4403,11 +4403,15 @@ static int run_cp_measured(const char *cp, char *out, size_t size, char *const *
     int r = poll(&pf, 1, 200);
     CHECK(r >= 0);
     if (r > 0) {
-      ssize_t got = read(fd, out + n, size - 1 - n);
+      char sink[4096];
+      /* keep what fits, and read on past it: a program writing progress to a pipe nobody reads would stop */
+      ssize_t got = n < size - 1 ? read(fd, out + n, size - 1 - n) : read(fd, sink, sizeof(sink));
       if (got <= 0)
         break;
-      n += (size_t)got;
-      out[n] = 0;
+      if (n < size - 1) {
+        n += (size_t)got;
+        out[n] = 0;
+      }
     }
   }
   CHECK(now_ms() < end); /* finished in time */
@@ -4468,6 +4472,7 @@ static void cp_big(const char *exe, const char *cp) {
       read_until(lfd, "Saved received file to", listen_out, sizeof(listen_out), 20);
       CHECK(!unlink(small));
     }
+    fprintf(stderr, "pushing %llu bytes\n", (unsigned long long)size);
     CHECK(run_cp_measured(cp, out, sizeof(out), send_args, 240, &client_rss) == 0);
     CHECK(strstr(out, "Transfer complete"));
     read_until(lfd, "Saved received file to", listen_out, sizeof(listen_out), 20);
@@ -4492,6 +4497,7 @@ static void cp_big(const char *exe, const char *cp) {
     /* fetch: the same listener serves the file from disk */
     {
       char *fetch_args[] = {(char *)cp, "--connect", connect, "--identity", idb, "-S", "-f", big, "-s", fetched, dest, NULL};
+      fprintf(stderr, "fetching it back\n");
       CHECK(run_cp_measured(cp, out, sizeof(out), fetch_args, 240, &client_rss) == 0);
       CHECK(strstr(out, "Saved fetched file to"));
       CHECK(snprintf(path, sizeof(path), "%s/big.bin", fetched) > 0);
@@ -4515,6 +4521,92 @@ static void cp_big(const char *exe, const char *cp) {
   stop(daemon, dfd);
   remove_tree(dir);
   puts("rncp big file tests passed");
+}
+/* Files over the old 16 MiB limit against the unmodified reference rncp, in all four directions */
+static void cp_big_reference(const char *exe, const char *cp, const char *python) {
+  char dir[] = "/tmp/rnc-cpbigref-XXXXXX", cfg[256], key[256], admin[256], refcfg[300], refconf[320], jail[300], r1[300],
+       r2[300], fetched[300], idl[300], ref_l[300], ref_c[300], connect[64], dest[33], out[8192], listen_out[8192],
+       big[300], path[400], text[2048], identity[33];
+  const uint64_t size = (uint64_t)17 * 1024 * 1024 + 321;
+  unsigned port = unused_port();
+  int dfd, lfd;
+  pid_t daemon, listener;
+  long rss;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(refcfg, sizeof(refcfg), "%s/refcfg", dir) > 0 && !mkdir(refcfg, 0700));
+  CHECK(snprintf(refconf, sizeof(refconf), "%s/config", refcfg) > 0);
+  CHECK(snprintf(jail, sizeof(jail), "%s/jail", dir) > 0 && !mkdir(jail, 0700));
+  CHECK(snprintf(r1, sizeof(r1), "%s/r1", dir) > 0 && !mkdir(r1, 0700));
+  CHECK(snprintf(r2, sizeof(r2), "%s/r2", dir) > 0 && !mkdir(r2, 0700));
+  CHECK(snprintf(fetched, sizeof(fetched), "%s/fetched", dir) > 0 && !mkdir(fetched, 0700));
+  CHECK(snprintf(idl, sizeof(idl), "%s/id_ours", dir) > 0);
+  CHECK(snprintf(ref_l, sizeof(ref_l), "%s/id_ref_l", dir) > 0);
+  CHECK(snprintf(ref_c, sizeof(ref_c), "%s/id_ref_c", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(big, sizeof(big), "%s/big.bin", jail) > 0);
+  big_file_write(big, size);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+  config_file(cfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = False\nshare_instance = No\n[interfaces]\n[[Daemon]]\n"
+                 "type = TCPClientInterface\nenabled = yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n", port) > 0);
+  config_file(refconf, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  /* the reference listens and serves the file; ours pushes the big file to it and fetches it back */
+  {
+    char *ref_listen[] = {(char *)python, "-u", "-m", "RNS.Utilities.rncp", "--config", refcfg, "-l", "-n", "-F", "-j",
+                          jail, "-s", r1, "-b", "0", "-i", ref_l, "-v", NULL};
+    char *push[] = {(char *)cp, "--connect", connect, "--identity", idl, "-S", big, dest, "-w", "30", NULL};
+    char *pull[] = {(char *)cp, "--connect", connect, "--identity", idl, "-S", "-f", "big.bin", dest, "-s", fetched, "-w",
+                    "30", NULL};
+    listener = spawn_cp(python, &lfd, ref_listen);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rncp listening on <", listen_out, sizeof(listen_out), 60);
+    read_until(lfd, ">", listen_out, sizeof(listen_out), 5);
+    parse_listening(listen_out, dest);
+    CHECK(run_cp_measured(cp, out, sizeof(out), push, 400, &rss) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/big.bin", r1) > 0);
+    big_file_check(path, size);
+    CHECK(run_cp_measured(cp, out, sizeof(out), pull, 400, &rss) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/big.bin", fetched) > 0);
+    big_file_check(path, size);
+    CHECK(!unlink(path));
+    stop_cp(listener, lfd);
+  }
+  /* ours listens and serves; the reference pushes the big file and fetches it */
+  {
+    char *our_listen[] = {(char *)cp, "--connect", connect, "--identity", idl, "-l", "-n", "-F", "-j", jail, "-s", r2,
+                          "-b", "0", NULL};
+    char *ref_push[] = {(char *)python, "-u", "-m", "RNS.Utilities.rncp", "--config", refcfg, "-i", ref_c, "-w", "30",
+                        big, dest, NULL};
+    char *ref_pull[] = {(char *)python, "-u", "-m", "RNS.Utilities.rncp", "--config", refcfg, "-i", ref_c, "-w", "30",
+                        "-f", "big.bin", dest, "-s", fetched, "-O", NULL};
+    listener = spawn_cp(cp, &lfd, our_listen);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_listening(listen_out, dest);
+    {
+      int rc = run_cp_measured(python, out, sizeof(out), ref_push, 400, &rss);
+      if (rc)
+        fprintf(stderr, "reference rncp push exited %d:\n%s\n", rc, out);
+      CHECK(rc == 0);
+    }
+    CHECK(snprintf(path, sizeof(path), "%s/big.bin", r2) > 0);
+    big_file_check(path, size);
+    CHECK(run_cp_measured(python, out, sizeof(out), ref_pull, 400, &rss) == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/big.bin", fetched) > 0);
+    big_file_check(path, size);
+    stop_cp(listener, lfd);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("cp big files match the reference");
 }
 static void cp_tools(const char *exe, const char *cp) {
   char dir[] = "/tmp/rnc-node-cp-XXXXXX", cfg[256], key[256], admin[256],
@@ -5992,6 +6084,8 @@ int main(int argc, char **argv) {
     echo_reference(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "rnid_announce_ref") && argc == 6)
     rnid_announce_reference(argv[1], argv[3], argv[4], argv[5]);
+  else if (!strcmp(argv[2], "cp_big_ref") && argc == 6)
+    cp_big_reference(argv[1], argv[3], argv[5]);
   else if (!strcmp(argv[2], "cp_big") && argc == 4)
     cp_big(argv[1], argv[3]);
   else if (!strcmp(argv[2], "shared_unix") && argc == 4)
