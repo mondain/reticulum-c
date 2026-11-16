@@ -41,6 +41,8 @@ struct rnc_link {
     rnc_tx_message tx[RNC_CHANNEL_TX_MAX];
     rnc_rx_message rx[RNC_CHANNEL_RX_WINDOW];
     size_t head, count;
+    int track_phy, has_rssi, has_snr, has_q, phy_rssi;
+    float phy_snr, phy_q;
     rnc_link_event events[RNC_LINK_EVENTS];
 };
 int rnc_crypto_derive(const uint8_t private_key[32], const uint8_t public_key[32],

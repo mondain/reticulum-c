@@ -68,6 +68,10 @@ typedef struct rnc_node_event {
   uint8_t receipt_hash[32];
   rnc_receipt_status receipt_status;
   uint64_t rtt_ms;
+  /* Set by the host on events it hands out (RNC_HOST_NODE): the physical layer figures of the interface the
+   * packet came in on, when it reports them (an RNode). A link manager passes them on to its link. */
+  int has_signal, rssi;
+  float snr, quality;
 } rnc_node_event;
 rnc_result rnc_path_request_create(const uint8_t destination[16],
                                    const uint8_t transport_id[16],

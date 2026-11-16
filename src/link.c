@@ -435,7 +435,47 @@ void rnc_link_end(rnc_link *link, rnc_result reason, const rnc_packet *last_pack
                  (int)reason);
     }
 }
+rnc_result rnc_link_track_phy_stats(rnc_link *link, int track) {
+    if (!link)
+        return RNC_INVALID;
+    link->track_phy = track != 0;
+    if (!link->track_phy)
+        link->has_rssi = link->has_snr = link->has_q = 0;
+    return RNC_OK;
+}
+int rnc_link_get_rssi(const rnc_link *link, int *rssi) {
+    if (!link || !rssi || !link->track_phy || !link->has_rssi)
+        return 0;
+    *rssi = link->phy_rssi;
+    return 1;
+}
+int rnc_link_get_snr(const rnc_link *link, float *snr) {
+    if (!link || !snr || !link->track_phy || !link->has_snr)
+        return 0;
+    *snr = link->phy_snr;
+    return 1;
+}
+int rnc_link_get_q(const rnc_link *link, float *quality) {
+    if (!link || !quality || !link->track_phy || !link->has_q)
+        return 0;
+    *quality = link->phy_q;
+    return 1;
+}
+static rnc_result link_input(rnc_link *link, const rnc_packet *packet, uint64_t now);
+rnc_result rnc_link_input_phy(rnc_link *link, const rnc_packet *packet, const rnc_link_phy *phy, uint64_t now) {
+    rnc_result result = link_input(link, packet, now);
+    if (result == RNC_OK && link->track_phy && phy && phy->has_signal) {
+        link->phy_rssi = phy->rssi;
+        link->phy_snr = phy->snr;
+        link->phy_q = phy->quality;
+        link->has_rssi = link->has_snr = link->has_q = 1;
+    }
+    return result;
+}
 rnc_result rnc_link_input(rnc_link *link, const rnc_packet *packet, uint64_t now) {
+    return link_input(link, packet, now);
+}
+static rnc_result link_input(rnc_link *link, const rnc_packet *packet, uint64_t now) {
     uint8_t plain[RNC_LINK_MAX_MDU];
     size_t size = 0, required = 3;
     rnc_result result;

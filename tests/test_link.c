@@ -190,6 +190,41 @@ static void keepalive_test(void) {
     CHECK(rnc_link_tick(p.client, 490000) == RNC_OK && !rnc_link_is_active(p.client));
     finish(&p);
 }
+/* Link.track_phy_stats, get_rssi, get_snr, get_q: off by default, set from accepted packets only, forgotten when
+ * switched off. */
+static void phy_test(void) {
+    pair p; rnc_packet ping, pong; rnc_link_phy phy = {1, -97, 6.25f, 71.5f}, none = {0, 0, 0, 0};
+    int rssi = 0; float snr = 0, q = 0;
+    init(&p); establish(&p);
+    CHECK(!rnc_link_get_rssi(p.client, &rssi) && !rnc_link_get_snr(p.client, &snr) && !rnc_link_get_q(p.client, &q));
+    CHECK(rnc_link_tick(p.client, 30100) == RNC_OK); ping = outgoing(p.client);
+    CHECK(rnc_link_input(p.server, &ping, 30100) == RNC_OK); pong = outgoing(p.server);
+    /* not tracking: figures given with the packet are ignored */
+    CHECK(rnc_link_input_phy(p.client, &pong, &phy, 30100) == RNC_OK);
+    CHECK(!rnc_link_get_rssi(p.client, &rssi));
+    CHECK(rnc_link_track_phy_stats(p.client, 1) == RNC_OK);
+    CHECK(!rnc_link_get_rssi(p.client, &rssi) && !rnc_link_get_snr(p.client, &snr)); /* nothing yet */
+    CHECK(rnc_link_tick(p.client, 60100) == RNC_OK); ping = outgoing(p.client);
+    CHECK(rnc_link_input(p.server, &ping, 60100) == RNC_OK); pong = outgoing(p.server);
+    CHECK(rnc_link_input_phy(p.client, &pong, &none, 60100) == RNC_OK); /* no figures: still nothing */
+    CHECK(!rnc_link_get_rssi(p.client, &rssi));
+    CHECK(rnc_link_input_phy(p.client, &pong, &phy, 60100) == RNC_OK);
+    CHECK(rnc_link_get_rssi(p.client, &rssi) && rssi == -97 && rnc_link_get_snr(p.client, &snr) && snr == 6.25f &&
+          rnc_link_get_q(p.client, &q) && q == 71.5f);
+    /* a rejected packet leaves them alone */
+    pong.data[0] = 0xfe;
+    {
+        rnc_link_phy other = {1, -50, 1.0f, 99.0f}; rnc_packet bad = pong; bad.data[0] = 0xff;
+        CHECK(rnc_link_input_phy(p.client, &bad, &other, 60200) != RNC_OK);
+    }
+    CHECK(rnc_link_get_rssi(p.client, &rssi) && rssi == -97);
+    CHECK(rnc_link_track_phy_stats(p.client, 0) == RNC_OK);
+    CHECK(!rnc_link_get_rssi(p.client, &rssi) && !rnc_link_get_snr(p.client, &snr) && !rnc_link_get_q(p.client, &q));
+    CHECK(rnc_link_track_phy_stats(p.client, 1) == RNC_OK && !rnc_link_get_rssi(p.client, &rssi)); /* forgotten */
+    CHECK(rnc_link_track_phy_stats(NULL, 1) == RNC_INVALID && !rnc_link_get_rssi(NULL, &rssi) &&
+          !rnc_link_get_rssi(p.client, NULL));
+    finish(&p);
+}
 static void boundaries_test(void) {
     pair p; rnc_packet data, proof; rnc_link_event event; rnc_identity remote;
     rnc_link snapshot; uint8_t payload[RNC_CHANNEL_MDU]; unsigned i, entropy;
@@ -366,6 +401,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "reasons")) reasons_test();
     else if (!strcmp(argv[1], "establishment")) establishment_test();
     else if (!strcmp(argv[1], "getters")) getters_test();
+    else if (!strcmp(argv[1], "phy")) phy_test();
     else CHECK(0);
     puts("native C link test passed"); return 0;
 }

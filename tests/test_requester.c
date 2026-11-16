@@ -50,6 +50,7 @@ static rnc_result handler(void *context, const char *path,
   *written = size;
   return RNC_OK;
 }
+static int pump_signal; /* the client's node events arrive with these physical layer figures */
 static void pump(net *n, unsigned steps) {
   unsigned i;
   for (i = 0; i < steps; i++) {
@@ -69,7 +70,14 @@ static void pump(net *n, unsigned steps) {
         CHECK(rnc_node_input(n->server, 1, &e.packet, UNIX, n->now) == RNC_OK);
       }
       else if (e.type == RNC_NODE_LOCAL) {
-        rnc_result r = rnc_requester_input(n->requester, &e, UNIX, n->now);
+        rnc_result r;
+        if (pump_signal) {
+          e.has_signal = 1;
+          e.rssi = -80;
+          e.snr = 4.5f;
+          e.quality = 60.0f;
+        }
+        r = rnc_requester_input(n->requester, &e, UNIX, n->now);
         CHECK(r == RNC_OK);
       }
     }
@@ -166,6 +174,27 @@ static void echo(void) {
   /* the link is closed once the result is delivered */
   pump(&n, 100);
   CHECK(rnc_responder_link_count(n.responder) == 0);
+  teardown(&n);
+}
+/* Link.track_phy_stats through the requester: the link's figures come back with the result when tracking is on */
+static void phy(void) {
+  net n;
+  const uint8_t value[] = {0x92, 0x01, 0xa2, 'o', 'k'};
+  uint8_t out[64];
+  rnc_requester_result r;
+  setup(&n, 1);
+  pump_signal = 1;
+  rnc_requester_track_phy_stats(n.requester, 1);
+  CHECK(rnc_requester_start(n.requester, n.destination, NULL, "/echo", value, sizeof(value), 1, 5000, UNIX, n.now) ==
+        RNC_OK);
+  r = finish(&n, out, sizeof(out), 300);
+  CHECK(r.status == RNC_REQUESTER_DONE && r.has_signal && r.rssi == -80 && r.snr == 4.5f && r.quality == 60.0f);
+  rnc_requester_track_phy_stats(n.requester, 0);
+  CHECK(rnc_requester_start(n.requester, n.destination, NULL, "/echo", value, sizeof(value), 2, 5000, UNIX, n.now) ==
+        RNC_OK);
+  r = finish(&n, out, sizeof(out), 300);
+  CHECK(r.status == RNC_REQUESTER_DONE && !r.has_signal && r.rssi == 0);
+  pump_signal = 0;
   teardown(&n);
 }
 static void no_route(void) {
@@ -571,6 +600,8 @@ int main(int argc, char **argv) {
     nested();
   else if (!strcmp(argv[1], "file"))
     file();
+  else if (!strcmp(argv[1], "phy"))
+    phy();
   else if (!strcmp(argv[1], "echo"))
     echo();
   else if (!strcmp(argv[1], "no_route"))

@@ -243,7 +243,10 @@ rnc_result rnc_transfer_listener_input(rnc_transfer_listener *l,
                : accept_link(l, event, now_ms);
   for (i = 0; i < RNC_TRANSFER_LINKS; i++)
     if (l->slots[i].used && !memcmp(l->slots[i].c.id, p->destination, 16)) {
-      result = rnc_link_input(l->slots[i].c.link, p, now_ms);
+      {
+        rnc_link_phy phy = {event->has_signal, event->rssi, event->snr, event->quality};
+        result = rnc_link_input_phy(l->slots[i].c.link, p, &phy, now_ms);
+      }
       return result == RNC_AGAIN ? RNC_NO_SPACE : result;
     }
   return RNC_AGAIN;
@@ -546,7 +549,10 @@ rnc_result rnc_transfer_client_input(rnc_transfer_client *c,
     client_job *j = &c->jobs[i];
     if (j->used && !j->released &&
         !memcmp(j->c.id, event->packet.destination, 16)) {
-      result = rnc_link_input(j->c.link, &event->packet, now_ms);
+      {
+        rnc_link_phy phy = {event->has_signal, event->rssi, event->snr, event->quality};
+        result = rnc_link_input_phy(j->c.link, &event->packet, &phy, now_ms);
+      }
       return result == RNC_AGAIN ? RNC_NO_SPACE : RNC_OK;
     }
   }

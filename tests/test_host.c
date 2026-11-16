@@ -1024,6 +1024,9 @@ static void rnode_signal_run(unsigned sf, uint8_t rssi_byte, uint8_t snr_byte,
         CHECK(event.has_signal && event.rssi == want_rssi);
         CHECK(event.snr > want_snr - 0.001f && event.snr < want_snr + 0.001f);
         CHECK(event.quality > want_q - 0.01f && event.quality < want_q + 0.01f);
+        /* the node event carries the same figures, which is all a link manager sees */
+        CHECK(event.node.has_signal && event.node.rssi == event.rssi && event.node.snr == event.snr &&
+              event.node.quality == event.quality);
         found = 1;
       }
   }

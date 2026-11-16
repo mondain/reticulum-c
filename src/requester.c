@@ -27,6 +27,8 @@ typedef struct requester_job {
   rnc_requester_status status;
   uint8_t *response, *metadata;
   size_t response_size, metadata_size;
+  int has_signal, rssi;
+  float snr, quality;
 } requester_job;
 struct rnc_requester {
   rnc_node *node;
@@ -34,8 +36,13 @@ struct rnc_requester {
   rnc_random_fn random;
   void *random_context;
   uint8_t *scratch;
+  int track_phy;
   requester_job jobs[RNC_REQUESTER_JOBS];
 };
+void rnc_requester_track_phy_stats(rnc_requester *r, int track) {
+  if (r)
+    r->track_phy = track != 0;
+}
 rnc_requester *rnc_requester_new(rnc_node *node, size_t max_value,
                                  rnc_random_fn random, void *random_context) {
   rnc_requester *r;
@@ -116,6 +123,8 @@ rnc_result rnc_requester_start(rnc_requester *r, const uint8_t destination[16],
     return RNC_STATE;
   memset(j, 0, sizeof(*j));
   j->link = rnc_link_new(r->random, r->random_context);
+  if (j->link && r->track_phy)
+    (void)rnc_link_track_phy_stats(j->link, 1);
   j->service = j->link ? rnc_service_new(j->link, r->max_value, r->random,
                                          r->random_context)
                        : NULL;
@@ -169,7 +178,10 @@ rnc_result rnc_requester_input(rnc_requester *r, const rnc_node_event *event,
     requester_job *j = &r->jobs[i];
     if (j->used && !j->released &&
         !memcmp(j->id, event->packet.destination, 16)) {
-      result = rnc_link_input(j->link, &event->packet, now_ms);
+      {
+        rnc_link_phy phy = {event->has_signal, event->rssi, event->snr, event->quality};
+        result = rnc_link_input_phy(j->link, &event->packet, &phy, now_ms);
+      }
       return result == RNC_AGAIN ? RNC_NO_SPACE : RNC_OK;
     }
   }
@@ -181,6 +193,14 @@ static void job_finish(requester_job *j, rnc_requester_status status,
     return;
   j->finished = 1;
   j->status = status;
+  {
+    float q = 0;
+    j->has_signal = rnc_link_get_rssi(j->link, &j->rssi);
+    if (rnc_link_get_snr(j->link, &j->snr) && !j->has_signal)
+      j->has_signal = 1;
+    if (rnc_link_get_q(j->link, &q))
+      j->quality = q;
+  }
   j->state = JOB_CLOSING;
   j->close_deadline = now + REQUESTER_CLOSE_GRACE_MS;
   (void)rnc_link_close(j->link, now);
@@ -326,6 +346,10 @@ rnc_result rnc_requester_poll_file(rnc_requester *r,
     memcpy(result->destination, j->destination, 16);
     result->size = j->response_size;
     result->metadata_size = j->metadata_size;
+    result->has_signal = j->has_signal;
+    result->rssi = j->rssi;
+    result->snr = j->snr;
+    result->quality = j->quality;
     if (j->response_size > capacity || (j->response_size && !response) ||
         (metadata && j->metadata_size > metadata_capacity))
       return RNC_NO_SPACE;

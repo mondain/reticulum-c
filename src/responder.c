@@ -329,7 +329,10 @@ rnc_result rnc_responder_input(rnc_responder *r, const rnc_node_event *event,
   }
   for (i = 0; i < RNC_RESPONDER_LINKS; i++)
     if (r->slots[i].used && !memcmp(r->slots[i].id, p->destination, 16)) {
-      result = rnc_link_input(r->slots[i].link, p, now_ms);
+      {
+        rnc_link_phy phy = {event->has_signal, event->rssi, event->snr, event->quality};
+        result = rnc_link_input_phy(r->slots[i].link, p, &phy, now_ms);
+      }
       return result == RNC_AGAIN ? RNC_NO_SPACE : result;
     }
   return RNC_AGAIN;
