@@ -110,7 +110,7 @@ static void set_nonblock(int fd) {
 /* ---- options and node setup (as in reticulum-c-x) ------------------------ */
 typedef struct options {
   const char *connect, *identity;
-  int listen, no_remote_command, remote_args, mirror, no_id;
+  int listen, no_remote_command, remote_args, mirror, no_id, no_tty, print_identity;
   long announce; /* -1 = never */
   double timeout;
   uint8_t allowed[32][16];
@@ -727,6 +727,32 @@ static int pump_host(app *a, int listener, uint64_t *unix_out) {
   (void)event;
 }
 
+/* More allowed identities from ~/.config/rnsh/allowed_identities, else ~/.rnsh/allowed_identities, as the
+ * reference reads them: one hash per line, lines of other lengths are ignored. */
+static int load_allowed_file(void) {
+  static const char *places[] = {"/.config/rnsh/allowed_identities", "/.rnsh/allowed_identities"};
+  const char *home = getenv("HOME");
+  char path[1024], line[256];
+  FILE *f = NULL;
+  size_t k;
+  if (!home)
+    return 1;
+  for (k = 0; k < sizeof(places) / sizeof(*places) && !f; ++k) {
+    (void)snprintf(path, sizeof(path), "%s%s", home, places[k]);
+    f = fopen(path, "r");
+  }
+  if (!f)
+    return 1;
+  while (fgets(line, sizeof(line), f)) {
+    size_t n = strcspn(line, "\r\n");
+    line[n] = 0;
+    if (n != 32 || opt.allowed_count >= 32 || !hex_decode(line, opt.allowed[opt.allowed_count], 16))
+      continue; /* discarded, as the reference discards invalid lines */
+    ++opt.allowed_count;
+  }
+  fclose(f);
+  return 1;
+}
 static int listen_mode(rnc_identity *id, app *a) {
   uint8_t destination[16];
   uint64_t next_announce = 0;
@@ -737,6 +763,7 @@ static int listen_mode(rnc_identity *id, app *a) {
     return 1;
   for (i = 0; i < SESSIONS; i++)
     sessions[i].in_fd = sessions[i].out_fd = sessions[i].err_fd = -1;
+  (void)load_allowed_file();
   if (!opt.allowed_count)
     fprintf(stderr,
             "Warning: No allowed identities configured, rnsh will not accept "
@@ -872,7 +899,8 @@ static int run_initiator(rnc_identity *id, app *a, const uint8_t destination[16]
   rnc_link_event le;
   uint64_t unix_now = (uint64_t)time(NULL), now = monotonic_ms();
   int rc = EXIT_FAILED, have_version = 0, running = 0, stdin_eof = 0,
-      sent_eof = 0, tty_in = isatty(0), tty_out = isatty(1), tty_err = isatty(2),
+      sent_eof = 0, tty_in = !opt.no_tty && isatty(0), tty_out = !opt.no_tty && isatty(1),
+      tty_err = !opt.no_tty && isatty(2),
       pre_esc = 1, esc = 0, finished = 0;
   uint8_t exec_buf[1024];
   uint8_t input[1024];
@@ -1139,6 +1167,10 @@ int main(int argc, char **argv) {
       opt.mirror = 1;
     else if (!strcmp(arg, "-N") || !strcmp(arg, "--no-id"))
       opt.no_id = 1;
+    else if (!strcmp(arg, "-T") || !strcmp(arg, "--no-tty"))
+      opt.no_tty = 1;
+    else if (!strcmp(arg, "-p") || !strcmp(arg, "--print-identity"))
+      opt.print_identity = 1;
     else if (!strcmp(arg, "-b") || !strcmp(arg, "--announce")) {
       char *end;
       opt.announce = strtol(VALUE, &end, 10);
@@ -1160,6 +1192,26 @@ int main(int argc, char **argv) {
       destination_text = arg;
     else
       return usage(), 2;
+  }
+  if (opt.print_identity) {
+    uint8_t name_hash[10];
+    if (!opt.identity || destination_text)
+      return usage(), 2;
+    if (rnc_host_identity_load(opt.identity, secure_random, NULL, &id) != RNC_OK ||
+        rnc_destination_hash(APP_NAME, &id, name_hash, destination) != RNC_OK) {
+      fprintf(stderr, "Cannot load or create the identity file %s\n", opt.identity);
+      return 1;
+    }
+    fputs("Identity     : <", stdout);
+    print_hex(id.hash, 16);
+    puts(">");
+    if (opt.listen) {
+      fputs("Listening on : <", stdout);
+      print_hex(destination, 16);
+      puts(">");
+    }
+    rnc_identity_clear(&id);
+    return 0;
   }
   if (!opt.connect || !opt.identity)
     return usage(), 2;
