@@ -140,6 +140,11 @@ static void network(void) {
 }
 /* `device` on TCP servers and UDP: the address comes from the named network device (the reference's
  * get_address_for_if). The loopback device has an address but no broadcast address. */
+#ifdef __APPLE__
+#define LOOPBACK_DEVICE "lo0"
+#else
+#define LOOPBACK_DEVICE "lo"
+#endif
 static void device_test(void) {
   char text[64];
   unsigned rng = 0;
@@ -149,16 +154,16 @@ static void device_test(void) {
   rnc_host *host;
   rnc_host_config cfg = {0};
   rnc_host_status status;
-  CHECK(rnc_host_device_address("lo", 0, 0, text, sizeof(text)) == 0 && !strcmp(text, "127.0.0.1"));
-  CHECK(rnc_host_device_address("lo", 1, 0, text, sizeof(text)) != 0);
+  CHECK(rnc_host_device_address(LOOPBACK_DEVICE, 0, 0, text, sizeof(text)) == 0 && !strcmp(text, "127.0.0.1"));
+  CHECK(rnc_host_device_address(LOOPBACK_DEVICE, 1, 0, text, sizeof(text)) != 0);
   CHECK(rnc_host_device_address("no-such-device0", 0, 0, text, sizeof(text)) != 0);
-  CHECK(rnc_host_device_address("lo", 0, 0, text, 4) != 0); /* too small for the address */
+  CHECK(rnc_host_device_address(LOOPBACK_DEVICE, 0, 0, text, 4) != 0); /* too small for the address */
   CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK);
   node = rnc_node_new(&id, 0, random_bytes, &rng);
   host = node ? rnc_host_new(node) : NULL;
   CHECK(host);
   cfg.kind = RNC_HOST_TCP_LISTEN;
-  cfg.device = "lo"; /* no address: it comes from the device, which wins over one given */
+  cfg.device = LOOPBACK_DEVICE; /* no address: it comes from the device, which wins over one given */
   cfg.address = "203.0.113.9";
   CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
   CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK && status.online && status.bound_port);
