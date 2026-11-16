@@ -333,14 +333,19 @@ static void write_path_table(rnc_rpc_writer *w, rnc_host *h, rnc_node *node,
  * destination hash, the time of the last counted announce, the violation count, the end of
  * any block and the recent announce times. The node keeps monotonic milliseconds; these are
  * shown as wall time. A block that never happened is 0, as in the reference. */
-static void write_rate_table(rnc_rpc_writer *w, rnc_node *node, uint64_t now) {
+static void write_rate_table(rnc_rpc_writer *w, rnc_node *node, uint64_t now, const uint8_t *only) {
   rnc_rate_entry e;
-  size_t i, k, count = 0;
+  size_t i, k, count = 0, entries = 0;
   double unix_now = (double)time(NULL);
-  while (rnc_node_rate_at(node, count, &e) == RNC_OK)
-    ++count;
+  /* `only` (a destination hash, or NULL for all) keeps one destination's entry */
+  while (rnc_node_rate_at(node, entries, &e) == RNC_OK) {
+    ++entries;
+    count += !only || !memcmp(e.destination, only, 16);
+  }
   (void)rnc_rpc_write_array(w, count);
-  for (i = 0; i < count && rnc_node_rate_at(node, i, &e) == RNC_OK; ++i) {
+  for (i = 0; i < entries && rnc_node_rate_at(node, i, &e) == RNC_OK; ++i) {
+    if (only && memcmp(e.destination, only, 16))
+      continue;
     (void)rnc_rpc_write_map(w, 5);
     (void)rnc_rpc_write_string(w, "hash");
     (void)rnc_rpc_write_bin(w, e.destination, 16);
@@ -467,7 +472,7 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
     (void)rnc_rpc_write_real(&w, bitrate ? 6.0 + 8000.0 / bitrate : 0);
     break;
   case RNC_RPC_RATE_TABLE:
-    write_rate_table(&w, node, now);
+    write_rate_table(&w, node, now, NULL);
     break;
   case RNC_RPC_BLACKHOLED_IDENTITIES:
     write_blackhole_list(&w, node);

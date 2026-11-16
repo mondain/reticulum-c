@@ -2119,6 +2119,7 @@ static size_t file_read(const char *path, char *out, size_t size) {
   close(fd);
   return (size_t)n;
 }
+static void write_identity(const char *path, uint8_t fill, char hash[33]);
 static void cli_tools_id(const char *ctl, const char *dir) {
   char out[4096], idfile[300], data[300], sig[320], enc[320], dec[320],
       buf[256], hex[40];
@@ -2178,6 +2179,40 @@ static void cli_tools_id(const char *ctl, const char *dir) {
   }
   CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-d", enc, "-w",
                 dec, "-f", NULL) == 12);
+  /* signature envelopes: the default (no --raw) form carries the signer, so it validates without -i;
+   * -i then names who must have signed it */
+  {
+    char other[300], other_hash[33];
+    char sigbuf[512];
+    CHECK(snprintf(other, sizeof(other), "%s/other.id", dir) > 0);
+    write_identity(other, 140, other_hash);
+    file_bytes(data, text, strlen(text));
+    CHECK(!unlink(sig));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-s", data, NULL) == 0 && strstr(out, "Signed file") &&
+          strstr(out, hex));
+    CHECK(file_read(sig, sigbuf, sizeof(sigbuf)) > 64 + 60);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", sig, NULL) == 0 && strstr(out, "Signature is valid") &&
+          strstr(out, hex));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-V", sig, NULL) == 0 && strstr(out, "Signature is valid"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", other, "-V", sig, NULL) == 10 && strstr(out, "NOT signed by") &&
+          strstr(out, other_hash));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-s", data, NULL) == 11); /* not overwritten */
+    file_bytes(data, "changed after signing", 21);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", sig, NULL) == 10 && strstr(out, "Invalid signature"));
+    file_bytes(data, text, strlen(text));
+    {
+      size_t sig_size = file_read(sig, sigbuf, sizeof(sigbuf));
+      sigbuf[10] ^= 1; /* a flipped signature byte */
+      file_bytes(sig, sigbuf, sig_size);
+    }
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", sig, NULL) == 10);
+    /* a bare (legacy) signature needs the identity */
+    CHECK(!unlink(sig));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-s", data, "--raw", NULL) == 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-V", sig, NULL) == 2);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", idfile, "-V", sig, "--raw", NULL) == 0);
+    CHECK(!unlink(sig));
+  }
   /* base32 and base64 output and import (rnid -B, -b, -m, -M); the private key is the bytes 0..63 so the
    * expected text is fixed */
   {
@@ -2437,6 +2472,20 @@ static void cli_id_reference(const char *ctl, const char *reference,
   CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-V", sig, "-r",
                 data, "--raw", NULL) == 0 &&
         strstr(ours, "is valid"));
+  /* envelopes: the reference validates ours, and ours validates the reference's */
+  CHECK(!unlink(sig));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-s", data, NULL) == 0);
+  ref_args[4] = "-V"; ref_args[5] = sig; ref_args[6] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+  CHECK(strstr(out, "Signature is valid") && strstr(out, hex));
+  CHECK(!unlink(sig));
+  ref_args[4] = "-i"; ref_args[5] = idfile; ref_args[6] = "-s"; ref_args[7] = data; ref_args[8] = NULL;
+  reference_tool(python, reference, "RNS.Utilities.rnid", ref_args, out, sizeof(out));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-V", sig, NULL) == 0 && strstr(ours, "Signature is valid") && strstr(ours, hex));
+  CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-V", sig, NULL) == 0);
+  CHECK(!unlink(sig));
+  ref_args[4] = "-p"; ref_args[5] = "-H"; ref_args[6] = "example.aspect"; ref_args[7] = NULL;
+  ref_args[2] = "-i"; ref_args[3] = idfile;
   /* ours encrypts, reference decrypts */
   CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", idfile, "-e", data, NULL) == 0);
   ref_args[4] = "-d"; ref_args[5] = enc; ref_args[6] = "-w"; ref_args[7] = dec;
@@ -3126,6 +3175,23 @@ static void x_tools(const char *exe, const char *x) {
     CHECK(rc_ == 0);
   }
   CHECK(access(marker, F_OK) == 0);
+  /* -x: a prompt, one command per line over the same listener, the last exit code shown in the prompt,
+   * ending on exit, quit or end of input */
+  {
+    char script[1024];
+    char *args[] = {"/bin/sh", "-c", script, NULL};
+    CHECK(snprintf(script, sizeof(script),
+                   "printf 'echo first\\nsh -c \"exit 3\"\\necho third\\nclear\\nexit\\necho never\\n' | %s --connect %s "
+                   "--identity %s -x %s",
+                   x, connect, idb, dest) > 0);
+    CHECK(run_cp("/bin/sh", out, sizeof(out), args) == 0);
+    CHECK(strstr(out, "first"));
+    CHECK(strstr(out, "3> ") && strstr(out, "third") && !strstr(out, "never"));
+    CHECK(snprintf(script, sizeof(script), "printf 'echo only\\n' | %s --connect %s --identity %s -x %s", x, connect,
+                   idb, dest) > 0);
+    CHECK(run_cp("/bin/sh", out, sizeof(out), args) == 0 && strstr(out, "only")); /* end of input ends it too */
+    CHECK(x_run(x, connect, out, sizeof(out), idb, "-x", dest, "echo extra", NULL) != 0); /* no command with -x */
+  }
   /* -W caps how long the result may take: the command outlasts it and the run ends at once */
   started = time(NULL);
   CHECK(x_run(x, connect, out, sizeof(out), idb, "-w", "30", "-W", "2", dest, "sleep 6", NULL) == 244);
@@ -3169,6 +3235,131 @@ static void x_tools(const char *exe, const char *x) {
   stop(daemon, dfd);
   remove_tree(dir);
   puts("x tool tests passed");
+}
+/* rnstatus -R and rnpath -R equivalents: reticulum-c-ctl asks another instance's management destination. */
+static void ctl_remote_test(const char *exe, const char *ctl) {
+  char dir[] = "/tmp/rnc-node-rem-XXXXXX", cfg[256], key[256], admin[256], idb[300], idc[300], attach[64],
+       hash_b[33], hash_c[33], daemon[33], out[16384], text[1024], announced[33];
+  unsigned port = unused_port(), entropy = 5, waited;
+  uint8_t seed_key[64] = {9}, raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+  rnc_identity announcer;
+  rnc_packet announce;
+  size_t raw_size, framed_size, k;
+  int fd, feed;
+  pid_t p;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/node-identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(idb, sizeof(idb), "%s/id_b", dir) > 0);
+  CHECK(snprintf(idc, sizeof(idc), "%s/id_c", dir) > 0);
+  CHECK(snprintf(attach, sizeof(attach), "127.0.0.1:%u", port) > 0);
+  write_identity(idb, 31, hash_b);
+  write_identity(idc, 71, hash_c);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\nenable_remote_management = Yes\n"
+                 "remote_management_allowed = %s\n[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                 "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                 hash_b, port) > 0);
+  config_file(cfg, text);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, daemon);
+  /* give the daemon one path to report */
+  CHECK(rnc_identity_from_private(&announcer, seed_key) == RNC_OK &&
+        rnc_announce_create(&announcer, "reticulum_c.ctl.remote", NULL, 0, (uint64_t)time(NULL), rng, &entropy,
+                            &announce) == RNC_OK);
+  CHECK(rnc_packet_encode(&announce, raw, sizeof(raw), &raw_size) == RNC_OK &&
+        rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, raw_size, framed, sizeof(framed), &framed_size) == RNC_OK);
+  for (k = 0; k < 16; ++k)
+    CHECK(snprintf(announced + 2 * k, 3, "%02x", announce.destination[k]) == 2);
+  feed = tcp_connect(port);
+  CHECK(write(feed, framed, framed_size) == (ssize_t)framed_size);
+  for (waited = 0; waited < 100 && !admin_has_path(admin, announced); ++waited) {
+    struct timespec ts = {0, 50000000};
+    nanosleep(&ts, NULL);
+  }
+  CHECK(waited < 100);
+  /* the allowed identity gets statistics and the path table; the filter and the hop limit still work */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-R", daemon, "--attach", attach, "--mgmt-identity", idb, "-w", "20",
+                NULL) == 0 &&
+        strstr(out, "Status") && strstr(out, "Transport Instance <"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-t", "-R", daemon, "--attach", attach, "--mgmt-identity", idb, "-w", "20",
+                NULL) == 0 &&
+        strstr(out, announced));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-r", "-R", daemon, "--attach", attach, "--mgmt-identity", idb, "-w", "20",
+                NULL) == 0);
+  /* an identity that is not on the allow list is refused */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-R", daemon, "--attach", attach, "--mgmt-identity", idc, "-w", "8",
+                NULL) != 0);
+  /* a remote query needs somewhere to attach and an identity */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-R", daemon, NULL) != 0);
+  close(feed);
+  stop(p, fd);
+  remove_tree(dir);
+  puts("ctl remote tests passed");
+}
+/* The stand-alone examples (examples/example_announce.c, example_request.c) against the daemon. */
+static void examples_test(const char *exe, const char *announce, const char *request) {
+  char dir[] = "/tmp/rnc-node-ex-XXXXXX", cfg[256], key[256], admin[256], id_a[300], id_b[300], id_s[300],
+       connect[64], dest[33], out[4096], listen_out[4096], text[1024], identity[33], hash[33];
+  unsigned port = unused_port();
+  int dfd, afd, bfd, sfd;
+  pid_t daemon, a, b, server;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(id_a, sizeof(id_a), "%s/id_a", dir) > 0);
+  CHECK(snprintf(id_b, sizeof(id_b), "%s/id_b", dir) > 0);
+  CHECK(snprintf(id_s, sizeof(id_s), "%s/id_s", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  write_identity(id_a, 5, hash);
+  write_identity(id_b, 50, hash);
+  write_identity(id_s, 95, hash);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  /* A listens for one announce; B announces; A prints B's destination and text */
+  {
+    char *listen_args[] = {(char *)announce, "--connect", connect, "--identity", id_a, "--app-data", "first",
+                           "--count", "1", NULL};
+    char *other_args[] = {(char *)announce, "--connect", connect, "--identity", id_b, "--app-data",
+                          "second one", NULL};
+    int status;
+    a = spawn_cp(announce, &afd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(afd, "announcing <", listen_out, sizeof(listen_out), 10);
+    read_until(afd, ">\n", listen_out, sizeof(listen_out), 10);
+    b = spawn_cp(announce, &bfd, other_args);
+    memset(out, 0, sizeof(out));
+    read_until(bfd, ">\n", out, sizeof(out), 10);
+    read_until(afd, "second one", listen_out, sizeof(listen_out), 20);
+    CHECK(strstr(listen_out, "heard <") && strstr(listen_out, " hop"));
+    CHECK(waitpid(a, &status, 0) == a && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(afd);
+    stop_cp(b, bfd);
+  }
+  /* a request service: the answer is the text reversed */
+  {
+    char *serve_args[] = {(char *)request, "--connect", connect, "--identity", id_s, "server", NULL};
+    char *call_args[] = {(char *)request, "--connect", connect, "--identity", id_a, "client", dest, "hello world", NULL};
+    server = spawn_cp(request, &sfd, serve_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(sfd, "serving /reverse on <", listen_out, sizeof(listen_out), 10);
+    read_until(sfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_after(listen_out, "serving /reverse on <", dest);
+    CHECK(run_cp(request, out, sizeof(out), call_args) == 0);
+    CHECK(strstr(out, "dlrow olleh"));
+    stop_cp(server, sfd);
+    CHECK(run_cp(request, out, sizeof(out), (char *[]){(char *)request, "--connect", connect, "--identity", id_a, "client", "00000000000000000000000000000000", "x", NULL}) != 0);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("example tests passed");
 }
 /* The reference rnx against ours, both directions. */
 static void x_reference(const char *exe, const char *x, const char *python) {
@@ -3985,6 +4176,10 @@ int main(int argc, char **argv) {
     panic_on_interface(argv[1]);
   else if (!strcmp(argv[2], "sh_tools") && argc == 4)
     sh_tools(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "ctl_remote") && argc == 4)
+    ctl_remote_test(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "examples") && argc == 5)
+    examples_test(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "x_tools") && argc == 4)
     x_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "cp_ref") && argc == 6)
