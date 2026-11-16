@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -1301,22 +1302,52 @@ static int ends_with(const char *s, const char *suffix) {
  * The reference's non-raw signature: Ed25519 over a MessagePack envelope, written as signature || envelope.
  * The envelope is {"hashtype": "sha256", "hash": SHA-256 of the file, "meta": {"signer": identity hash,
  * "pubkey": 64 byte public key}} in that key order, so the bytes match what the reference signs. */
-static int rsg_create(const rnc_identity *id, const uint8_t hash[32], uint8_t *out, size_t cap, size_t *size) {
-  uint8_t envelope[256];
+/* `message` (NULL for a plain file signature) is embedded after "meta" as a binary value, which is what
+ * makes a .rsm: the reference adds it to the dict last, so it is also last on the wire. */
+static int rsg_create(const rnc_identity *id, const uint8_t hash[32], const uint8_t *message, size_t message_size,
+                      uint8_t *out, size_t cap, size_t *size) {
+  uint8_t *envelope = malloc(256 + message_size);
   rnc_rpc_writer w;
   size_t n;
-  rnc_rpc_writer_init(&w, envelope, sizeof(envelope));
-  if (rnc_rpc_write_map(&w, 3) != RNC_OK || rnc_rpc_write_string(&w, "hashtype") != RNC_OK ||
-      rnc_rpc_write_string(&w, "sha256") != RNC_OK || rnc_rpc_write_string(&w, "hash") != RNC_OK ||
-      rnc_rpc_write_bin(&w, hash, 32) != RNC_OK || rnc_rpc_write_string(&w, "meta") != RNC_OK ||
-      rnc_rpc_write_map(&w, 2) != RNC_OK || rnc_rpc_write_string(&w, "signer") != RNC_OK ||
-      rnc_rpc_write_bin(&w, id->hash, 16) != RNC_OK || rnc_rpc_write_string(&w, "pubkey") != RNC_OK ||
-      rnc_rpc_write_bin(&w, id->public_key, 64) != RNC_OK || rnc_rpc_writer_finish(&w, &n) != RNC_OK)
+  int ok = 0;
+  if (!envelope)
     return 0;
-  if (cap < 64 + n || rnc_identity_sign(id, envelope, n, out) != RNC_OK)
+  rnc_rpc_writer_init(&w, envelope, 256 + message_size);
+  if (rnc_rpc_write_map(&w, message ? 4 : 3) == RNC_OK && rnc_rpc_write_string(&w, "hashtype") == RNC_OK &&
+      rnc_rpc_write_string(&w, "sha256") == RNC_OK && rnc_rpc_write_string(&w, "hash") == RNC_OK &&
+      rnc_rpc_write_bin(&w, hash, 32) == RNC_OK && rnc_rpc_write_string(&w, "meta") == RNC_OK &&
+      rnc_rpc_write_map(&w, 2) == RNC_OK && rnc_rpc_write_string(&w, "signer") == RNC_OK &&
+      rnc_rpc_write_bin(&w, id->hash, 16) == RNC_OK && rnc_rpc_write_string(&w, "pubkey") == RNC_OK &&
+      rnc_rpc_write_bin(&w, id->public_key, 64) == RNC_OK &&
+      (!message || (rnc_rpc_write_string(&w, "message") == RNC_OK && rnc_rpc_write_bin(&w, message, message_size) == RNC_OK)) &&
+      rnc_rpc_writer_finish(&w, &n) == RNC_OK && cap >= 64 + n && rnc_identity_sign(id, envelope, n, out) == RNC_OK) {
+    memcpy(out + 64, envelope, n);
+    *size = 64 + n;
+    ok = 1;
+  }
+  free(envelope);
+  return ok;
+}
+/* The message embedded in an envelope (points into rsg), or 0. */
+static int rsg_message(const uint8_t *rsg, size_t size, const uint8_t **message, size_t *message_size) {
+  static val pool[32];
+  val root;
+  reader rd;
+  const val *m;
+  if (size < 65)
     return 0;
-  memcpy(out + 64, envelope, n);
-  *size = 64 + n;
+  rd.p = rsg + 64;
+  rd.end = rsg + size;
+  rd.pool = pool;
+  rd.used = 0;
+  rd.cap = 32;
+  if (!parse(&rd, &root, 0) || rd.p != rd.end || root.type != V_MAP)
+    return 0;
+  m = map_get(&root, "message");
+  if (!m || m->type != V_BIN)
+    return 0;
+  *message = m->p;
+  *message_size = m->n;
   return 1;
 }
 /* 1 valid, 0 invalid or unreadable. `required` is the identity the signature must verify under (NULL: the
@@ -1352,6 +1383,42 @@ static int rsg_validate(const uint8_t *rsg, size_t size, const uint8_t hash[32],
     return 0;
   return rnc_identity_verify(signer, rsg + 64, size - 64, rsg) == RNC_OK;
 }
+static int ends_with_nocase(const char *s, const char *suffix) {
+  size_t n = strlen(s), m = strlen(suffix);
+  return n >= m && !strcasecmp(s + n - m, suffix);
+}
+/* rnid -V on a .rsm: a signed message that carries its own text. `id` as for validate_file. */
+static int validate_message(const rnc_identity *id, const char *path) {
+  uint8_t *rsg, hash[32];
+  const uint8_t *message;
+  size_t size, message_size;
+  rnc_identity signer;
+  char label[33];
+  if (!read_file(path, &rsg, &size)) {
+    fprintf(stderr, "The signature file \"%s\" does not exist\n", path);
+    return RC_NO_FILE;
+  }
+  if (!rsg_message(rsg, size, &message, &message_size)) {
+    printf("No embedded message in %s\n", path);
+    free(rsg);
+    return RC_INVALID_SIGNATURE;
+  }
+  if (rnc_hash(message, message_size, hash) != RNC_OK || !rsg_validate(rsg, size, hash, id, &signer)) {
+    printf("Invalid signature in %s\n", path);
+    if (id) {
+      hex_encode(id->hash, 16, label);
+      printf("The message was NOT signed by <%s>\n", label);
+    }
+    free(rsg);
+    return RC_INVALID_SIGNATURE;
+  }
+  hex_encode(signer.hash, 16, label);
+  printf("\nSignature is valid, the following message was signed by <%s>:\n\n", label);
+  fwrite(message, 1, message_size, stdout);
+  putchar('\n');
+  free(rsg);
+  return RC_OK;
+}
 /* rnid -V: a signature file next to the file it covers. `id` is the identity the signature must verify under
  * (NULL: whoever the envelope names). `--raw` signatures are the bare 64 bytes and need `id`. */
 static int validate_file(const rnc_identity *id, const char *validate, const char *read_path, int raw) {
@@ -1361,6 +1428,8 @@ static int validate_file(const rnc_identity *id, const char *validate, const cha
   rnc_identity signer;
   char label[33];
   int rc = RC_OK, valid;
+  if (ends_with_nocase(validate, ".rsm"))
+    return validate_message(id, validate);
   if (read_path)
     snprintf(data_path, sizeof(data_path), "%s", read_path);
   else if (ends_with(validate, ".rsg") && strlen(validate) - 4 < sizeof(data_path)) {
@@ -1410,6 +1479,87 @@ static int validate_file(const rnc_identity *id, const char *validate, const cha
   free(data);
   return rc;
 }
+/* rnid -S: sign a message and keep the text inside the signature file, written to WRITE_PATH with ".rsm"
+ * added. The text comes from the command line or, with -r, from a file. The reference can also open an editor
+ * when neither is given, and print the result as armoured base32/64 text; neither is offered here. */
+static int sign_message_file(const rnc_identity *id, const char *text, const char *read_path, const char *write_path,
+                             int force, int armoured) {
+  char path[1024], label[33];
+  uint8_t *file_message = NULL, *rsg, hash[32];
+  const uint8_t *message;
+  size_t message_size, rsg_size, n;
+  int rc;
+  if (armoured) {
+    fprintf(stderr, "Armoured text output of signed messages is not supported; the message is written to a file\n");
+    return RC_INVALID_ARGS;
+  }
+  if (!write_path) {
+    fprintf(stderr, "No write path specified\n");
+    return RC_INVALID_ARGS;
+  }
+  if (!id->has_private) {
+    fprintf(stderr, "Cannot sign, the identity does not hold a private key\n");
+    return RC_NO_PRVKEY;
+  }
+  if (text && read_path) {
+    fprintf(stderr, "Both an input file and command-line provided message was specified, aborting\n");
+    return RC_INVALID_ARGS;
+  }
+  if (read_path) {
+    if (!read_file(read_path, &file_message, &message_size)) {
+      fprintf(stderr, "The file %s does not exist\n", read_path);
+      return RC_NO_FILE;
+    }
+    /* read_file pads to a multiple of four with 0xff for the signing code; the message is the file as it is */
+    {
+      FILE *f = fopen(read_path, "rb");
+      long end;
+      if (!f || fseek(f, 0, SEEK_END) || (end = ftell(f)) < 0) {
+        if (f)
+          fclose(f);
+        free(file_message);
+        return RC_READ_ERROR;
+      }
+      fclose(f);
+      message_size = (size_t)end;
+    }
+    message = file_message;
+  } else if (text) {
+    message = (const uint8_t *)text;
+    message_size = strlen(text);
+  } else {
+    fprintf(stderr, "No message specified\n");
+    return RC_INVALID_ARGS;
+  }
+  if (!message_size || message_size > (1u << 20)) {
+    fprintf(stderr, "No message specified\n");
+    free(file_message);
+    return RC_INVALID_ARGS;
+  }
+  n = strlen(write_path);
+  if (snprintf(path, sizeof(path), "%s%s", write_path, ends_with(write_path, ".rsm") ? "" : ".rsm") >= (int)sizeof(path)) {
+    free(file_message);
+    return RC_INVALID_ARGS;
+  }
+  (void)n;
+  rsg = malloc(message_size + 512);
+  if (!rsg || rnc_hash(message, message_size, hash) != RNC_OK ||
+      !rsg_create(id, hash, message, message_size, rsg, message_size + 512, &rsg_size)) {
+    free(rsg);
+    free(file_message);
+    return RC_UNKNOWN_ERROR;
+  }
+  rc = write_private_file(path, rsg, rsg_size, force);
+  if (rc == RC_FILE_EXISTS)
+    fprintf(stderr, "The signature file \"%s\" already exists, not overwriting\n", path);
+  else if (rc == RC_OK) {
+    hex_encode(id->hash, 16, label);
+    printf("Message signed with <%s> saved to %s\n", label, path);
+  }
+  free(rsg);
+  free(file_message);
+  return rc;
+}
 static int cmd_id(int argc, char **argv) {
   const char *identity_path = NULL, *generate = NULL, *aspects = NULL,
              *encrypt = NULL, *decrypt = NULL, *sign = NULL, *validate = NULL,
@@ -1418,8 +1568,8 @@ static int cmd_id(int argc, char **argv) {
          export_prv = 0, rc;
   rnc_identity id;
   char hex[129], out_path[1024];
-  const char *import_pub = NULL, *import_prv = NULL, *how = NULL;
-  int format = FORMAT_HEX, formats = 0;
+  const char *import_pub = NULL, *import_prv = NULL, *how = NULL, *sign_message = NULL;
+  int format = FORMAT_HEX, formats = 0, has_sign_message = 0;
   for (i = 0; i < argc; ++i) {
     const char *a = argv[i];
     const char **slot = NULL;
@@ -1464,7 +1614,11 @@ static int cmd_id(int argc, char **argv) {
       show_private = 1;
     else if (!strcmp(a, "-f") || !strcmp(a, "--force"))
       force = 1;
-    else if (!strcmp(a, "--raw"))
+    else if (!strcmp(a, "-S") || !strcmp(a, "--sign-message")) {
+      has_sign_message = 1; /* the text may follow; without it -r names a file holding the message */
+      if (i + 1 < argc && argv[i + 1][0] != '-')
+        sign_message = argv[++i];
+    } else if (!strcmp(a, "--raw"))
       raw = 1;
     else if (!strcmp(a, "-x") || !strcmp(a, "--export-pub"))
       export_pub = 1;
@@ -1569,7 +1723,7 @@ static int cmd_id(int argc, char **argv) {
           else if (rc == RC_OK)
             printf("Signed file %s, signature written to %s\n", sign, out_path);
         }
-      } else if (rnc_hash(data, size, file_hash) != RNC_OK || !rsg_create(&id, file_hash, rsg, sizeof(rsg), &rsg_size))
+      } else if (rnc_hash(data, size, file_hash) != RNC_OK || !rsg_create(&id, file_hash, NULL, 0, rsg, sizeof(rsg), &rsg_size))
         rc = RC_UNKNOWN_ERROR;
       else {
         rc = write_private_file(out_path, rsg, rsg_size, force);
@@ -1583,6 +1737,8 @@ static int cmd_id(int argc, char **argv) {
       free(data);
     }
   }
+  if (rc == RC_OK && has_sign_message)
+    rc = sign_message_file(&id, sign_message, read_path, write_path, force, formats);
   if (rc == RC_OK && validate)
     rc = validate_file(&id, validate, read_path, raw);
   if (rc == RC_OK && encrypt) {
