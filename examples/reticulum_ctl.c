@@ -1083,11 +1083,10 @@ static void print_hash(const uint8_t *hash) {
 /* Ask the shared instance for a path the way the reference's clients do: as a local client of its data port,
  * send a path request for the destination. The answer arrives in the instance's path table, which the caller
  * polls. */
-static int send_path_request(const target *t, const uint8_t hash[16]) {
+static int send_packet(const target *t, const rnc_packet *packet) {
   struct sockaddr_storage addr;
   socklen_t addr_size = sizeof(struct sockaddr_in);
-  uint8_t tag[16], raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
-  rnc_packet packet;
+  uint8_t raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
   size_t n, m;
   int fd, ok;
   memset(&addr, 0, sizeof(addr));
@@ -1102,9 +1101,7 @@ static int send_path_request(const target *t, const uint8_t hash[16]) {
     in->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     in->sin_port = htons((uint16_t)t->data_port);
   }
-  if (RAND_bytes(tag, sizeof(tag)) != 1 ||
-      rnc_path_request_create(hash, NULL, tag, sizeof(tag), &packet) != RNC_OK ||
-      rnc_packet_encode(&packet, raw, sizeof(raw), &n) != RNC_OK ||
+  if (rnc_packet_encode(packet, raw, sizeof(raw), &n) != RNC_OK ||
       rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) != RNC_OK)
     return 0;
   fd = socket(addr.ss_family, SOCK_STREAM, 0);
@@ -1118,6 +1115,12 @@ static int send_path_request(const target *t, const uint8_t hash[16]) {
   }
   close(fd);
   return ok;
+}
+static int send_path_request(const target *t, const uint8_t hash[16]) {
+  uint8_t tag[16];
+  rnc_packet packet;
+  return RAND_bytes(tag, sizeof(tag)) == 1 && rnc_path_request_create(hash, NULL, tag, sizeof(tag), &packet) == RNC_OK &&
+         send_packet(t, &packet);
 }
 /* The path table entry for `hash`, or no pool at all; the reply stays alive until reply_free */
 static const val *find_path(const reply *r, const uint8_t hash[16]) {
@@ -2635,6 +2638,30 @@ static int sign_message_file(const rnc_identity *id, const char *text, const cha
   free(file_message);
   return rc;
 }
+/* Where the shared instance's data port is: the config's instance (a file or a directory, else the reference's
+ * search) by Unix socket on Linux, or TCP when the config says so or a data port is given. */
+static void data_target(const char *config, unsigned long data_port, target *t) {
+  conn c = {0};
+  char dir[1100], file[1200], key[RNC_RPC_KEY_MAX * 2 + 2];
+  struct stat sb;
+  memset(t, 0, sizeof(*t));
+  c.data_port = data_port;
+  if (config && !stat(config, &sb) && S_ISDIR(sb.st_mode))
+    (void)snprintf(file, sizeof(file), "%s/config", config);
+  else if (config)
+    (void)snprintf(file, sizeof(file), "%s", config);
+  else if (default_config_dir(dir, sizeof(dir)))
+    (void)snprintf(file, sizeof(file), "%s/config", dir);
+  else
+    file[0] = 0;
+  if (file[0])
+    read_config(file, &c, key, sizeof(key));
+  t->data_port = c.data_port ? (unsigned)c.data_port : DEFAULT_DATA_PORT;
+#ifdef __linux__
+  if (!c.tcp && !c.data_port)
+    (void)snprintf(t->unix_name, sizeof(t->unix_name), "%s", c.instance_name[0] ? c.instance_name : "default");
+#endif
+}
 static int cmd_id(int argc, char **argv) {
   const char *identity_path = NULL, *generate = NULL, *aspects = NULL,
              *encrypt = NULL, *decrypt = NULL, *sign = NULL, *validate = NULL,
@@ -2644,7 +2671,8 @@ static int cmd_id(int argc, char **argv) {
   rnc_identity id;
   char hex[129], out_path[1024];
   const char *import_pub = NULL, *import_prv = NULL, *how = NULL, *sign_message = NULL, *meta_path = NULL,
-             *meta_spec = NULL;
+             *meta_spec = NULL, *announce = NULL, *config_arg = NULL;
+  unsigned long data_port_arg = 0;
   int format = FORMAT_HEX, formats = 0, has_sign_message = 0, show_meta = 0;
   for (i = 0; i < argc; ++i) {
     const char *a = argv[i];
@@ -2675,6 +2703,8 @@ static int cmd_id(int argc, char **argv) {
       slot = &read_path;
     else if (!strcmp(a, "-w") || !strcmp(a, "--write"))
       slot = &write_path;
+    else if (!strcmp(a, "--config"))
+      slot = &config_arg;
     if (slot) {
       if (++i >= argc)
         return RC_INVALID_ARGS;
@@ -2701,6 +2731,13 @@ static int cmd_id(int argc, char **argv) {
       has_sign_message = 1; /* the text may follow; without it -r names a file holding the message */
       if (i + 1 < argc && argv[i + 1][0] != '-')
         sign_message = argv[++i];
+    } else if (!strcmp(a, "-a") || !strcmp(a, "--announce")) {
+      announce = "rnid.id"; /* the aspects may follow; without them the reference announces rnid.id */
+      if (i + 1 < argc && argv[i + 1][0] != '-')
+        announce = argv[++i];
+    } else if (!strcmp(a, "--data-port")) {
+      if (++i >= argc || !number(argv[i], 65535, &data_port_arg) || !data_port_arg)
+        return RC_INVALID_ARGS;
     } else if (!strcmp(a, "--meta"))
       show_meta = 1;
     else if (!strcmp(a, "--raw"))
@@ -2784,6 +2821,33 @@ static int cmd_id(int argc, char **argv) {
     } else {
       hex_encode(dest, 16, hex);
       printf("The %s destination for this Identity is <%s>\n", aspects, hex);
+    }
+  }
+  if (rc == RC_OK && announce) {
+    /* the destination of this identity for the aspects, announced through the shared instance as a local client */
+    uint8_t name_hash[10], dest[16];
+    char dest_hex[33];
+    rnc_packet packet;
+    target t;
+    if (!strchr(announce, '.')) {
+      puts("Invalid destination aspects specified");
+      rc = RC_INVALID_ASPECTS;
+    } else if (!id.has_private) {
+      puts("Cannot announce this destination, since the private key is not held");
+      rc = RC_NO_PRVKEY;
+    } else if (rnc_destination_hash(announce, &id, name_hash, dest) != RNC_OK) {
+      puts("Invalid destination aspects specified");
+      rc = RC_INVALID_ASPECTS;
+    } else {
+      hex_encode(dest, 16, dest_hex);
+      hex_encode(id.hash, 16, hex);
+      printf("Announcing %s destination <%s> for identity <%s>\n", announce, dest_hex, hex);
+      data_target(config_arg, data_port_arg, &t);
+      if (rnc_announce_create(&id, announce, NULL, 0, (uint64_t)time(NULL), random_bytes, NULL, &packet) != RNC_OK ||
+          !send_packet(&t, &packet)) {
+        puts("An error ocurred while attempting to send the announce: could not reach the shared instance");
+        rc = RC_UNKNOWN_ERROR;
+      }
     }
   }
   if (rc == RC_OK && sign) {
