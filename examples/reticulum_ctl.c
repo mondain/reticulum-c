@@ -474,9 +474,46 @@ static void print_hex(const val *v) {
     for (i = 0; i < v->n; ++i)
       printf("%02x", v->p[i]);
 }
+/* The value an interface is sorted by (rnstatus -s); -1 when the key is not one of ours. */
+static int sort_key_known(const char *key) {
+  static const char *keys[] = {"rate", "bitrate", "traffic", "rx", "tx", "arxc", "atxc", "gravity"};
+  size_t k;
+  for (k = 0; k < sizeof(keys) / sizeof(*keys); ++k)
+    if (!strcmp(key, keys[k]))
+      return 1;
+  return 0;
+}
+static double sort_value(const val *f, const char *key) {
+  if (!strcmp(key, "rate") || !strcmp(key, "bitrate"))
+    return (double)as_uint(map_get(f, "bitrate"));
+  if (!strcmp(key, "gravity"))
+    return as_double(map_get(f, "gravity"));
+  if (!strcmp(key, "traffic"))
+    return (double)as_uint(map_get(f, "rxb")) + (double)as_uint(map_get(f, "txb"));
+  if (!strcmp(key, "rx"))
+    return (double)as_uint(map_get(f, "rxb"));
+  if (!strcmp(key, "tx"))
+    return (double)as_uint(map_get(f, "txb"));
+  return (double)as_uint(map_get(f, key));
+}
+static int name_matches(const val *f, const char *filter) {
+  const val *name = map_get(f, "name");
+  char text[256];
+  size_t n;
+  if (!filter)
+    return 1;
+  if (!name || name->type != V_STR)
+    return 0;
+  n = name->n < sizeof(text) - 1 ? name->n : sizeof(text) - 1;
+  memcpy(text, name->p, n);
+  text[n] = 0;
+  return strstr(text, filter) != NULL;
+}
 static int cmd_status(int argc, char **argv) {
   conn c = {0, NULL, NULL, NULL};
-  int i, json = 0;
+  int i, json = 0, reverse = 0;
+  const char *sort = NULL, *filter = NULL;
+  size_t order[256], shown = 0, m;
   target t;
   reply r;
   const val *ifaces, *v;
@@ -490,6 +527,16 @@ static int cmd_status(int argc, char **argv) {
       continue;
     if (!strcmp(argv[i], "-j") || !strcmp(argv[i], "--json"))
       json = 1;
+    else if (!strcmp(argv[i], "-r") || !strcmp(argv[i], "--reverse"))
+      reverse = 1;
+    else if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--sort")) {
+      if (++i >= argc || !sort_key_known(argv[i])) {
+        fprintf(stderr, "Sort by one of rate, traffic, rx, tx, arxc, atxc, gravity\n");
+        return RC_INVALID_ARGS;
+      }
+      sort = argv[i];
+    } else if (argv[i][0] != '-' && !filter)
+      filter = argv[i];
     else {
       fprintf(stderr, "Unknown option %s\n", argv[i]);
       return RC_INVALID_ARGS;
@@ -511,8 +558,28 @@ static int cmd_status(int argc, char **argv) {
     return RC_OK;
   }
   ifaces = map_get(&r.root, "interfaces");
-  for (k = 0; ifaces && ifaces->type == V_ARR && k < ifaces->n; ++k) {
-    const val *f = &ifaces->kids[k];
+  for (k = 0; ifaces && ifaces->type == V_ARR && k < ifaces->n && shown < 256; ++k)
+    if (name_matches(&ifaces->kids[k], filter))
+      order[shown++] = k;
+  if (sort) /* a stable insertion sort, largest first as the reference sorts, smallest first with -r */
+    for (k = 1; k < shown; ++k) {
+      size_t at = order[k];
+      for (m = k; m > 0; --m) {
+        double above = sort_value(&ifaces->kids[order[m - 1]], sort), mine = sort_value(&ifaces->kids[at], sort);
+        if (reverse ? above <= mine : above >= mine)
+          break;
+        order[m] = order[m - 1];
+      }
+      order[m] = at;
+    }
+  else if (reverse)
+    for (k = 0; k < shown / 2; ++k) {
+      size_t swap = order[k];
+      order[k] = order[shown - 1 - k];
+      order[shown - 1 - k] = swap;
+    }
+  for (k = 0; k < shown; ++k) {
+    const val *f = &ifaces->kids[order[k]];
     putchar(' ');
     print_str(map_get(f, "name"), "?");
     printf("\n    Status    : %s\n",
@@ -599,12 +666,35 @@ static int send_command(const target *t, const char *method, const uint8_t *id,
   reply_free(&r);
   return ok;
 }
+/* drop calls: {"drop": what} plus the destination_hash for "path" and "all_via". The reply is True or False
+ * for a path, the number of paths for all_via and None for the announce queues. */
+static int send_drop(const target *t, const char *what, const uint8_t *hash, reply *r) {
+  uint8_t buf[128];
+  rnc_rpc_writer w;
+  size_t n;
+  rnc_rpc_writer_init(&w, buf, sizeof(buf));
+  (void)rnc_rpc_write_map(&w, hash ? 2 : 1);
+  (void)rnc_rpc_write_string(&w, "drop");
+  (void)rnc_rpc_write_string(&w, what);
+  if (hash) {
+    (void)rnc_rpc_write_string(&w, "destination_hash");
+    (void)rnc_rpc_write_bin(&w, hash, 16);
+  }
+  if (rnc_rpc_writer_finish(&w, &n) != RNC_OK)
+    return 0;
+  return rpc_query(t, buf, n, r);
+}
+static void print_hash(const uint8_t *hash) {
+  size_t k;
+  for (k = 0; k < 16; ++k)
+    printf("%02x", hash[k]);
+}
 static int cmd_path(int argc, char **argv) {
   conn c = {0, NULL, NULL, NULL};
   int i, json = 0, table = 0, list = 0, have_hash = 0, rc = RC_OK;
   long max_hops = 0;
   uint8_t hash[16], add[16], remove_hash[16];
-  int do_add = 0, do_remove = 0;
+  int do_add = 0, do_remove = 0, rates = 0, drop = 0, drop_via = 0, drop_queues = 0;
   unsigned long hours = 0;
   const char *reason = NULL;
   target t;
@@ -623,6 +713,14 @@ static int cmd_path(int argc, char **argv) {
       table = 1;
     else if (!strcmp(argv[i], "-b") || !strcmp(argv[i], "--blackholed"))
       list = 1;
+    else if (!strcmp(argv[i], "-r") || !strcmp(argv[i], "--rates"))
+      rates = 1;
+    else if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--drop"))
+      drop = 1;
+    else if (!strcmp(argv[i], "-x") || !strcmp(argv[i], "--drop-via"))
+      drop_via = 1;
+    else if (!strcmp(argv[i], "-D") || !strcmp(argv[i], "--drop-announces"))
+      drop_queues = 1;
     else if (!strcmp(argv[i], "-m") || !strcmp(argv[i], "--max")) {
       if (++i >= argc || !number(argv[i], 128, &n))
         return RC_INVALID_ARGS;
@@ -653,12 +751,80 @@ static int cmd_path(int argc, char **argv) {
       return RC_INVALID_ARGS;
     }
   }
-  if (!table && !list && !have_hash && !do_add && !do_remove) {
-    fprintf(stderr, "Specify a destination hash, -t, -b, -B or -U\n");
+  if (!table && !list && !have_hash && !do_add && !do_remove && !rates && !drop_queues) {
+    fprintf(stderr, "Specify a destination hash, -t, -r, -b, -B, -U or -D\n");
+    return RC_INVALID_ARGS;
+  }
+  if ((drop || drop_via) && !have_hash) {
+    fprintf(stderr, "-d and -x need a destination hash\n");
     return RC_INVALID_ARGS;
   }
   if (!make_target(&c, &t))
     return RC_INVALID_ARGS;
+  if (drop_queues) {
+    if (!send_drop(&t, "announce_queues", NULL, &r))
+      return RC_UNKNOWN_ERROR;
+    reply_free(&r);
+    puts("Dropped the queued announces");
+  }
+  if (drop) {
+    int dropped;
+    if (!send_drop(&t, "path", hash, &r))
+      return RC_UNKNOWN_ERROR;
+    dropped = r.root.type == V_BOOL && r.root.u;
+    reply_free(&r);
+    if (dropped) {
+      fputs("Dropped path to ", stdout);
+      print_hash(hash);
+      putchar('\n');
+    } else {
+      fputs("No path to drop for ", stdout);
+      print_hash(hash);
+      putchar('\n');
+      return 1;
+    }
+    return RC_OK;
+  }
+  if (drop_via) {
+    unsigned long long count;
+    if (!send_drop(&t, "all_via", hash, &r))
+      return RC_UNKNOWN_ERROR;
+    count = as_uint(&r.root);
+    reply_free(&r);
+    printf("Dropped %llu path%s via ", count, count == 1 ? "" : "s");
+    print_hash(hash);
+    putchar('\n');
+    return RC_OK;
+  }
+  if (rates) {
+    if (!get_request(&t, "rate_table", NULL, 0, &r))
+      return RC_UNKNOWN_ERROR;
+    if (json) {
+      json_value(&r.root);
+      putchar('\n');
+    } else if (r.root.type != V_ARR || !r.root.n)
+      puts("No announce rate information");
+    else
+      for (k = 0; k < r.root.n; ++k) {
+        const val *e = &r.root.kids[k], *h = map_get(e, "hash");
+        char when[48];
+        if (have_hash && (!h || h->type != V_BIN || h->n != 16 || memcmp(h->p, hash, 16)))
+          continue;
+        print_hex(h);
+        pretty_time(as_double(map_get(e, "last")), when, sizeof(when));
+        printf(" last announce %s, %llu rate violation%s", when,
+               (unsigned long long)as_uint(map_get(e, "rate_violations")),
+               as_uint(map_get(e, "rate_violations")) == 1 ? "" : "s");
+        if (as_double(map_get(e, "blocked_until")) > 0) {
+          pretty_time(as_double(map_get(e, "blocked_until")), when, sizeof(when));
+          printf(", blocked until %s", when);
+        }
+        putchar('\n');
+      }
+    reply_free(&r);
+    if (!table && !(have_hash && !rates) && !list && !do_add && !do_remove)
+      return RC_OK;
+  }
   if (do_add) {
     uint64_t until = hours ? (uint64_t)time(NULL) + hours * 3600u : 0;
     if (!send_command(&t, "blackhole_identity", add, until, reason))
@@ -776,12 +942,103 @@ static int write_private_file(const char *path, const uint8_t *data, size_t size
   close(fd);
   return ok ? RC_OK : RC_WRITE_ERROR;
 }
-static void print_identity(const rnc_identity *id, int show_private) {
+/* Text forms of a key, as rnid writes them: hex, base32 (RFC 4648 with padding) or URL-safe base64. */
+enum { FORMAT_HEX, FORMAT_B32, FORMAT_B64 };
+static void encode_bits(const uint8_t *in, size_t n, const char *alphabet, unsigned bits, char *out) {
+  unsigned long acc = 0;
+  unsigned have = 0, group = bits == 5 ? 8u : 4u; /* characters per padded group */
+  size_t o = 0, chars = 0;
+  size_t i;
+  for (i = 0; i < n; ++i) {
+    acc = (acc << 8) | in[i];
+    have += 8;
+    while (have >= bits) {
+      out[o++] = alphabet[(acc >> (have - bits)) & ((1u << bits) - 1u)];
+      have -= bits;
+      ++chars;
+    }
+  }
+  if (have) {
+    out[o++] = alphabet[(acc << (bits - have)) & ((1u << bits) - 1u)];
+    ++chars;
+  }
+  while (chars % group) {
+    out[o++] = '=';
+    ++chars;
+  }
+  out[o] = 0;
+}
+static void encode_key(int format, const uint8_t *key, size_t n, char *out) {
+  if (format == FORMAT_B32)
+    encode_bits(key, n, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 5, out);
+  else if (format == FORMAT_B64)
+    encode_bits(key, n, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", 6, out);
+  else
+    hex_encode(key, n, out);
+}
+/* Decodes padded base32 or base64 text to exactly `want` bytes; 0 on any other input. */
+static int decode_bits(const char *text, const char *alphabet, unsigned bits, uint8_t *out, size_t want) {
+  unsigned long acc = 0;
+  unsigned have = 0, group = bits == 5 ? 8u : 4u;
+  size_t o = 0, chars = 0, len = strlen(text);
+  size_t i;
+  for (i = 0; i < len && text[i] != '='; ++i) {
+    const char *at = strchr(alphabet, text[i]);
+    if (!at || !text[i])
+      return 0;
+    acc = (acc << bits) | (unsigned long)(at - alphabet);
+    have += bits;
+    ++chars;
+    if (have >= 8) {
+      if (o >= want)
+        return 0;
+      out[o++] = (uint8_t)(acc >> (have - 8));
+      have -= 8;
+    }
+  }
+  for (; i < len; ++i, ++chars)
+    if (text[i] != '=')
+      return 0;
+  return chars % group == 0 && o == want;
+}
+/* rnid -m and -M: an identity given as a file, hex, base32 or base64. */
+static int import_identity(const char *text, int is_private, rnc_identity *id, const char **how) {
+  uint8_t key[64];
+  const size_t want = 64u; /* a private and a public identity are both 64 bytes of key */
+  size_t n = 0;
+  uint8_t *data;
+  if (read_file(text, &data, &n)) {
+    int ok = n == want;
+    if (ok)
+      memcpy(key, data, 64);
+    free(data);
+    if (ok) {
+      *how = "file";
+      goto built;
+    }
+  }
+  if (strlen(text) == want * 2 && hex_decode(text, key, want)) {
+    *how = "hex";
+    goto built;
+  }
+  if (decode_bits(text, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 5, key, want)) {
+    *how = "base32";
+    goto built;
+  }
+  if (decode_bits(text, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", 6, key, want)) {
+    *how = "base64";
+    goto built;
+  }
+  return 0;
+built:
+  return (is_private ? rnc_identity_from_private(id, key) : rnc_identity_from_public(id, key)) == RNC_OK;
+}
+static void print_identity(const rnc_identity *id, int show_private, int format) {
   char hex[129];
-  hex_encode(id->public_key, 64, hex);
+  encode_key(format, id->public_key, 64, hex);
   printf("Public Key    : %s\n", hex);
   if (id->has_private && show_private) {
-    hex_encode(id->private_key, 64, hex);
+    encode_key(format, id->private_key, 64, hex);
     printf("Private Key   : %s\n", hex);
   } else
     printf("Private Key   : %s\n", id->has_private ? "Hidden" : "Not available");
@@ -851,11 +1108,17 @@ static int cmd_id(int argc, char **argv) {
          export_prv = 0, rc;
   rnc_identity id;
   char hex[129], out_path[1024];
+  const char *import_pub = NULL, *import_prv = NULL, *how = NULL;
+  int format = FORMAT_HEX, formats = 0;
   for (i = 0; i < argc; ++i) {
     const char *a = argv[i];
     const char **slot = NULL;
     if (!strcmp(a, "-i") || !strcmp(a, "--identity"))
       slot = &identity_path;
+    else if (!strcmp(a, "-m") || !strcmp(a, "--import-pub"))
+      slot = &import_pub;
+    else if (!strcmp(a, "-M") || !strcmp(a, "--import-prv"))
+      slot = &import_prv;
     else if (!strcmp(a, "-g") || !strcmp(a, "--generate"))
       slot = &generate;
     else if (!strcmp(a, "-H") || !strcmp(a, "--hash"))
@@ -876,6 +1139,15 @@ static int cmd_id(int argc, char **argv) {
       if (++i >= argc)
         return RC_INVALID_ARGS;
       *slot = argv[i];
+    } else if (!strcmp(a, "-B") || !strcmp(a, "--base32")) {
+      format = FORMAT_B32;
+      ++formats;
+    } else if (!strcmp(a, "-b") || !strcmp(a, "--base64")) {
+      format = FORMAT_B64;
+      ++formats;
+    } else if (!strcmp(a, "-F") || !strcmp(a, "--hex")) {
+      format = FORMAT_HEX;
+      ++formats;
     } else if (!strcmp(a, "-p") || !strcmp(a, "--print-identity"))
       print = 1;
     else if (!strcmp(a, "-P") || !strcmp(a, "--print-private"))
@@ -893,6 +1165,10 @@ static int cmd_id(int argc, char **argv) {
       return RC_INVALID_ARGS;
     }
   }
+  if (formats > 1) {
+    fprintf(stderr, "The -b, -B and -F options are mutually exclusive\n");
+    return RC_INVALID_ARGS;
+  }
   if (generate) {
     rc = rnc_identity_generate(&id, random_bytes, NULL);
     if (rc != RNC_OK)
@@ -907,26 +1183,46 @@ static int cmd_id(int argc, char **argv) {
     rnc_identity_clear(&id);
     return rc;
   }
-  if (!identity_path) {
-    fprintf(stderr, "No identity specified, use -i\n");
-    return RC_NO_IDENTITY;
+  if (import_pub || import_prv) {
+    const char *text = import_prv ? import_prv : import_pub;
+    if (!import_identity(text, import_prv != NULL, &id, &how)) {
+      printf("Could not decode specified data to a valid %s Reticulum Identity\n",
+             import_prv ? "private" : "public");
+      return RC_INVALID_IDENTITY;
+    }
+    if (!strcmp(how, "file"))
+      puts("Reticulum Identity imported from file");
+    else
+      printf("Reticulum Identity imported from %s input\n", how);
+    hex_encode(id.hash, 16, hex);
+    printf("Loaded Identity <%s>\n", hex);
+  } else {
+    if (!identity_path) {
+      fprintf(stderr, "No identity specified, use -i\n");
+      return RC_NO_IDENTITY;
+    }
+    rc = load_private(identity_path, &id);
+    if (rc) {
+      fprintf(stderr, "Could not load the identity file %s\n", identity_path);
+      return rc;
+    }
+    hex_encode(id.hash, 16, hex);
+    printf("Loaded Identity <%s> from %s\n", hex, identity_path);
   }
-  rc = load_private(identity_path, &id);
-  if (rc) {
-    fprintf(stderr, "Could not load the identity file %s\n", identity_path);
-    return rc;
-  }
-  hex_encode(id.hash, 16, hex);
-  printf("Loaded Identity <%s> from %s\n", hex, identity_path);
   rc = RC_OK;
   if (print)
-    print_identity(&id, show_private);
+    print_identity(&id, show_private, format);
   if (export_pub) {
-    hex_encode(id.public_key, 64, hex);
+    encode_key(format, id.public_key, 64, hex);
     printf("Public identity : %s\n", hex);
   }
   if (export_prv) {
-    hex_encode(id.private_key, 64, hex);
+    if (!id.has_private) {
+      fprintf(stderr, "This identity has no private key\n");
+      rnc_identity_clear(&id);
+      return RC_NO_PRVKEY;
+    }
+    encode_key(format, id.private_key, 64, hex);
     printf("Private identity: %s\n", hex);
   }
   if (aspects) {

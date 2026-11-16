@@ -78,7 +78,12 @@ rnc_result rnc_rpc_decode_query(const void *payload, size_t size,
  * `until` is unix seconds (0 = none); `reason` may be empty. */
 typedef enum rnc_rpc_command_type {
   RNC_RPC_BLACKHOLE_IDENTITY = 1,
-  RNC_RPC_UNBLACKHOLE_IDENTITY
+  RNC_RPC_UNBLACKHOLE_IDENTITY,
+  /* {"drop": "path" | "all_via", "destination_hash": hash} and {"drop": "announce_queues"}; the hash is
+   * in `identity` (a destination for DROP_PATH, a next hop for DROP_ALL_VIA). */
+  RNC_RPC_DROP_PATH,
+  RNC_RPC_DROP_ALL_VIA,
+  RNC_RPC_DROP_ANNOUNCE_QUEUES
 } rnc_rpc_command_type;
 typedef struct rnc_rpc_command {
   rnc_rpc_command_type type;

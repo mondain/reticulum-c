@@ -739,15 +739,30 @@ rnc_result rnc_rpc_decode_command(const void *payload, size_t size,
       bit = 2;
     else if (n == 6 && !memcmp(key, "reason", 6))
       bit = 4;
+    else if (n == 4 && !memcmp(key, "drop", 4))
+      bit = 8;
+    else if (n == 16 && !memcmp(key, "destination_hash", 16))
+      bit = 16;
     else
       return RNC_UNSUPPORTED;
     if (seen & bit)
       return RNC_PROTOCOL;
     seen |= bit;
-    if (bit == 1) {
+    if (bit == 1 || bit == 16) {
       if (!rmp_bin(&r, &value, &vn) || vn != 16)
         return RNC_PROTOCOL;
       memcpy(out.identity, value, 16);
+    } else if (bit == 8) {
+      if (!rmp_len(&r, 1, &vn) || !rmp_take(&r, vn, &value))
+        return RNC_PROTOCOL;
+      if (vn == 4 && !memcmp(value, "path", 4))
+        out.type = RNC_RPC_DROP_PATH;
+      else if (vn == 7 && !memcmp(value, "all_via", 7))
+        out.type = RNC_RPC_DROP_ALL_VIA;
+      else if (vn == 15 && !memcmp(value, "announce_queues", 15))
+        out.type = RNC_RPC_DROP_ANNOUNCE_QUEUES;
+      else
+        return RNC_PROTOCOL;
     } else if (bit == 2) {
       if (!command_until(&r, &out.until))
         return RNC_PROTOCOL;
@@ -760,6 +775,16 @@ rnc_result rnc_rpc_decode_command(const void *payload, size_t size,
       memcpy(out.reason, value, vn);
     }
   }
+  if (seen & 8) {
+    /* a drop takes a hash for a path or a next hop, none for the queues, and nothing else */
+    int wants_hash = out.type != RNC_RPC_DROP_ANNOUNCE_QUEUES;
+    if ((seen & (1 | 2 | 4)) || r.i != r.n || wants_hash != !!(seen & 16))
+      return RNC_PROTOCOL;
+    *command = out;
+    return RNC_OK;
+  }
+  if (seen & 16)
+    return RNC_PROTOCOL;
   if (!(seen & 1) || r.i != r.n ||
       (out.type == RNC_RPC_UNBLACKHOLE_IDENTITY && (seen & 6)))
     return !(seen & 1) ? RNC_UNSUPPORTED : RNC_PROTOCOL;

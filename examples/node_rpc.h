@@ -396,7 +396,19 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
      * or False, like Transport does */
     rnc_rpc_command command;
     if (rnc_rpc_decode_command(query, query_size, &command) == RNC_OK) {
-      rnc_result r =
+      rnc_result r;
+      /* drop_path answers True or False, drop_all_via the count, drop_announce_queues None */
+      if (command.type == RNC_RPC_DROP_PATH)
+        (void)rnc_rpc_write_bool(&w, rnc_node_drop_path(node, command.identity) == RNC_OK);
+      else if (command.type == RNC_RPC_DROP_ALL_VIA)
+        (void)rnc_rpc_write_uint(&w, rnc_node_drop_via(node, command.identity));
+      else if (command.type == RNC_RPC_DROP_ANNOUNCE_QUEUES) {
+        (void)rnc_node_drop_announce_queues(node);
+        (void)rnc_rpc_write_nil(&w);
+      }
+      if (command.type >= RNC_RPC_DROP_PATH)
+        return rnc_rpc_writer_finish(&w, written) == RNC_OK;
+      r =
           command.type == RNC_RPC_BLACKHOLE_IDENTITY
               ? rnc_node_blackhole(node, command.identity, command.until,
                                    command.reason, (uint64_t)time(NULL))
