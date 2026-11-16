@@ -235,11 +235,11 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 
 | Status | Example | Notes |
 | --- | --- | --- |
-| PART | Announce (incl. ratcheted, path request), Broadcast/PLAIN, GROUP, Link, Identification (allow-list), Requests/Responses, Channel, Buffer, Filetransfer | Library behavior and tests exist; dedicated stand-alone examples are absent |
+| PART | Announce (incl. ratcheted, path request), Broadcast/PLAIN, GROUP, Link, Identification (allow-list), Requests/Responses, Channel, Buffer, Filetransfer | Library behavior and tests exist. Stand-alone examples now cover announce and listen (`examples/example_announce.c`) and a request/response service with its client (`examples/example_request.c`, the answer is the text reversed), both run against the daemon by a process test. Still absent as examples: ratchets, broadcast/PLAIN, GROUP, Link, identification, Channel, Buffer; Filetransfer is `reticulum-c-cp` |
 | PART | Echo | Library encrypt/decrypt, proofs and receipts with RTT, `rnc_node_hops_to`; MCU test client in `mcu/tests/echo_client.c`, but no general host echo example |
 | N/A | Callback-style APIs | Service, Resource and Link use event dispatch instead of Python callbacks by design |
 
-The repository's executables are `examples/text_peer.c`, the node daemon (`node_daemon.c`) and the tools of section 5 (`reticulum-c-ctl`, `-cp`, `-x`, `-sh`, `-rnodeconf`, `-git`, `-git-remote`, `-git-admin`, `-git-cs`). Dedicated stand-alone protocol examples remain absent; the library tests cover those behaviors. MCU applications under `mcu/` and the browser tools under `web/` are separate from this manual-example checklist.
+The repository's executables are `examples/text_peer.c`, the node daemon (`node_daemon.c`) and the tools of section 5 (`reticulum-c-ctl`, `-cp`, `-x`, `-sh`, `-rnodeconf`, `-git`, `-git-remote`, `-git-admin`, `-git-cs`). Two stand-alone protocol examples exist (`reticulum-c-example-announce`, `reticulum-c-example-request`); the rest are covered by library tests only. MCU applications under `mcu/` and the browser tools under `web/` are separate from this manual-example checklist.
 
 ## 7. Remaining work ordering
 

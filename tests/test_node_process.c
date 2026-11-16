@@ -3097,6 +3097,69 @@ static void x_tools(const char *exe, const char *x) {
   remove_tree(dir);
   puts("x tool tests passed");
 }
+/* The stand-alone examples (examples/example_announce.c, example_request.c) against the daemon. */
+static void examples_test(const char *exe, const char *announce, const char *request) {
+  char dir[] = "/tmp/rnc-node-ex-XXXXXX", cfg[256], key[256], admin[256], id_a[300], id_b[300], id_s[300],
+       connect[64], dest[33], out[4096], listen_out[4096], text[1024], identity[33], hash[33];
+  unsigned port = unused_port();
+  int dfd, afd, bfd, sfd;
+  pid_t daemon, a, b, server;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(id_a, sizeof(id_a), "%s/id_a", dir) > 0);
+  CHECK(snprintf(id_b, sizeof(id_b), "%s/id_b", dir) > 0);
+  CHECK(snprintf(id_s, sizeof(id_s), "%s/id_s", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  write_identity(id_a, 5, hash);
+  write_identity(id_b, 50, hash);
+  write_identity(id_s, 95, hash);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+                 port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  /* A listens for one announce; B announces; A prints B's destination and text */
+  {
+    char *listen_args[] = {(char *)announce, "--connect", connect, "--identity", id_a, "--app-data", "first",
+                           "--count", "1", NULL};
+    char *other_args[] = {(char *)announce, "--connect", connect, "--identity", id_b, "--app-data",
+                          "second one", NULL};
+    int status;
+    a = spawn_cp(announce, &afd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(afd, "announcing <", listen_out, sizeof(listen_out), 10);
+    read_until(afd, ">\n", listen_out, sizeof(listen_out), 10);
+    b = spawn_cp(announce, &bfd, other_args);
+    memset(out, 0, sizeof(out));
+    read_until(bfd, ">\n", out, sizeof(out), 10);
+    read_until(afd, "second one", listen_out, sizeof(listen_out), 20);
+    CHECK(strstr(listen_out, "heard <") && strstr(listen_out, " hop"));
+    CHECK(waitpid(a, &status, 0) == a && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(afd);
+    stop_cp(b, bfd);
+  }
+  /* a request service: the answer is the text reversed */
+  {
+    char *serve_args[] = {(char *)request, "--connect", connect, "--identity", id_s, "server", NULL};
+    char *call_args[] = {(char *)request, "--connect", connect, "--identity", id_a, "client", dest, "hello world", NULL};
+    server = spawn_cp(request, &sfd, serve_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(sfd, "serving /reverse on <", listen_out, sizeof(listen_out), 10);
+    read_until(sfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_after(listen_out, "serving /reverse on <", dest);
+    CHECK(run_cp(request, out, sizeof(out), call_args) == 0);
+    CHECK(strstr(out, "dlrow olleh"));
+    stop_cp(server, sfd);
+    CHECK(run_cp(request, out, sizeof(out), (char *[]){(char *)request, "--connect", connect, "--identity", id_a, "client", "00000000000000000000000000000000", "x", NULL}) != 0);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("example tests passed");
+}
 /* The reference rnx against ours, both directions. */
 static void x_reference(const char *exe, const char *x, const char *python) {
   char dir[] = "/tmp/rnc-x-ref-XXXXXX", cfg[256], key[256], admin[256],
@@ -3878,6 +3941,8 @@ int main(int argc, char **argv) {
     panic_on_interface(argv[1]);
   else if (!strcmp(argv[2], "sh_tools") && argc == 4)
     sh_tools(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "examples") && argc == 5)
+    examples_test(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "x_tools") && argc == 4)
     x_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "cp_ref") && argc == 6)
