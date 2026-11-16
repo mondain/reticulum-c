@@ -2855,6 +2855,42 @@ static void cp_tools(const char *exe, const char *cp) {
     CHECK(!unlink(path));
   }
 
+  /* -p prints the identity and where it listens, without connecting; the allow list may be a file in
+   * ~/.rncp/allowed_identities (entries of 32 characters; others are ignored) */
+  {
+    char home[400], rncp_dir[420], allowed[460], want[64], *saved_home = getenv("HOME");
+    char *print_args[] = {(char *)cp, "--identity", idb, "-p", NULL};
+    char *listen_args[] = {(char *)cp, "--connect", connect, "--identity", listener_id, "-l", "-s", jail, "-b",
+                           "0", NULL};
+    char *send_b[] = {(char *)cp, "--connect", connect, "--identity", idb, outside, dest, NULL};
+    char *send_c[] = {(char *)cp, "--connect", connect, "--identity", idc, payload, dest, "-S", "-C", NULL};
+    uint8_t key_b[64], name_hash[10], dest_b[16];
+    char listing[200];
+    rnc_identity id_b;
+    CHECK(file_read(idb, (char *)key_b, 64) == 64 && rnc_identity_from_private(&id_b, key_b) == RNC_OK);
+    CHECK(rnc_destination_hash("rncp.receive", &id_b, name_hash, dest_b) == RNC_OK);
+    CHECK(run_cp(cp, out, sizeof(out), print_args) == 0);
+    hex_of(dest_b, 16, want);
+    CHECK(strstr(out, "Identity     : <") && strstr(out, hash_b) && strstr(out, "Listening on : <") && strstr(out, want));
+    rnc_identity_clear(&id_b);
+    CHECK(snprintf(home, sizeof(home), "%s/home", dir) > 0 && !mkdir(home, 0700));
+    CHECK(snprintf(rncp_dir, sizeof(rncp_dir), "%s/.rncp", home) > 0 && !mkdir(rncp_dir, 0700));
+    CHECK(snprintf(allowed, sizeof(allowed), "%s/allowed_identities", rncp_dir) > 0);
+    CHECK(snprintf(listing, sizeof(listing), "not a hash\r\n%s\r\n\r\n%s0\r\n", hash_c, hash_b) > 0);
+    file_bytes(allowed, listing, strlen(listing));
+    CHECK(setenv("HOME", home, 1) == 0);
+    listener = spawn_cp(cp, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    CHECK(setenv("HOME", saved_home ? saved_home : "/", 1) == 0);
+    CHECK(run_cp(cp, out, sizeof(out), send_b) != 0); /* its 33 character line does not count */
+    CHECK(run_cp(cp, out, sizeof(out), send_c) == 0 && strstr(out, "Transfer complete") && !strstr(out, "Progress"));
+    CHECK(snprintf(path, sizeof(path), "%s/payload.bin", jail) > 0);
+    CHECK(file_read(path, buf, sizeof(buf)) == sizeof(bytes));
+    stop_cp(listener, lfd);
+    CHECK(!unlink(path));
+  }
+
   /* fetch from a jail: a file inside comes back, escapes and misses do not */
   {
     char *listen_args[] = {(char *)cp, "--connect", connect, "--identity",
@@ -3090,8 +3126,45 @@ static void x_tools(const char *exe, const char *x) {
     CHECK(rc_ == 0);
   }
   CHECK(access(marker, F_OK) == 0);
+  /* -W caps how long the result may take: the command outlasts it and the run ends at once */
+  started = time(NULL);
+  CHECK(x_run(x, connect, out, sizeof(out), idb, "-w", "30", "-W", "2", dest, "sleep 6", NULL) == 244);
+  CHECK(time(NULL) - started < 5);
+  /* -p prints the identity and where it listens without connecting; the allow list may be a file in
+   * ~/.rnx/allowed_identities (entries of 32 characters, others ignored) */
+  {
+    char home[400], rnx_dir[420], allowed[460], want[64], listing[200], idl2[300], dest2[33];
+    char *saved_home = getenv("HOME");
+    char *print_args[] = {(char *)x, "--identity", idb, "-p", NULL};
+    char *listen2[] = {(char *)x, "--connect", connect, "--identity", idl2, "-l", NULL};
+    uint8_t key_b[64], name_hash[10], dest_b[16];
+    rnc_identity id_b;
+    pid_t second;
+    int sfd;
+    CHECK(file_read(idb, (char *)key_b, 64) == 64 && rnc_identity_from_private(&id_b, key_b) == RNC_OK);
+    CHECK(rnc_destination_hash("rnx.execute", &id_b, name_hash, dest_b) == RNC_OK);
+    CHECK(run_cp(x, out, sizeof(out), print_args) == 0);
+    hex_of(dest_b, 16, want);
+    CHECK(strstr(out, "Identity     : <") && strstr(out, hash_b) && strstr(out, "Listening on : <") && strstr(out, want));
+    rnc_identity_clear(&id_b);
+    CHECK(snprintf(idl2, sizeof(idl2), "%s/id_l2", dir) > 0);
+    CHECK(snprintf(home, sizeof(home), "%s/home", dir) > 0 && !mkdir(home, 0700));
+    CHECK(snprintf(rnx_dir, sizeof(rnx_dir), "%s/.rnx", home) > 0 && !mkdir(rnx_dir, 0700));
+    CHECK(snprintf(allowed, sizeof(allowed), "%s/allowed_identities", rnx_dir) > 0);
+    CHECK(snprintf(listing, sizeof(listing), "junk\r\n%s\r\n", hash_c) > 0);
+    file_bytes(allowed, listing, strlen(listing));
+    CHECK(setenv("HOME", home, 1) == 0);
+    second = spawn_cp(x, &sfd, listen2);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(sfd, "rnx listening for commands on <", listen_out, sizeof(listen_out), 10);
+    read_until(sfd, ">\n", listen_out, sizeof(listen_out), 10);
+    CHECK(setenv("HOME", saved_home ? saved_home : "/", 1) == 0);
+    parse_after(listen_out, "rnx listening for commands on <", dest2);
+    CHECK(x_run(x, connect, out, sizeof(out), idc, dest2, "echo from-file", NULL) == 0 && strstr(out, "from-file"));
+    CHECK(x_run(x, connect, out, sizeof(out), idb, "-w", "5", dest2, "echo denied", NULL) != 0);
+    stop_cp(second, sfd);
+  }
   (void)cmd;
-  (void)hash_c;
   stop_cp(listener, lfd);
   stop(daemon, dfd);
   remove_tree(dir);

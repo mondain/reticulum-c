@@ -1,3 +1,4 @@
+#include <reticulum_c/rnc_buffer.h>
 #include <reticulum_c/rnc_transfer.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,7 +22,8 @@ static rnc_result rng(void *ctx, uint8_t *p, size_t n) {
   return RNC_OK;
 }
 /* Interface MTU for the next setup() and the largest packet on the wire. */
-static size_t iface_mtu = 500, max_wire;
+static size_t iface_mtu = 500, max_wire, wire_total;
+static int listener_no_compress;
 typedef struct net {
   rnc_identity client_id, server_id;
   rnc_node *client, *server;
@@ -87,6 +89,7 @@ static void wire_note(const rnc_packet *packet) {
   if (rnc_packet_encode(packet, raw, sizeof(raw), &wire) == RNC_OK &&
       wire > max_wire)
     max_wire = wire;
+  wire_total += wire;
 }
 static void pump(net *n, unsigned steps) {
   unsigned i;
@@ -143,6 +146,7 @@ static void setup(net *n, int allow, int fetch) {
     cfg.allowed_count = 1;
   }
   cfg.received = on_received;
+  cfg.no_compress = listener_no_compress;
   cfg.fetch = fetch ? on_fetch : NULL;
   cfg.context = n;
   n->listener = rnc_transfer_listener_new(n->server, &n->server_id,
@@ -352,6 +356,52 @@ static void large_mtu(void) {
   }
   iface_mtu = 500;
 }
+/* -C: a pushed file or a fetch answer is sent uncompressed. 100 kB of zeros is a few kB on the wire when
+ * compressed and over 100 kB when not; builds without compression send it plain either way. */
+static size_t push_zeros(int compress) {
+  net n;
+  uint8_t *data = calloc(100000, 1), out[16];
+  rnc_transfer_result r;
+  CHECK(data);
+  wire_total = 0;
+  setup(&n, 2, 0);
+  rnc_transfer_client_set_compression(n.xfer, compress);
+  CHECK(rnc_transfer_send(n.xfer, n.destination, &n.client_id, (const uint8_t *)"z.bin", 5, data, 100000, 1,
+                          600000, UNIX, n.now) == RNC_OK);
+  r = finish(&n, out, sizeof(out), 60000, NULL, 1);
+  CHECK(r.status == RNC_TRANSFER_DONE && n.received_size == 100000 && !memcmp(n.received_data, data, 100000));
+  free(data);
+  teardown(&n);
+  return wire_total;
+}
+static size_t fetch_zeros(int no_compress) {
+  net n;
+  uint8_t *out = malloc(200000);
+  rnc_transfer_result r;
+  CHECK(out);
+  wire_total = 0;
+  listener_no_compress = no_compress;
+  setup(&n, 1, 1);
+  n.fetch_size = 100000;
+  memset(n.fetch_data, 0, n.fetch_size);
+  CHECK(rnc_transfer_fetch(n.xfer, n.destination, &n.client_id, (const uint8_t *)"/z", 2, 8, 600000, UNIX,
+                           n.now) == RNC_OK);
+  r = finish(&n, out, 200000, 60000, NULL, 8);
+  CHECK(r.status == RNC_TRANSFER_DONE && r.size == 100000);
+  free(out);
+  teardown(&n);
+  listener_no_compress = 0;
+  return wire_total;
+}
+static void no_compress(void) {
+  size_t packed = push_zeros(1), plain = push_zeros(0);
+  size_t fetched_packed = fetch_zeros(0), fetched_plain = fetch_zeros(1);
+  if (rnc_stream_compression_available()) {
+    CHECK(packed < 20000 && plain > 100000);
+    CHECK(fetched_packed < 20000 && fetched_plain > 100000);
+  } else
+    CHECK(plain > 100000 && fetched_plain > 100000);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "send"))
@@ -368,6 +418,8 @@ int main(int argc, char **argv) {
     fetch_unavailable();
   else if (!strcmp(argv[1], "large_mtu"))
     large_mtu();
+  else if (!strcmp(argv[1], "no_compress"))
+    no_compress();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
   else

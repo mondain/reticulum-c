@@ -54,6 +54,7 @@ typedef struct rnc_transfer_config {
   uint8_t allowed[RNC_TRANSFER_ALLOWED][16]; /* identity hashes otherwise */
   size_t allowed_count;
   size_t max_size; /* largest incoming file; 0 = RNC_TRANSFER_MAX_SIZE */
+  int no_compress; /* send fetched files uncompressed (rncp -C) */
   rnc_transfer_received_fn received;
   rnc_transfer_fetch_fn fetch; /* NULL: fetching disabled */
   void *context;
@@ -93,6 +94,8 @@ rnc_transfer_client *rnc_transfer_client_new(rnc_node *node, size_t max_size,
                                              rnc_random_fn random,
                                              void *random_context);
 void rnc_transfer_client_free(rnc_transfer_client *client);
+/* Whether files this client sends are compressed when the build can (default on; rncp -C turns it off). */
+void rnc_transfer_client_set_compression(rnc_transfer_client *client, int enabled);
 /* identity (with private key) is sent as the link identification. The node
  * needs a route to the destination (RNC_STATE otherwise); RNC_AGAIN when all
  * jobs are busy (unpolled results count as busy). timeout_ms covers the whole
