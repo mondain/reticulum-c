@@ -90,6 +90,9 @@ typedef struct interface_config {
   double lat, lon, height;
   uint8_t lxmf[16];
 } interface_config;
+#ifndef RNC_NODE_VERSION
+#define RNC_NODE_VERSION "unknown" /* the build normally passes the project version */
+#endif
 typedef struct config {
   int transport, share, share_tcp, share_unix, use_unix, remote_management, publish_blackhole,
       respond_to_probes, explicit_proofs, panic_on_interface_error,
@@ -2000,6 +2003,72 @@ static void daemon_log_handler(void *context, int level, const char *module,
   if (logsink.to_stdout)
     (void)fflush(stdout);
 }
+/* rnsd's -v, -q and -s: the configured log level moved up or down by the net -v count (0 to 8), or, as a
+ * service, everything to <configuration directory>/logfile and the level left alone. */
+static int cli_verbosity;
+static int cli_service;
+static char cli_logfile[512];
+static void cli_log_options(config *c) {
+  if (cli_service) {
+    (void)snprintf(c->logdestination, sizeof(c->logdestination), "file");
+    (void)snprintf(c->logfile, sizeof(c->logfile), "%s", cli_logfile);
+    return;
+  }
+  c->loglevel += cli_verbosity;
+  if (c->loglevel < 0)
+    c->loglevel = 0;
+  if (c->loglevel > 8)
+    c->loglevel = 8;
+}
+/* A configuration example this daemon accepts: every setting that is understood, with its default. */
+static const char *example_config =
+    "# An example configuration for reticulum-c-node. Every setting shown is understood by this daemon;\n"
+    "# the values are the defaults unless a comment says otherwise. Check a file with --check.\n"
+    "\n"
+    "[reticulum]\n"
+    "\n"
+    "# Pass announces and serve path requests for other peers.\n"
+    "enable_transport = No\n"
+    "\n"
+    "# Let other programs on this machine use this daemon's interfaces. On Linux the shared instance\n"
+    "# listens on abstract Unix sockets named after instance_name; shared_instance_type = tcp uses\n"
+    "# shared_instance_port and instance_control_port instead (the default elsewhere).\n"
+    "share_instance = Yes\n"
+    "instance_name = default\n"
+    "# shared_instance_type = tcp\n"
+    "# shared_instance_port = 37428\n"
+    "# instance_control_port = 37429\n"
+    "\n"
+    "# Answer path requests for unknown destinations from this daemon's own rate table, accept probes,\n"
+    "# and use implicit packet proofs.\n"
+    "respond_to_probes = No\n"
+    "use_implicit_proof = Yes\n"
+    "link_mtu_discovery = Yes\n"
+    "\n"
+    "# An identity file shared by the instances of one network (created if absent).\n"
+    "# network_identity = ~/.reticulum/storage/network_identity\n"
+    "\n"
+    "[logging]\n"
+    "# 0 critical, 1 error, 2 warning, 3 notice, 4 verbose, 5 debug, 6 extreme, 7 trace\n"
+    "loglevel = 3\n"
+    "# logdestination = stdout  (or file with logfile = PATH)\n"
+    "\n"
+    "[interfaces]\n"
+    "\n"
+    "  # A TCP server other nodes can connect to.\n"
+    "  [[TCP Server]]\n"
+    "    type = TCPServerInterface\n"
+    "    enabled = Yes\n"
+    "    listen_ip = 0.0.0.0\n"
+    "    listen_port = 4242\n"
+    "    mode = full\n"
+    "\n"
+    "  # A TCP client connecting out to a transport node.\n"
+    "  [[TCP Client]]\n"
+    "    type = TCPClientInterface\n"
+    "    enabled = No\n"
+    "    target_host = reticulum.example.org\n"
+    "    target_port = 4242\n";
 static void log_apply(const config *c) {
   memset(&logsink, 0, sizeof(logsink));
   logsink.to_stdout = !strcmp(c->logdestination, "stdout");
@@ -2084,12 +2153,37 @@ int main(int argc, char **argv) {
         discovery_dir[0] = 0;
     }
     else if (!strcmp(argv[i], "--version")) {
-      puts("reticulum-c-node 0.2 (experimental C router; own admin protocol)");
+      puts("reticulum-c-node " RNC_NODE_VERSION);
       return 0;
+    } else if (!strcmp(argv[i], "--exampleconfig")) {
+      fputs(example_config, stdout);
+      return 0;
+    } else if (!strcmp(argv[i], "--quiet"))
+      --cli_verbosity;
+    else if (!strcmp(argv[i], "--verbose"))
+      ++cli_verbosity;
+    else if (!strcmp(argv[i], "--service"))
+      cli_service = 1;
+    else if (!strcmp(argv[i], "--interactive") ||
+             (argv[i][0] == '-' && argv[i][1] != '-' && argv[i][1] && strspn(argv[i] + 1, "vqsi") == strlen(argv[i] + 1))) {
+      /* single-letter flags may be combined, as argparse allows: -v, -vv, -sq, ... */
+      const char *f;
+      for (f = !strcmp(argv[i], "--interactive") ? "i" : argv[i] + 1; *f; ++f) {
+        if (*f == 'v')
+          ++cli_verbosity;
+        else if (*f == 'q')
+          --cli_verbosity;
+        else if (*f == 's')
+          cli_service = 1;
+        else {
+          fprintf(stderr, "There is no interactive shell in this daemon; use reticulum-c-ctl to inspect it.\n");
+          return 2;
+        }
+      }
     } else {
       fprintf(stderr,
-              "Usage: %s [--config FILE|DIR] [--check | [--identity FILE] "
-              "[--admin SOCKET] [--state FILE]]\n",
+              "Usage: %s [--config FILE|DIR] [-v|-q] [-s] [--check | [--identity FILE] "
+              "[--admin SOCKET] [--state FILE]] | --exampleconfig | --version\n",
               argv[0]);
       return 2;
     }
@@ -2136,6 +2230,15 @@ int main(int argc, char **argv) {
       !read_config(config_path, &current)) {
     result = 2;
     goto done;
+  }
+  {
+    /* the service log lives beside the configuration file, as the reference's does */
+    const char *slash = strrchr(config_path, '/');
+    if (slash)
+      (void)snprintf(cli_logfile, sizeof(cli_logfile), "%.*s/logfile", (int)(slash - config_path), config_path);
+    else
+      (void)snprintf(cli_logfile, sizeof(cli_logfile), "logfile");
+    cli_log_options(&current);
   }
   if (!i2p_dir[0] && key_path &&
       snprintf(i2p_dir, sizeof(i2p_dir), "%s.i2p", key_path) >=
@@ -2202,6 +2305,7 @@ int main(int argc, char **argv) {
       config replacement;
       reloading = 0;
       if (read_config(config_path, &replacement)) {
+        cli_log_options(&replacement);
         log_apply(&replacement);
         if (!save_state(state_path, node, &id, (uint64_t)time(NULL),
                         monotonic_ms()))

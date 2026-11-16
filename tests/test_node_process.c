@@ -55,9 +55,48 @@ static const char *valid =
     "[reticulum]\nenable_transport = Yes\nshare_instance = "
     "No\n[interfaces]\n[[Local TCP]]\ntype = TCPServerInterface\nenabled = "
     "Yes\nlisten_ip = 127.0.0.1\nlisten_port = 0\n";
+/* run exe with arguments, capturing standard output; returns the exit status */
+static int run_args(const char *exe, char *const args[], char *out, size_t size) {
+  int fds[2], status;
+  pid_t p;
+  size_t used = 0;
+  ssize_t n;
+  CHECK(!pipe(fds));
+  p = fork();
+  CHECK(p >= 0);
+  if (!p) {
+    int null = open("/dev/null", O_WRONLY);
+    close(fds[0]);
+    CHECK(null >= 0 && dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(null, STDERR_FILENO) >= 0);
+    close(fds[1]);
+    execv(exe, args);
+    _exit(127);
+  }
+  close(fds[1]);
+  while ((n = read(fds[0], out + used, size - 1 - used)) > 0)
+    used += (size_t)n;
+  out[used] = 0;
+  close(fds[0]);
+  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  return WEXITSTATUS(status);
+}
 static void cli(const char *exe) {
   char dir[] = "/tmp/rnc-node-cli-XXXXXX", path[256];
   CHECK(mkdtemp(dir));
+  {
+    /* rnsd's --version, --exampleconfig (a file this daemon accepts) and -i (there is no shell) */
+    char out[8192], example[300];
+    char *version[] = {(char *)exe, "--version", NULL}, *sample[] = {(char *)exe, "--exampleconfig", NULL},
+         *interactive[] = {(char *)exe, "-i", NULL}, *unknown[] = {(char *)exe, "--no-such-option", NULL};
+    CHECK(run_args(exe, version, out, sizeof(out)) == 0 && !strncmp(out, "reticulum-c-node ", 17) && strchr(out, '.'));
+    CHECK(run_args(exe, sample, out, sizeof(out)) == 0 && strstr(out, "[reticulum]") && strstr(out, "[interfaces]"));
+    CHECK(snprintf(example, sizeof(example), "%s/example", dir) > 0);
+    config_file(example, out);
+    CHECK(run_check(exe, example) == 0);
+    CHECK(!unlink(example));
+    CHECK(run_args(exe, interactive, out, sizeof(out)) == 2);
+    CHECK(run_args(exe, unknown, out, sizeof(out)) == 2);
+  }
   CHECK(snprintf(path, sizeof(path), "%s/config", dir) > 0);
   config_file(path, valid);
   CHECK(run_check(exe, path) == 0);
@@ -1398,6 +1437,59 @@ static void logging_config(const char *exe) {
     } else
       /* level 3 (notice): info messages are not */
       CHECK(!file_contains(logfile, "is up"));
+  }
+  /* rnsd's -v and -q move the configured level; -s logs to the file beside the configuration and leaves the level */
+  {
+    static const struct {
+      const char *option;
+      unsigned level;
+      int logs_info;
+      int to_service_file;
+    } cases[] = {{"-v", 3, 1, 0}, {"-q", 4, 0, 0}, {"-vv", 2, 1, 0}, {"-q", 5, 1, 0}, {"-s", 4, 1, 1}, {"-sv", 3, 0, 1}};
+    size_t k;
+    char service_log[300];
+    CHECK(snprintf(service_log, sizeof(service_log), "%s/logfile", dir) > 0);
+    for (k = 0; k < sizeof(cases) / sizeof(*cases); ++k) {
+      int peer, out[2];
+      pid_t child;
+      const char *where = cases[k].to_service_file ? service_log : logfile;
+      (void)unlink(logfile);
+      (void)unlink(service_log);
+      write_config(cfg,
+                   "[reticulum]\nenable_transport = No\nshare_instance = No\ninstance_name = logtest\n"
+                   "[logging]\nloglevel = %u\n%s%s%s[interfaces]\n[[TCP]]\ntype = TCPServerInterface\n"
+                   "listen_ip = 127.0.0.1\nlisten_port = %u\n",
+                   cases[k].level, cases[k].to_service_file ? "" : "logdestination = file\nlogfile = ",
+                   cases[k].to_service_file ? "" : logfile, cases[k].to_service_file ? "" : "\n", port);
+      CHECK(!pipe(out));
+      child = fork();
+      CHECK(child >= 0);
+      if (!child) {
+        close(out[0]);
+        CHECK(dup2(out[1], STDOUT_FILENO) >= 0);
+        close(out[1]);
+        execl(exe, exe, "--config", cfg, "--identity", key, "--admin", admin, cases[k].option, (char *)NULL);
+        _exit(127);
+      }
+      close(out[1]);
+      ready_line(out[0], id);
+      peer = tcp_connect(port);
+      for (waited = 0; waited < 30; ++waited) {
+        struct timespec t = {0, 100000000};
+        if (file_contains(where, "is up") || (!cases[k].logs_info && waited > 10))
+          break;
+        nanosleep(&t, NULL);
+      }
+      close(peer);
+      {
+        struct timespec t = {0, 300000000};
+        nanosleep(&t, NULL);
+      }
+      stop(child, out[0]);
+      CHECK(file_contains(where, "is up") == cases[k].logs_info);
+      if (cases[k].to_service_file)
+        CHECK(file_contains(service_log, "daemon: starting")); /* it did log there */
+    }
   }
   /* an invalid level is a configuration error */
   write_config(cfg,
