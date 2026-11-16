@@ -1950,6 +1950,181 @@ static void live_reference(const char *exe, const char *reference, const char *p
   remove_tree(base);
   puts("live reference-node comparison passed");
 }
+/* ---- rnstatus -d / -D: records in the reference's discovery store, listed by ctl and by the reference ---- */
+typedef struct disc_spec {
+  const char *name, *type, *transport_id, *network_id, *config_entry, *reachable_on, *impl_name, *version, *lxmf,
+      *modulation;
+  int transport, hops, value, has_location, has_height, port, sf, cr;
+  double latitude, longitude, height;
+  long long frequency, bandwidth;
+  double heard_ago, found_ago;
+} disc_spec;
+static void disc_write(const char *store, const disc_spec *d, unsigned serial) {
+  uint8_t buf[4096];
+  rnc_rpc_writer w;
+  size_t size, entries;
+  char path[600], hash[65];
+  double now = (double)time(NULL);
+  FILE *f;
+  rnc_rpc_writer_init(&w, buf, sizeof(buf));
+  entries = 13 + (d->impl_name ? 2 : 0) + (d->reachable_on ? 1 : 0) + (d->port ? 1 : 0) + (d->lxmf ? 1 : 0) +
+            (d->frequency ? 2 : 0) + (d->sf ? 2 : 0) + (d->modulation ? 1 : 0);
+  CHECK(rnc_rpc_write_map(&w, entries) == RNC_OK);
+#define K(name) CHECK(rnc_rpc_write_string(&w, name) == RNC_OK)
+#define STR(name, v) do { K(name); CHECK(rnc_rpc_write_string(&w, v) == RNC_OK); } while (0)
+#define UINT(name, v) do { K(name); CHECK(rnc_rpc_write_uint(&w, (uint64_t)(v)) == RNC_OK); } while (0)
+  STR("name", d->name);
+  STR("type", d->type);
+  K("transport"); CHECK(rnc_rpc_write_bool(&w, d->transport) == RNC_OK);
+  UINT("hops", d->hops);
+  UINT("value", d->value);
+  STR("transport_id", d->transport_id);
+  STR("network_id", d->network_id);
+  K("discovered"); CHECK(rnc_rpc_write_real(&w, now - d->found_ago) == RNC_OK);
+  K("last_heard"); CHECK(rnc_rpc_write_real(&w, now - d->heard_ago) == RNC_OK);
+  K("latitude"); CHECK((d->has_location ? rnc_rpc_write_real(&w, d->latitude) : rnc_rpc_write_nil(&w)) == RNC_OK);
+  K("longitude"); CHECK((d->has_location ? rnc_rpc_write_real(&w, d->longitude) : rnc_rpc_write_nil(&w)) == RNC_OK);
+  K("height"); CHECK((d->has_height ? rnc_rpc_write_real(&w, d->height) : rnc_rpc_write_nil(&w)) == RNC_OK);
+  STR("config_entry", d->config_entry ? d->config_entry : "");
+  if (d->impl_name) {
+    STR("impl_name", d->impl_name);
+    STR("version", d->version);
+  }
+  if (d->reachable_on) STR("reachable_on", d->reachable_on);
+  if (d->port) UINT("port", d->port);
+  if (d->lxmf) STR("operator_lxmf_address", d->lxmf);
+  if (d->frequency) {
+    UINT("frequency", d->frequency);
+    UINT("bandwidth", d->bandwidth);
+  }
+  if (d->sf) {
+    UINT("sf", d->sf);
+    UINT("cr", d->cr);
+  }
+  if (d->modulation) STR("modulation", d->modulation);
+#undef UINT
+#undef STR
+#undef K
+  CHECK(rnc_rpc_writer_finish(&w, &size) == RNC_OK);
+  CHECK(snprintf(hash, sizeof(hash), "%02x%062u", (unsigned)(serial & 0xff), serial) > 0);
+  CHECK(snprintf(path, sizeof(path), "%s/%s", store, hash) < (int)sizeof(path));
+  f = fopen(path, "wb");
+  CHECK(f && fwrite(buf, 1, size, f) == size && !fclose(f));
+}
+/* five records: a backbone with every field, an RNode of unknown stack, a stale one, an I2P one, and one of a type
+ * that is not discoverable (never listed) */
+static void disc_fill(const char *store) {
+  static const char tid1[] = "11111111111111111111111111111111", nid1[] = "22222222222222222222222222222222",
+                    tid2[] = "33333333333333333333333333333333";
+  disc_spec recs[5];
+  size_t i;
+  memset(recs, 0, sizeof(recs));
+  recs[0] = (disc_spec){"Backbone  Alpha  ", "BackboneInterface", tid1, nid1,
+                        "[[Backbone Alpha]]\n  type = BackboneInterface\n  enabled = yes\n  remote = host.example\n"
+                        "  target_port = 4242",
+                        "host.example", "Reticulum", "1.5.5", "aabbccddeeff00112233445566778899", NULL,
+                        1, 2, 16, 1, 1, 4242, 0, 0, 59.3293, 18.0686, 12.5, 0, 0, 7200, 5 * 86400};
+  recs[1] = (disc_spec){"LoRa Hill North", "RNodeInterface", tid2, tid2, "[[LoRa Hill North]]\n  type = RNodeInterface",
+                        NULL, NULL, NULL, NULL, NULL, 0, 1, 20, 0, 0, 0, 8, 5, 0, 0, 0, 868000000, 125000, 100000, 2 * 86400};
+  recs[2] = (disc_spec){"Old Server", "TCPServerInterface", tid1, nid1, "[[Old Server]]\n  type = TCPServerInterface",
+                        "192.0.2.7", "Reticulum", "1.4.0", NULL, NULL, 1, 3, 12, 1, 1, 4965, 0, 0, -33.8688, 151.2093, 0,
+                        0, 0, 4 * 86400, 6 * 86400};
+  recs[3] = (disc_spec){"An Extremely Long Interface Name That Goes On", "I2PInterface", tid2, nid1,
+                        "[[Long]]\n  type = I2PInterface", "abcdefghijklmnop.b32.i2p", "SomeStackWithALongName", "0.9.12", NULL, NULL,
+                        0, 4, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 300, 3600};
+  recs[4] = (disc_spec){"Not Discoverable", "FooInterface", tid1, nid1, "x", NULL, "Reticulum", "1.5.5", NULL, NULL, 1, 1,
+                        10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 60};
+  for (i = 0; i < 5; ++i)
+    disc_write(store, &recs[i], (unsigned)i + 1u);
+}
+/* run argv with PYTHONPATH set when given, capturing its standard output */
+static void capture_run(char *const argv[], const char *pythonpath, char *out, size_t cap) {
+  int pipefd[2], status;
+  pid_t child;
+  size_t got = 0;
+  ssize_t n;
+  CHECK(!pipe(pipefd));
+  child = fork();
+  CHECK(child >= 0);
+  if (!child) {
+    int null = open("/dev/null", O_WRONLY);
+    close(pipefd[0]);
+    CHECK(null >= 0 && dup2(pipefd[1], STDOUT_FILENO) >= 0 && dup2(null, STDERR_FILENO) >= 0);
+    close(pipefd[1]);
+    if (pythonpath)
+      CHECK(!setenv("PYTHONPATH", pythonpath, 1));
+    execv(argv[0], argv);
+    _exit(127);
+  }
+  close(pipefd[1]);
+  while ((n = read(pipefd[0], out + got, cap - 1 - got)) > 0)
+    got += (size_t)n;
+  out[got] = 0;
+  close(pipefd[0]);
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+}
+static void status_discovered(const char *ctl, const char *reference, const char *python) {
+  char dir[] = "/tmp/rnc-disc-XXXXXX", store[400], cfg[400], mine[16384], theirs[16384];
+  static const char *const variants[][5] = {{"-d", NULL},
+                                            {"-D", NULL},
+                                            {"-d", "--show-unknown", NULL},
+                                            {"-D", "--show-stale", "--show-unknown", NULL},
+                                            {"-d", "lora", "--show-unknown", NULL},
+                                            {"-d", "--show-stale", "--show-unknown", NULL}};
+  size_t v, q;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  config_file(cfg, "[reticulum]\nenable_transport = No\nshare_instance = No\n[interfaces]\n");
+  CHECK(snprintf(store, sizeof(store), "%s/storage", dir) > 0);
+  CHECK(!mkdir(store, 0700));
+  CHECK(snprintf(store, sizeof(store), "%s/storage/discovery", dir) > 0);
+  CHECK(!mkdir(store, 0700));
+  CHECK(snprintf(store, sizeof(store), "%s/storage/discovery/interfaces", dir) > 0);
+  CHECK(!mkdir(store, 0700));
+  disc_fill(store);
+  for (v = 0; v < sizeof(variants) / sizeof(*variants); ++v) {
+    char *argv[16];
+    size_t n = 0;
+    argv[n++] = (char *)ctl;
+    argv[n++] = "status";
+    for (q = 0; variants[v][q]; ++q)
+      argv[n++] = (char *)variants[v][q];
+    argv[n++] = "--config";
+    argv[n++] = dir;
+    argv[n] = NULL;
+    capture_run(argv, NULL, mine, sizeof(mine));
+    if (!v) { /* the default table: the available backbone and I2P entries, not the unknown RNode or the stale one */
+      CHECK(strstr(mine, "Name") && strstr(mine, "Backbone Alpha") && strstr(mine, "Reticulum 1.5.5") &&
+            strstr(mine, "59.3293, 18.0686") && !strstr(mine, "LoRa Hill") && !strstr(mine, "Old Server") &&
+            !strstr(mine, "Not Discoverable"));
+    }
+    if (v == 1) { /* details of the same entries */
+      CHECK(strstr(mine, "Network   ID : 22222222222222222222222222222222") &&
+            strstr(mine, "Transport ID : 11111111111111111111111111111111") &&
+            strstr(mine, "LXMF address : aabbccddeeff00112233445566778899") && strstr(mine, "Distance     : 2 hops") &&
+            strstr(mine, "Port         : 4242") && strstr(mine, "Configuration Entry:\n  [[Backbone Alpha]]"));
+    }
+    if (reference) {
+      char *rv[16];
+      n = 0;
+      rv[n++] = (char *)python;
+      rv[n++] = "-m";
+      rv[n++] = "RNS.Utilities.rnstatus";
+      rv[n++] = "--config";
+      rv[n++] = dir;
+      for (q = 0; variants[v][q]; ++q)
+        rv[n++] = (char *)variants[v][q];
+      rv[n] = NULL;
+      capture_run(rv, reference, theirs, sizeof(theirs));
+      if (strcmp(mine, theirs)) {
+        fprintf(stderr, "variant %zu differs\n--- ctl\n%s\n--- reference\n%s\n", v, mine, theirs);
+        CHECK(0);
+      }
+    }
+  }
+  remove_tree(dir);
+  puts(reference ? "rnstatus -d / -D match the reference" : "rnstatus -d / -D tests passed");
+}
 /* The shared instance as the reference does it on Linux: no shared_instance_type, so abstract Unix sockets named
  * by instance_name, for both the data port and the RPC port. Clients find it by name (ctl through --config, the
  * unmodified reference through its own config), and a second daemon cannot take the name. */
@@ -3114,7 +3289,7 @@ static void cli_tools_id(const char *ctl, const char *dir) {
 static void cli_tools(const char *exe, const char *ctl) {
   char dir[] = "/tmp/rnc-node-ctl-XXXXXX", cfg[256], keypath[256], admin[256],
        text[2048], identity[33], out[16384], reply[4096], hash[33], port_arg[16],
-       control_arg[16];
+       control_arg[16], data_arg[16];
   unsigned port = unused_port(), control = unused_port();
   pid_t process;
   int fd, local;
@@ -3137,6 +3312,7 @@ static void cli_tools(const char *exe, const char *ctl) {
                  port, control) > 0);
   config_file(cfg, text);
   CHECK(snprintf(port_arg, sizeof(port_arg), "%u", control) > 0);
+  CHECK(snprintf(data_arg, sizeof(data_arg), "%u", port) > 0);
   process = start(exe, cfg, keypath, admin, &fd);
   ready_line(fd, identity);
 
@@ -3208,9 +3384,9 @@ static void cli_tools(const char *exe, const char *ctl) {
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "-t", "-m", "5", "--port",
                 port_arg, "--identity", keypath, NULL) == 0);
   CHECK(ctl_run(ctl, out, sizeof(out), "path",
-                "00000000000000000000000000000000", "--port", port_arg,
+                "00000000000000000000000000000000", "-w", "1", "--port", port_arg, "--data-port", data_arg,
                 "--identity", keypath, NULL) == 1 &&
-        strstr(out, "No path"));
+        strstr(out, "requested") && strstr(out, "Path not found"));
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "nothex", "--port", port_arg,
                 "--identity", keypath, NULL) != 0);
 
@@ -3219,8 +3395,8 @@ static void cli_tools(const char *exe, const char *ctl) {
                 "--identity", keypath, NULL) == 0);
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "-d", hash, "--port", port_arg,
                 "--identity", keypath, NULL) == 0 && strstr(out, "Dropped path"));
-  CHECK(ctl_run(ctl, out, sizeof(out), "path", hash, "--port", port_arg,
-                "--identity", keypath, NULL) == 1 && strstr(out, "No path"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", hash, "-w", "1", "--port", port_arg, "--data-port", data_arg,
+                "--identity", keypath, NULL) == 1 && strstr(out, "Path not found"));
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "-d", hash, "--port", port_arg,
                 "--identity", keypath, NULL) == 1 && strstr(out, "No path"));
   CHECK(rnc_announce_create(&id, "reticulum_c.ctl.test", NULL, 0,
@@ -3233,12 +3409,145 @@ static void cli_tools(const char *exe, const char *ctl) {
   wait_for(admin, "ROUTES", hash, 5, reply, sizeof(reply));
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "-x", hash, "--port", port_arg,
                 "--identity", keypath, NULL) == 0 && strstr(out, "Dropped 1 path"));
-  CHECK(ctl_run(ctl, out, sizeof(out), "path", hash, "--port", port_arg,
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", hash, "-w", "1", "--port", port_arg, "--data-port", data_arg,
                 "--identity", keypath, NULL) == 1);
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "-D", "--port", port_arg,
                 "--identity", keypath, NULL) == 0 && strstr(out, "announce"));
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "-d", "--port", port_arg,
                 "--identity", keypath, NULL) != 0); /* -d needs a destination */
+
+  /* a path request: ctl asks the instance as a local client would, the instance asks its other interfaces, and a
+   * peer on one of them answers with the announce */
+  {
+    int world_fd = tcp_connect(admin_status(admin)), pipefd[2], status, got_request = 0, tries;
+    uint8_t other_key[64] = {0}, req_raw[RNC_MAX_MTU], req_framed[RNC_HOST_FRAME_MAX], req_decoded[RNC_MAX_FRAME];
+    unsigned other_random = 77;
+    rnc_identity other;
+    rnc_packet other_packet, request;
+    rnc_host_framer framer = {0};
+    char other_hash[33], text_out[4096];
+    size_t used = 0, cnt, fm;
+    pid_t tool;
+    other_key[10] = 0x5a;
+    other_key[40] = 0x5a;
+    CHECK(rnc_identity_from_private(&other, other_key) == RNC_OK &&
+          rnc_announce_create(&other, "reticulum_c.ctl.requested", NULL, 0, (uint64_t)time(NULL), rng, &other_random,
+                              &other_packet) == RNC_OK);
+    hex_of(other_packet.destination, 16, other_hash);
+    CHECK(!pipe(pipefd));
+    tool = fork();
+    CHECK(tool >= 0);
+    if (!tool) {
+      close(pipefd[0]);
+      CHECK(dup2(pipefd[1], STDOUT_FILENO) >= 0);
+      close(pipefd[1]);
+      execl(ctl, ctl, "path", other_hash, "-w", "8", "--port", port_arg, "--data-port", data_arg, "--identity", keypath,
+            (char *)NULL);
+      _exit(127);
+    }
+    close(pipefd[1]);
+    for (tries = 0; tries < 80 && !got_request; ++tries) {
+      struct pollfd pf = {world_fd, POLLIN, 0};
+      CHECK(poll(&pf, 1, 100) >= 0);
+      if (pf.revents & POLLIN) {
+        ssize_t sz = read(world_fd, req_framed, sizeof(req_framed));
+        size_t q;
+        uint8_t command;
+        CHECK(sz > 0);
+        for (q = 0; q < (size_t)sz; ++q)
+          if (rnc_host_frame_feed(&framer, RNC_HOST_HDLC, req_framed[q], &command, req_decoded, sizeof(req_decoded),
+                                  &cnt) == RNC_OK &&
+              rnc_packet_decode(req_decoded, cnt, &request) == RNC_OK && (request.flags & 3u) == RNC_DATA &&
+              request.data_size >= 16 && !memcmp(request.data, other_packet.destination, 16))
+            got_request = 1;
+      }
+    }
+    CHECK(got_request); /* the instance passed the request on to its other interface */
+    CHECK(rnc_packet_encode(&other_packet, req_raw, sizeof(req_raw), &cnt) == RNC_OK &&
+          rnc_host_frame_encode(RNC_HOST_HDLC, 0, req_raw, cnt, req_framed, sizeof(req_framed), &fm) == RNC_OK);
+    CHECK(write(world_fd, req_framed, fm) == (ssize_t)fm);
+    for (;;) {
+      ssize_t sz = read(pipefd[0], text_out + used, sizeof(text_out) - 1 - used);
+      if (sz <= 0)
+        break;
+      used += (size_t)sz;
+    }
+    text_out[used] = 0;
+    close(pipefd[0]);
+    CHECK(waitpid(tool, &status, 0) == tool && WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(strstr(text_out, "requested") && strstr(text_out, "Path found, destination") && strstr(text_out, other_hash) &&
+          strstr(text_out, "is 1 hop away via"));
+    /* the instance counted the request it sent to the world interface */
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-j", "--port", port_arg, "--identity", keypath, NULL) == 0);
+    {
+      const char *at;
+      int sent_requests = 0;
+      for (at = out; (at = strstr(at, "\"ptxc\": ")); at += 8)
+        if (at[8] >= '1' && at[8] <= '9')
+          sent_requests = 1;
+      CHECK(sent_requests);
+    }
+    close(world_fd);
+  }
+
+  /* every sort key of the reference is accepted, and the rates the daemon samples on its own are in the statistics */
+  {
+    static const char *keys[] = {"rate", "traffic", "rx", "tx", "rxs", "txs", "anns", "arx", "atx", "arxc", "atxc",
+                                 "held", "prx", "ptx", "prxc", "ptxc", "pvs", "ivs", "flt", "gravity", "g",
+                                 "txdrp", "txdrb", "txbuf", "ANNOUNCES"};
+    size_t k;
+    for (k = 0; k < sizeof(keys) / sizeof(*keys); ++k)
+      CHECK(ctl_run(ctl, out, sizeof(out), "status", "-s", keys[k], "--port", port_arg, "--identity", keypath,
+                    NULL) == 0 && strstr(out, "Shared Instance"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-j", "--port", port_arg, "--identity", keypath, NULL) == 0);
+    CHECK(strstr(out, "\"incoming_pr_frequency\"") && strstr(out, "\"rxs\""));
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-s", "bogus", "--port", port_arg, "--identity", keypath, NULL) != 0);
+  }
+
+  /* -l: the link table footer */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-l", "--port", port_arg, "--identity", keypath, NULL) == 0 &&
+        strstr(out, "in link table"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "--port", port_arg, "--identity", keypath, NULL) == 0 &&
+        !strstr(out, "in link table"));
+
+  /* -m: monitor mode redraws until it is stopped */
+  {
+    int pipefd[2], status;
+    pid_t tool;
+    char text_out[16384];
+    size_t used = 0, redraws = 0;
+    const char *at;
+    uint64_t end;
+    CHECK(!pipe(pipefd));
+    tool = fork();
+    CHECK(tool >= 0);
+    if (!tool) {
+      close(pipefd[0]);
+      CHECK(dup2(pipefd[1], STDOUT_FILENO) >= 0);
+      close(pipefd[1]);
+      execl(ctl, ctl, "status", "-m", "-I", "0.3", "--port", port_arg, "--identity", keypath, (char *)NULL);
+      _exit(127);
+    }
+    close(pipefd[1]);
+    end = now_ms() + 8000;
+    while (now_ms() < end && redraws < 3) {
+      struct pollfd pf = {pipefd[0], POLLIN, 0};
+      CHECK(poll(&pf, 1, 200) >= 0);
+      if (pf.revents & POLLIN) {
+        ssize_t sz = read(pipefd[0], text_out + used, sizeof(text_out) - 1 - used);
+        CHECK(sz > 0);
+        used += (size_t)sz;
+        text_out[used] = 0;
+        redraws = 0;
+        for (at = text_out; (at = strstr(at, "\033[H\033[J")); at += 6)
+          ++redraws;
+      }
+    }
+    CHECK(kill(tool, SIGTERM) == 0 && waitpid(tool, &status, 0) == tool);
+    close(pipefd[0]);
+    CHECK(redraws >= 3 && strstr(text_out, "Shared Instance"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-I", "0", "--port", port_arg, "--identity", keypath, NULL) != 0);
+  }
 
   /* blackhole list/add/remove through the RPC */
   CHECK(ctl_run(ctl, out, sizeof(out), "path", "-b", "--port", port_arg,
@@ -5180,6 +5489,10 @@ int main(int argc, char **argv) {
     shared(argv[1], NULL, NULL);
   else if (!strcmp(argv[2], "live_ref") && argc == 5)
     live_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "disc_list") && argc == 4)
+    status_discovered(argv[3], NULL, NULL);
+  else if (!strcmp(argv[2], "disc_list_ref") && argc == 6)
+    status_discovered(argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "shared_unix") && argc == 4)
     shared_unix(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "shared_unix_ref") && argc == 6)

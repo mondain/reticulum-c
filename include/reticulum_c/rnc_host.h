@@ -191,6 +191,8 @@ typedef struct rnc_host_status {
   uint64_t rx_packets, tx_packets, dropped_packets, reconnects;
   uint64_t rx_bytes, tx_bytes, rx_announces, tx_announces, rx_announce_bytes,
       tx_announce_bytes;
+  /* path requests (the reference's prxc/ptxc and prxb/ptxb) */
+  uint64_t rx_path_requests, tx_path_requests, rx_path_request_bytes, tx_path_request_bytes;
   uint64_t ifac_violations, protocol_violations;
   size_t ifac_size;
   uint8_t ifac_signature[64];

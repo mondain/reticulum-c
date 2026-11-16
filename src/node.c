@@ -1542,7 +1542,9 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
                  in->mode == RNC_MODE_ROAMING || in->mode == RNC_MODE_INTERNAL ||
                  in->mode == RNC_MODE_BOUNDARY;
     filtered = !in->local && !in->recursive && in->mode == RNC_MODE_BOUNDARY;
-    if (!search || pr_limited || !n->transport || !relay_count(n, ingress))
+    /* A local client's request is always passed on to the other interfaces, by a node that is not a transport
+     * instance too (Transport.path_request's is_from_local_client branch, which has no transport or limiter test). */
+    if (!search || (!in->local && (pr_limited || !n->transport)) || !relay_count(n, ingress))
       return RNC_OK;
   }
   if (slot == RNC_NODE_REQUESTS)
@@ -1573,7 +1575,7 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
     }
     queue(n, ingress, &reply, due);
   } else {
-    r = rnc_path_request_create(request.destination, n->id, request.tag,
+    r = rnc_path_request_create(request.destination, n->transport ? n->id : NULL, request.tag,
                                 request.tag_size, &reply);
     if (r != RNC_OK)
       return r;

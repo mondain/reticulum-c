@@ -166,31 +166,81 @@ static unsigned mode_number(const rnc_host_status *s) {
     return 1u;
   }
 }
+/* Rates are taken between two statistics requests at least a second apart (the reference refreshes its own once a
+ * second), per interface, in a small table; a request in between repeats the figures of the last sample. */
+typedef struct rate_sample {
+  uint32_t id;
+  uint64_t at, rxb, txb, arxb, atxb, prxb, ptxb, arxc, atxc, prxc, ptxc;
+  double rxs, txs, arxs, atxs, prxs, ptxs, arxf, atxf, prxf, ptxf;
+} rate_sample;
+static rate_sample rate_samples[256];
+static const rate_sample *rate_update(const rnc_host_status *s) {
+  size_t i, free_slot = sizeof(rate_samples) / sizeof(*rate_samples);
+  uint64_t now = monotonic_ms();
+  rate_sample *r = NULL;
+  for (i = 0; i < sizeof(rate_samples) / sizeof(*rate_samples); ++i) {
+    if (rate_samples[i].id == s->interface_id) {
+      r = &rate_samples[i];
+      break;
+    }
+    if (!rate_samples[i].id && free_slot == sizeof(rate_samples) / sizeof(*rate_samples))
+      free_slot = i;
+  }
+  if (!r) {
+    if (free_slot == sizeof(rate_samples) / sizeof(*rate_samples))
+      free_slot = (size_t)(s->interface_id % (sizeof(rate_samples) / sizeof(*rate_samples))); /* full: reuse a slot */
+    r = &rate_samples[free_slot];
+    memset(r, 0, sizeof(*r));
+    r->id = s->interface_id;
+    r->at = now;
+  } else if (now > r->at && now - r->at >= 1000u) {
+    double dt = (double)(now - r->at) / 1000.0;
+    r->rxs = (double)(s->rx_bytes - r->rxb) * 8.0 / dt;
+    r->txs = (double)(s->tx_bytes - r->txb) * 8.0 / dt;
+    r->arxs = (double)(s->rx_announce_bytes - r->arxb) * 8.0 / dt;
+    r->atxs = (double)(s->tx_announce_bytes - r->atxb) * 8.0 / dt;
+    r->prxs = (double)(s->rx_path_request_bytes - r->prxb) * 8.0 / dt;
+    r->ptxs = (double)(s->tx_path_request_bytes - r->ptxb) * 8.0 / dt;
+    r->arxf = (double)(s->rx_announces - r->arxc) / dt;
+    r->atxf = (double)(s->tx_announces - r->atxc) / dt;
+    r->prxf = (double)(s->rx_path_requests - r->prxc) / dt;
+    r->ptxf = (double)(s->tx_path_requests - r->ptxc) / dt;
+    r->at = now;
+    r->rxb = s->rx_bytes;
+    r->txb = s->tx_bytes;
+    r->arxb = s->rx_announce_bytes;
+    r->atxb = s->tx_announce_bytes;
+    r->prxb = s->rx_path_request_bytes;
+    r->ptxb = s->tx_path_request_bytes;
+    r->arxc = s->rx_announces;
+    r->atxc = s->tx_announces;
+    r->prxc = s->rx_path_requests;
+    r->ptxc = s->tx_path_requests;
+    return r;
+  }
+  if (r->at == now && !r->rxb && !r->txb) { /* first sight: the baseline */
+    r->rxb = s->rx_bytes;
+    r->txb = s->tx_bytes;
+    r->arxb = s->rx_announce_bytes;
+    r->atxb = s->tx_announce_bytes;
+    r->prxb = s->rx_path_request_bytes;
+    r->ptxb = s->tx_path_request_bytes;
+    r->arxc = s->rx_announces;
+    r->atxc = s->tx_announces;
+    r->prxc = s->rx_path_requests;
+    r->ptxc = s->tx_path_requests;
+  }
+  return r;
+}
 static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
                             const rnc_host_status *s) {
-  static const char *zeros[] = {"rxs",
-                                "txs",
-                                "arxs",
-                                "atxs",
-                                "prxs",
-                                "ptxs",
-                                "prxb",
-                                "ptxb",
-                                "prxc",
-                                "ptxc",
-                                "incoming_announce_frequency",
-                                "outgoing_announce_frequency",
-                                "incoming_pr_frequency",
-                                "outgoing_pr_frequency",
-                                "txdrb",
-                                "packet_filter_hits",
-                                "burst_count",
-                                "pr_burst_count"};
+  const rate_sample *rate = rate_update(s);
+  static const char *zeros[] = {"txdrb", "packet_filter_hits", "burst_count", "pr_burst_count"};
   static const char *nils[] = {"announce_rate_target", "announce_rate_grace",
                                "announce_rate_penalty", "burst_activated",
                                "pr_burst_activated"};
   size_t i;
-  (void)rnc_rpc_write_map(w, 25u + sizeof(zeros) / sizeof(*zeros) +
+  (void)rnc_rpc_write_map(w, 25u + 14u + sizeof(zeros) / sizeof(*zeros) +
                                  sizeof(nils) / sizeof(*nils) + 4u + 3u);
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
@@ -231,6 +281,20 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
   else
     key_nil(w, "ifac_size");
   key_nil(w, "ifac_netname");
+  key_real(w, "rxs", rate->rxs);
+  key_real(w, "txs", rate->txs);
+  key_real(w, "arxs", rate->arxs);
+  key_real(w, "atxs", rate->atxs);
+  key_real(w, "prxs", rate->prxs);
+  key_real(w, "ptxs", rate->ptxs);
+  key_real(w, "incoming_announce_frequency", rate->arxf);
+  key_real(w, "outgoing_announce_frequency", rate->atxf);
+  key_real(w, "incoming_pr_frequency", rate->prxf);
+  key_real(w, "outgoing_pr_frequency", rate->ptxf);
+  key_uint(w, "prxc", s->rx_path_requests);
+  key_uint(w, "ptxc", s->tx_path_requests);
+  key_uint(w, "prxb", s->rx_path_request_bytes);
+  key_uint(w, "ptxb", s->tx_path_request_bytes);
   for (i = 0; i < sizeof(zeros) / sizeof(*zeros); ++i)
     key_uint(w, zeros[i], 0);
   for (i = 0; i < sizeof(nils) / sizeof(*nils); ++i)
@@ -529,6 +593,17 @@ static void rpc_step(rpc_server *s, rnc_host *h, rnc_node *node,
   size_t i;
   if (s->fd < 0)
     return;
+  {
+    /* keep the rates current whether or not anyone asks: one sample a second for every interface */
+    static uint64_t last_sample;
+    if (now - last_sample >= 1000u || !last_sample) {
+      rnc_host_status status;
+      last_sample = now;
+      for (i = 0; i < RNC_HOST_SLOTS; ++i)
+        if (rnc_host_status_at(h, i, &status) == RNC_OK)
+          (void)rate_update(&status);
+    }
+  }
   for (i = 0; i < 4; ++i)
     if (s->clients[i].fd < 0) {
       int fd = accept(s->fd, NULL, NULL);

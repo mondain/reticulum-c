@@ -147,7 +147,7 @@ if(BUILD_TESTING)
     endif()
     add_executable(test_node tests/test_node.c)
     target_link_libraries(test_node PRIVATE reticulum_c)
-    foreach(case paths routing mesh discovery guards state local destinations destination_data request_path_options hops_to announce_hop_limit gravity drops accepts_links)
+    foreach(case paths routing mesh discovery guards state local local_pr destinations destination_data request_path_options hops_to announce_hop_limit gravity drops accepts_links)
         add_test(NAME reticulum_node_${case} COMMAND test_node ${case})
     endforeach()
     add_executable(test_receipt tests/test_receipt.c)
@@ -536,6 +536,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             add_test(NAME reticulum_node_process_shared_unix COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> shared_unix $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_shared_unix PROPERTIES LABELS network TIMEOUT 60)
+            add_test(NAME reticulum_node_process_disc_list COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> disc_list $<TARGET_FILE:reticulum-c-ctl>)
+            set_tests_properties(reticulum_node_process_disc_list PROPERTIES LABELS network TIMEOUT 60)
             add_test(NAME reticulum_node_process_cli_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cli_tools $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
@@ -562,6 +565,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_live_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 600)
+                add_test(NAME reticulum_node_process_disc_list_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> disc_list_ref
+                    $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_disc_list_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 add_test(NAME reticulum_rnodeconf_rns COMMAND ${CMAKE_COMMAND} -E env TZ=UTC
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_rnodeconf> $<TARGET_FILE:reticulum-c-rnodeconf> ref
