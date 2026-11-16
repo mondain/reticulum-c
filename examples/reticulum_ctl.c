@@ -21,6 +21,7 @@
 #include <openssl/rand.h>
 #include <poll.h>
 #include "msgpack_tree.h"
+#include "rnid_b256.h"
 #include "rsg_meta.h"
 #include <reticulum_c/rnc.h>
 #include <reticulum_c/rnc_host.h>
@@ -1865,7 +1866,7 @@ static int write_private_file(const char *path, const uint8_t *data, size_t size
   return ok ? RC_OK : RC_WRITE_ERROR;
 }
 /* Text forms of a key, as rnid writes them: hex, base32 (RFC 4648 with padding) or URL-safe base64. */
-enum { FORMAT_HEX, FORMAT_B32, FORMAT_B64 };
+enum { FORMAT_HEX, FORMAT_B32, FORMAT_B64, FORMAT_B256 };
 static void encode_bits(const uint8_t *in, size_t n, const char *alphabet, unsigned bits, char *out) {
   unsigned long acc = 0;
   unsigned have = 0, group = bits == 5 ? 8u : 4u; /* characters per padded group */
@@ -1890,6 +1891,7 @@ static void encode_bits(const uint8_t *in, size_t n, const char *alphabet, unsig
   }
   out[o] = 0;
 }
+/* rnid prints keys in hex, base32 and base64 only; -U changes nothing about them */
 static void encode_key(int format, const uint8_t *key, size_t n, char *out) {
   if (format == FORMAT_B32)
     encode_bits(key, n, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 5, out);
@@ -2475,19 +2477,58 @@ static int validate_file(const rnc_identity *id, const char *validate, const cha
 /* rnid -S: sign a message and keep the text inside the signature file, written to WRITE_PATH with ".rsm"
  * added. The text comes from the command line or, with -r, from a file. The reference can also open an editor
  * when neither is given, and print the result as armoured base32/64 text; neither is offered here. */
+/* The text form of a signature (rnid -B, -b, -F, -U on -s and -S): the data in that encoding, cut into rows of 64
+ * characters padded with "=", between a header and a footer line, printed with a blank line either side. */
+#define ARMOUR_ROW 64u
+static void armour_print(const uint8_t *rsg, size_t n, int format) {
+  static const char header[] = "#### Start of rsg data ", footer[] = " End of rsg data ####";
+  char *ascii = NULL;
+  size_t chars = n, i, row;
+  if (format != FORMAT_B256) {
+    ascii = malloc(n * 2 + 16);
+    if (!ascii)
+      return;
+    if (format == FORMAT_B32)
+      encode_bits(rsg, n, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 5, ascii);
+    else if (format == FORMAT_B64)
+      encode_bits(rsg, n, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", 6, ascii);
+    else
+      hex_encode(rsg, n, ascii);
+    chars = strlen(ascii);
+  }
+  putchar('\n');
+  fputs(header, stdout);
+  for (i = sizeof(header) - 1; i < ARMOUR_ROW; ++i)
+    putchar('#');
+  putchar('\n');
+  for (row = 0; row < chars; row += ARMOUR_ROW) {
+    size_t k, end = row + ARMOUR_ROW < chars ? row + ARMOUR_ROW : chars;
+    for (k = row; k < end; ++k) {
+      if (ascii)
+        putchar(ascii[k]);
+      else /* a base-256 character is several bytes, but one of the 64 */
+        fputs(rnid_b256[rsg[k]], stdout);
+    }
+    for (; k < row + ARMOUR_ROW; ++k)
+      putchar('=');
+    putchar('\n');
+  }
+  for (i = 0; i + (sizeof(footer) - 1) < ARMOUR_ROW; ++i)
+    putchar('#');
+  fputs(footer, stdout);
+  fputs("\n\n", stdout);
+  free(ascii);
+}
 static int sign_message_file(const rnc_identity *id, const char *text, const char *read_path, const char *write_path,
-                             int force, int armoured, const char *meta_path, const char *meta_spec) {
+                             int force, int armoured_format, const char *meta_path, const char *meta_spec) {
+  const int armoured = armoured_format >= 0; /* -B, -b, -F or -U was given: print the text form instead of a file */
   char path[1024], label[33], spec_default[1100], problem[240];
   uint8_t *file_message = NULL, *rsg, hash[32];
   const uint8_t *message;
   size_t message_size, rsg_size;
   mv *meta = NULL;
   int rc;
-  if (armoured) {
-    fprintf(stderr, "Armoured text output of signed messages is not supported; the message is written to a file\n");
-    return RC_INVALID_ARGS;
-  }
-  if (!write_path) {
+  if (!armoured && !write_path) {
     fprintf(stderr, "No write path specified\n");
     return RC_INVALID_ARGS;
   }
@@ -2522,7 +2563,8 @@ static int sign_message_file(const rnc_identity *id, const char *text, const cha
     free(file_message);
     return RC_INVALID_ARGS;
   }
-  if (snprintf(path, sizeof(path), "%s%s", write_path, ends_with(write_path, ".rsm") ? "" : ".rsm") >= (int)sizeof(path)) {
+  path[0] = 0;
+  if (write_path && snprintf(path, sizeof(path), "%s%s", write_path, ends_with(write_path, ".rsm") ? "" : ".rsm") >= (int)sizeof(path)) {
     free(file_message);
     return RC_INVALID_ARGS;
   }
@@ -2574,6 +2616,14 @@ static int sign_message_file(const rnc_identity *id, const char *text, const cha
     return RC_UNKNOWN_ERROR;
   }
   mv_free(meta);
+  if (armoured) {
+    armour_print(rsg, rsg_size, armoured_format);
+    hex_encode(id->hash, 16, label);
+    printf("Message signed with <%s>\n", label);
+    free(rsg);
+    free(file_message);
+    return RC_OK;
+  }
   rc = write_private_file(path, rsg, rsg_size, force);
   if (rc == RC_FILE_EXISTS)
     fprintf(stderr, "The signature file \"%s\" already exists, not overwriting\n", path);
@@ -2638,6 +2688,9 @@ static int cmd_id(int argc, char **argv) {
     } else if (!strcmp(a, "-F") || !strcmp(a, "--hex")) {
       format = FORMAT_HEX;
       ++formats;
+    } else if (!strcmp(a, "-U") || !strcmp(a, "--base256")) {
+      format = FORMAT_B256;
+      ++formats;
     } else if (!strcmp(a, "-p") || !strcmp(a, "--print-identity"))
       print = 1;
     else if (!strcmp(a, "-P") || !strcmp(a, "--print-private"))
@@ -2662,7 +2715,7 @@ static int cmd_id(int argc, char **argv) {
     }
   }
   if (formats > 1) {
-    fprintf(stderr, "The -b, -B and -F options are mutually exclusive\n");
+    puts("The -b, -B, --hex and --base256 args are mutually exclusive");
     return RC_INVALID_ARGS;
   }
   if (generate) {
@@ -2757,7 +2810,11 @@ static int cmd_id(int argc, char **argv) {
         }
       } else if (rnc_hash(data, size, file_hash) != RNC_OK || !rsg_create(&id, file_hash, NULL, 0, NULL, rsg, sizeof(rsg), &rsg_size))
         rc = RC_UNKNOWN_ERROR;
-      else {
+      else if (formats) { /* the text form is printed, no file is written */
+        armour_print(rsg, rsg_size, format);
+        hex_encode(id.hash, 16, hex);
+        printf("Signed file %s with <%s>\n", sign, hex);
+      } else {
         rc = write_private_file(out_path, rsg, rsg_size, force);
         if (rc == RC_FILE_EXISTS)
           fprintf(stderr, "The signature file %s already exists, not overwriting\n", out_path);
@@ -2770,7 +2827,7 @@ static int cmd_id(int argc, char **argv) {
     }
   }
   if (rc == RC_OK && has_sign_message)
-    rc = sign_message_file(&id, sign_message, read_path, write_path, force, formats, meta_path, meta_spec);
+    rc = sign_message_file(&id, sign_message, read_path, write_path, force, formats ? format : -1, meta_path, meta_spec);
   if (rc == RC_OK && validate)
     rc = validate_file(&id, validate, read_path, raw, show_meta);
   if (rc == RC_OK && encrypt) {
