@@ -66,7 +66,7 @@ The native MCU firmware (PlatformIO boards, see [mcu/README.txt](../mcu/README.t
 
 | Status | Feature | Notes |
 | --- | --- | --- |
-| PART | Shared instance and RPC server (HMAC, MessagePack queries and blackhole mutations) | Daemon responses include interface/path statistics, link counts and blackhole entries (`examples/node_rpc.h`); `rate_table` returns the node's announce rate entries (hash, last, rate_violations, blocked_until, timestamps; filled when the node has another interface to pass announces on). Shared-instance data transport is TCP only |
+| PART | Shared instance and RPC server (HMAC, MessagePack queries and blackhole mutations) | Daemon responses include interface/path statistics, link counts and blackhole entries (`examples/node_rpc.h`); `rate_table` returns the node's announce rate entries (hash, last, rate_violations, blocked_until, timestamps; filled when the node has another interface to pass announces on). The shared instance listens on the reference's abstract Unix sockets on Linux (`\0rns/<instance_name>` for data, `\0rns/<instance_name>/rpc` for the RPC server), TCP elsewhere or with `shared_instance_type = tcp`; the unmodified reference's `rnstatus` connects to it over the Unix sockets |
 | PART | `get_instance`, `transport_enabled`, `link_mtu_discovery`, `should_use_implicit_proof` accessors | `rnc_node_implicit_proofs` / `rnc_node_set_implicit_proofs` cover `should_use_implicit_proof`; `rnc_node_link_mtu_discovery` covers `link_mtu_discovery`; `get_instance` and `transport_enabled` are Python-instance accessors |
 
 ### Identity
@@ -206,14 +206,14 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 | --- | --- | --- |
 | IMPL | `enable_transport`, `share_instance`, `shared_instance_type` / `shared_instance_port`, `instance_control_port`, `rpc_key` | |
 | IMPL | `loglevel` (`[logging]`), `logdestination` (stdout, stderr or a file that rolls over at 5 MiB), `logfile` | Library hook `rnc_log.h`; the daemon formats `[time] [Level] module: message` |
-| PART | `instance_name` | Accepted; the shared instance is TCP only, so it names nothing |
+| IMPL | `instance_name` | Names the shared instance's Unix sockets (`default` when unset); a second daemon on a taken name does not start |
 | IMPL | `respond_to_probes` | Daemon registers `rnstransport.probe` with PROVE_ALL, takes no links; reported as `probe_responder` in interface stats |
 | IMPL | `panic_on_interface_error`, `use_implicit_proof`, `link_mtu_discovery` | all three implemented |
 | IMPL | `enable_remote_management`, `remote_management_allowed` | Daemon config, up to 8 identity hashes |
 | IMPL | `publish_blackhole`, `blackhole_sources`, `blackhole_update_interval` | |
 | IMPL | `network_identity` | |
 | IMPL | `discover_interfaces` and related | |
-| MISS | `~/.reticulum` config/storage layout | Daemon uses `--identity` and `--state` |
+| IMPL | `~/.reticulum` config/storage layout | The reference's search order (`/etc/reticulum`, `~/.config/reticulum`, `~/.reticulum`) when `--config` is absent, `--config` may name a directory, and the identity defaults to `<dir>/storage/transport_identity`, where the reference reads the RPC key from; `reticulum-c-ctl` uses the same search. `--identity`, `--admin` and `--state` still override |
 
 ### Utilities (lower priority for an SDK)
 

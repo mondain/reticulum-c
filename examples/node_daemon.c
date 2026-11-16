@@ -91,13 +91,13 @@ typedef struct interface_config {
   uint8_t lxmf[16];
 } interface_config;
 typedef struct config {
-  int transport, share, share_tcp, remote_management, publish_blackhole,
+  int transport, share, share_tcp, share_unix, use_unix, remote_management, publish_blackhole,
       respond_to_probes, explicit_proofs, panic_on_interface_error,
       no_link_mtu_discovery;
   uint8_t mgmt_allowed[RNC_SERVICE_ALLOWLIST][16];
   size_t mgmt_allowed_count;
   char network_identity[512]; /* identity file path, empty = none */
-  char instance_name[64];     /* accepted; the shared instance is TCP only */
+  char instance_name[64];     /* names the shared instance's Unix sockets; "default" when unset */
   int loglevel;               /* [logging]; RNC_LOG_NOTICE when absent */
   char logdestination[16], logfile[512];
   /* interface discovery: listening, authorised sources, auto-connect */
@@ -934,9 +934,24 @@ static int finish_config(config *c) {
           return 0;
     }
   }
-  return (enabled > 0 || c->share) &&
-         (!c->share || (c->share_tcp && c->shared_port && c->control_port &&
-                        c->shared_port != c->control_port));
+  if (c->share) {
+    /* As the reference: a Linux node shares over abstract Unix sockets unless told to use TCP; elsewhere it is
+     * always TCP. The ports matter only for TCP. */
+#ifdef __linux__
+    c->use_unix = !c->share_tcp;
+#else
+    c->use_unix = 0;
+#endif
+    if (!c->instance_name[0])
+      (void)snprintf(c->instance_name, sizeof(c->instance_name), "default");
+    if (c->use_unix) {
+      struct sockaddr_storage probe;
+      if (!rnc_host_abstract_address(c->instance_name, "/rpc", &probe, sizeof(probe)))
+        return 0;
+    } else if (!(c->shared_port && c->control_port && c->shared_port != c->control_port))
+      return 0;
+  }
+  return enabled > 0 || c->share;
 }
 static int read_config(const char *path, config *c) {
   FILE *file;
@@ -1046,11 +1061,14 @@ static int read_config(const char *path, config *c) {
       int b;
       unsigned long n;
       if (!strcmp(s, "shared_instance_type")) {
-        if (strcasecmp(value, "tcp")) {
+        if (!strcasecmp(value, "tcp"))
+          c->share_tcp = 1;
+        else if (!strcasecmp(value, "unix"))
+          c->share_unix = 1;
+        else {
           valid = 0;
           break;
         }
-        c->share_tcp = 1;
       } else if (!strcmp(s, "shared_instance_port") ||
                  !strcmp(s, "instance_control_port")) {
         if (!number(value, 65535, &n) || !n) {
@@ -1271,9 +1289,7 @@ static int read_config(const char *path, config *c) {
     valid = finish_config(c);
   if (!valid)
     fprintf(stderr,
-            "Unsupported or invalid configuration at %s:%u; shared-instance "
-            "mode requires shared_instance_type=tcp.\n",
-            path, line_number);
+            "Unsupported or invalid configuration at %s:%u.\n", path, line_number);
   return valid;
 }
 static int load_state(const char *path, rnc_node *node,
@@ -1630,6 +1646,8 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
     shared.local = 1;
     shared.address = "127.0.0.1";
     shared.port = c->shared_port;
+    if (c->use_unix)
+      shared.unix_name = c->instance_name;
     shared.bitrate = 1000000000u;
     shared.mtu = RNC_MAX_MTU;
     if (rnc_host_add(*host, 0x7fff0001u, &shared) != RNC_OK)
@@ -1995,6 +2013,35 @@ static void log_apply(const config *c) {
 #include "node_mgmt.h"
 #include "node_discovery.h"
 
+/* The reference's configuration directory: /etc/reticulum if it holds a config, else ~/.config/reticulum if
+ * it does, else ~/.reticulum. Returns 0 when there is no home to look in. */
+static int default_config_dir(char *out, size_t size) {
+  const char *home = getenv("HOME");
+  char probe[1100];
+  struct stat sb;
+  if (!stat("/etc/reticulum/config", &sb) && S_ISREG(sb.st_mode))
+    return snprintf(out, size, "/etc/reticulum") < (int)size;
+  if (!home || !*home)
+    return 0;
+  if (snprintf(probe, sizeof(probe), "%s/.config/reticulum/config", home) < (int)sizeof(probe) &&
+      !stat(probe, &sb) && S_ISREG(sb.st_mode))
+    return snprintf(out, size, "%s/.config/reticulum", home) < (int)size;
+  return snprintf(out, size, "%s/.reticulum", home) < (int)size;
+}
+/* Lay a configuration directory out as the reference does: <dir>/config, with the transport identity (which the
+ * shared instance's RPC key comes from) at <dir>/storage/transport_identity. Missing directories are created
+ * private. */
+static int config_dir_paths(const char *dir, char *config, char *identity, size_t size) {
+  char storage[1100];
+  struct stat sb;
+  if (snprintf(config, size, "%s/config", dir) >= (int)size ||
+      snprintf(storage, sizeof(storage), "%s/storage", dir) >= (int)sizeof(storage) ||
+      snprintf(identity, size, "%s/storage/transport_identity", dir) >= (int)size)
+    return 0;
+  if (stat(storage, &sb) && (mkdir(dir, 0700) && errno != EEXIST ? 1 : mkdir(storage, 0700) && errno != EEXIST))
+    return 0;
+  return 1;
+}
 int main(int argc, char **argv) {
   const char *config_path = NULL, *key_path = NULL, *admin_path = NULL,
              *state_path = NULL;
@@ -2040,10 +2087,39 @@ int main(int argc, char **argv) {
       return 0;
     } else {
       fprintf(stderr,
-              "Usage: %s --config FILE [--check | --identity FILE [--admin "
-              "SOCKET] [--state FILE]]\n",
+              "Usage: %s [--config FILE|DIR] [--check | [--identity FILE] "
+              "[--admin SOCKET] [--state FILE]]\n",
               argv[0]);
       return 2;
+    }
+  }
+  {
+    /* --config may name a configuration directory as the reference's does, and with none the reference's
+     * search order applies; the identity then defaults into the directory's storage */
+    static char dir_config[1100], dir_identity[1100], dir_path[1100];
+    struct stat sb;
+    int use_dir = 0;
+    if (!config_path) {
+      use_dir = default_config_dir(dir_path, sizeof(dir_path));
+      if (!use_dir)
+        fprintf(stderr, "No configuration: give --config or set HOME\n");
+    } else if (!stat(config_path, &sb) && S_ISDIR(sb.st_mode)) {
+      use_dir = snprintf(dir_path, sizeof(dir_path), "%s", config_path) < (int)sizeof(dir_path);
+    }
+    if (use_dir) {
+      if (!config_dir_paths(dir_path, dir_config, dir_identity, sizeof(dir_config))) {
+        fprintf(stderr, "Cannot use the configuration directory %s\n", dir_path);
+        result = 2;
+        goto done;
+      }
+      if (stat(dir_config, &sb)) {
+        fprintf(stderr, "No configuration file %s\n", dir_config);
+        result = 2;
+        goto done;
+      }
+      config_path = dir_config;
+      if (!key_path)
+        key_path = dir_identity;
     }
   }
   if (!config_path || (!check && !key_path) ||
@@ -2056,8 +2132,8 @@ int main(int argc, char **argv) {
           (int)sizeof(i2p_dir))
     i2p_dir[0] = 0;
   if (check) {
-    puts("Configuration valid; optional shared-instance mode uses TCP and "
-         "authenticated MessagePack RPC.");
+    puts("Configuration valid; optional shared-instance mode uses Unix sockets "
+         "(or TCP) and authenticated MessagePack RPC.");
     result = 0;
     goto done;
   }

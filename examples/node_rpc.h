@@ -55,6 +55,20 @@ static int rpc_open(rpc_server *s, const config *c, const rnc_identity *id) {
       return 0;
     s->key_size = 32;
   }
+  if (c->use_unix) {
+    struct sockaddr_storage un;
+    size_t len = rnc_host_abstract_address(c->instance_name, "/rpc", &un, sizeof(un));
+    s->fd = len ? socket(AF_UNIX, SOCK_STREAM, 0) : -1;
+    if (s->fd < 0)
+      return 0;
+    if (fcntl(s->fd, F_SETFD, FD_CLOEXEC) < 0 || fcntl(s->fd, F_SETFL, O_NONBLOCK) < 0 ||
+        bind(s->fd, (struct sockaddr *)&un, (socklen_t)len) < 0 || listen(s->fd, 4) < 0) {
+      rpc_stop(s);
+      return 0;
+    }
+    s->started = monotonic_ms();
+    return 1;
+  }
   s->fd = socket(AF_INET, SOCK_STREAM, 0);
   if (s->fd < 0)
     return 0;

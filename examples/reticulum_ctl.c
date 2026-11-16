@@ -31,6 +31,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -201,6 +202,7 @@ static void json_value(const val *v) {
 /* ---- RPC client --------------------------------------------------------- */
 typedef struct target {
   unsigned port;
+  char unix_name[RNC_HOST_UNIX_NAME_MAX + 1]; /* set: the abstract Unix socket of this instance, port unused */
   uint8_t key[RNC_RPC_KEY_MAX];
   size_t key_size;
 } target;
@@ -223,21 +225,35 @@ static int write_all(int fd, const uint8_t *data, size_t size) {
  * (caller frees) so the engine can be released before it is parsed. */
 static int rpc_call(const target *t, const uint8_t *request, size_t size,
                     uint8_t **response, size_t *response_size) {
-  struct sockaddr_in addr;
-  int fd = socket(AF_INET, SOCK_STREAM, 0), done = 0, ok = 0;
+  struct sockaddr_storage addr;
+  socklen_t addr_size = sizeof(struct sockaddr_in);
+  int fd, done = 0, ok = 0;
   rnc_rpc *rpc;
   rnc_rpc_event event;
   unsigned long deadline = now_ms() + 10000ul;
   uint8_t buf[4096];
+  memset(&addr, 0, sizeof(addr));
+  if (t->unix_name[0]) {
+    size_t len = rnc_host_abstract_address(t->unix_name, "/rpc", &addr, sizeof(addr));
+    if (!len) {
+      fprintf(stderr, "The instance name %s cannot be used\n", t->unix_name);
+      return 0;
+    }
+    addr_size = (socklen_t)len;
+  } else {
+    struct sockaddr_in *in = (struct sockaddr_in *)&addr;
+    in->sin_family = AF_INET;
+    in->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    in->sin_port = htons((uint16_t)t->port);
+  }
+  fd = socket(addr.ss_family, SOCK_STREAM, 0);
   if (fd < 0)
     return 0;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  addr.sin_port = htons((uint16_t)t->port);
-  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr))) {
-    fprintf(stderr, "Could not connect to the daemon RPC port %u: %s\n", t->port,
-            strerror(errno));
+  if (connect(fd, (struct sockaddr *)&addr, addr_size)) {
+    if (t->unix_name[0])
+      fprintf(stderr, "Could not connect to the shared instance %s: %s\n", t->unix_name, strerror(errno));
+    else
+      fprintf(stderr, "Could not connect to the daemon RPC port %u: %s\n", t->port, strerror(errno));
     close(fd);
     return 0;
   }
@@ -519,6 +535,8 @@ static int get_request(const target *t, const char *method, const uint8_t *dest,
 typedef struct conn {
   unsigned long port;
   const char *identity, *config, *rpc_key;
+  int tcp;                               /* the config names shared_instance_type = tcp */
+  char instance_name[RNC_HOST_UNIX_NAME_MAX + 1]; /* the config's instance_name */
 } conn;
 static int load_private(const char *path, rnc_identity *id) {
   uint8_t key[64];
@@ -559,6 +577,10 @@ static void read_config(const char *path, conn *c, char *rpc_key, size_t size) {
       e[-1] = 0;
     if (!strcmp(k, "instance_control_port") && !c->port)
       (void)number(v, 65535, &c->port);
+    else if (!strcmp(k, "shared_instance_type") && !strcasecmp(v, "tcp"))
+      c->tcp = 1;
+    else if (!strcmp(k, "instance_name") && !c->instance_name[0] && strlen(v) <= RNC_HOST_UNIX_NAME_MAX)
+      strcpy(c->instance_name, v);
     else if (!strcmp(k, "rpc_key") && !c->rpc_key && strlen(v) < size) {
       strcpy(rpc_key, v);
       c->rpc_key = rpc_key;
@@ -566,16 +588,55 @@ static void read_config(const char *path, conn *c, char *rpc_key, size_t size) {
   }
   fclose(f);
 }
+/* The reference's configuration directory: /etc/reticulum if it holds a config, else ~/.config/reticulum if
+ * it does, else ~/.reticulum */
+static int default_config_dir(char *out, size_t size) {
+  const char *home = getenv("HOME");
+  char probe[1100];
+  struct stat sb;
+  if (!stat("/etc/reticulum/config", &sb) && S_ISREG(sb.st_mode))
+    return snprintf(out, size, "/etc/reticulum") < (int)size;
+  if (!home || !*home)
+    return 0;
+  if (snprintf(probe, sizeof(probe), "%s/.config/reticulum/config", home) < (int)sizeof(probe) &&
+      !stat(probe, &sb) && S_ISREG(sb.st_mode))
+    return snprintf(out, size, "%s/.config/reticulum", home) < (int)size;
+  return snprintf(out, size, "%s/.reticulum", home) < (int)size;
+}
 static int make_target(conn *c, target *t) {
   rnc_identity id;
   char config_key[RNC_RPC_KEY_MAX * 2 + 2];
+  static char dir_config[1100], dir_identity[1100], dir_path[1100];
+  struct stat sb;
+  memset(t, 0, sizeof(*t));
+  /* as the daemon: --config may be a configuration directory, and with nothing to go on the reference's search
+   * order is used; the identity then defaults to <dir>/storage/transport_identity */
+  if (!remote.hash && !c->rpc_key) {
+    int use_dir = 0;
+    if (c->config && !stat(c->config, &sb) && S_ISDIR(sb.st_mode))
+      use_dir = snprintf(dir_path, sizeof(dir_path), "%s", c->config) < (int)sizeof(dir_path);
+    else if (!c->config && !c->identity)
+      use_dir = default_config_dir(dir_path, sizeof(dir_path));
+    if (use_dir && snprintf(dir_config, sizeof(dir_config), "%s/config", dir_path) < (int)sizeof(dir_config) &&
+        snprintf(dir_identity, sizeof(dir_identity), "%s/storage/transport_identity", dir_path) <
+            (int)sizeof(dir_identity)) {
+      c->config = dir_config;
+      if (!c->identity)
+        c->identity = dir_identity;
+    }
+  }
   if (remote.hash) { /* answered by the remote instance: no local RPC key is needed */
-    memset(t, 0, sizeof(*t));
     return 1;
   }
   if (c->config)
     read_config(c->config, c, config_key, sizeof(config_key));
   t->port = c->port ? (unsigned)c->port : DEFAULT_CONTROL_PORT;
+  /* As the reference: on Linux the shared instance is an abstract Unix socket unless the config says TCP or a
+   * control port was given on the command line */
+#ifdef __linux__
+  if (!c->tcp && !c->port)
+    (void)snprintf(t->unix_name, sizeof(t->unix_name), "%s", c->instance_name[0] ? c->instance_name : "default");
+#endif
   if (c->rpc_key) {
     size_t n = strlen(c->rpc_key) / 2;
     if (!n || n > RNC_RPC_KEY_MAX || !hex_decode(c->rpc_key, t->key, n)) {
@@ -709,7 +770,7 @@ static int name_matches(const val *f, const char *filter) {
   return strstr(text, filter) != NULL;
 }
 static int cmd_status(int argc, char **argv) {
-  conn c = {0, NULL, NULL, NULL};
+  conn c = {0};
   int i, json = 0, reverse = 0;
   const char *sort = NULL, *filter = NULL;
   size_t order[256], shown = 0, m;
@@ -889,7 +950,7 @@ static void print_hash(const uint8_t *hash) {
     printf("%02x", hash[k]);
 }
 static int cmd_path(int argc, char **argv) {
-  conn c = {0, NULL, NULL, NULL};
+  conn c = {0};
   int i, json = 0, table = 0, list = 0, have_hash = 0, rc = RC_OK;
   long max_hops = 0;
   uint8_t hash[16], add[16], remove_hash[16];
