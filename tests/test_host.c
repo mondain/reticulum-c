@@ -12,11 +12,13 @@
 #include <time.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_log.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 #define CHECK(x)                                                               \
   do {                                                                         \
@@ -86,6 +88,118 @@ static void codecs(void) {
   }
   CHECK(rnc_host_auto_token("reticulum", "garbage", out) == RNC_INVALID);
   puts("host codec tests passed");
+}
+/* The reference's shared instance listens on an abstract Unix socket "\0rns/<instance_name>": a listener and a
+ * client on it exchange an announce like two TCP hosts, the name is claimed while it is listening, and bad names
+ * are refused. */
+static void unix_socket(void) {
+#ifdef __linux__
+  unsigned ar = 0, br = 90;
+  uint8_t key[64] = {0}, dest[16];
+  rnc_identity ai, bi;
+  rnc_node *a, *b;
+  rnc_host *ah, *bh, *ch;
+  rnc_host_config cfg = {0};
+  rnc_host_status st;
+  rnc_route route;
+  struct sockaddr_storage addr;
+  char name[48];
+  unsigned i;
+  int found = 0;
+  size_t len;
+  /* the address: a leading NUL, "rns/<name><suffix>", and the length covers exactly that */
+  len = rnc_host_abstract_address("default", "/rpc", &addr, sizeof(addr));
+  CHECK(len == offsetof(struct sockaddr_un, sun_path) + 1 + strlen("rns/default/rpc"));
+  CHECK(((struct sockaddr_un *)&addr)->sun_family == AF_UNIX && ((struct sockaddr_un *)&addr)->sun_path[0] == 0 &&
+        !memcmp(((struct sockaddr_un *)&addr)->sun_path + 1, "rns/default/rpc", strlen("rns/default/rpc")));
+  CHECK(rnc_host_abstract_address("default", NULL, &addr, sizeof(addr)) ==
+        offsetof(struct sockaddr_un, sun_path) + 1 + strlen("rns/default"));
+  CHECK(rnc_host_abstract_address("", "", &addr, sizeof(addr)) == 0 &&
+        rnc_host_abstract_address(NULL, "", &addr, sizeof(addr)) == 0 &&
+        rnc_host_abstract_address("default", "", &addr, 4) == 0);
+  {
+    char too_long[RNC_HOST_UNIX_NAME_MAX + 2];
+    memset(too_long, 'n', sizeof(too_long));
+    too_long[sizeof(too_long) - 1] = 0;
+    CHECK(rnc_host_abstract_address(too_long, "", &addr, sizeof(addr)) == 0);
+  }
+  CHECK(snprintf(name, sizeof(name), "rnc-test-%d", (int)getpid()) > 0);
+  CHECK(rnc_identity_from_private(&ai, key) == RNC_OK);
+  key[0] = 3;
+  CHECK(rnc_identity_from_private(&bi, key) == RNC_OK);
+  a = rnc_node_new(&ai, 0, random_bytes, &ar);
+  b = rnc_node_new(&bi, 0, random_bytes, &br);
+  CHECK(a && b);
+  ah = rnc_host_new(a);
+  bh = rnc_host_new(b);
+  ch = rnc_host_new(a);
+  CHECK(ah && bh && ch);
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.unix_name = name;
+  CHECK(rnc_host_add(ah, 1, &cfg) == RNC_OK);
+  CHECK(rnc_host_get_status(ah, 1, &st) == RNC_OK && st.online && st.bound_port == 0);
+  CHECK(rnc_host_add(ch, 3, &cfg) != RNC_OK); /* the name is taken while it is listening */
+  cfg.kind = RNC_HOST_TCP_CONNECT;
+  CHECK(rnc_host_add(bh, 2, &cfg) == RNC_OK);
+  CHECK(rnc_node_add_destination(b, &bi, "reticulum_c.host.unix", NULL, 0, dest) == RNC_OK);
+  for (i = 0; i < 1000 && !found; ++i) {
+    rnc_host_event event;
+    CHECK(rnc_host_step(ah, 0, 1700000000, 100 + i) == RNC_OK);
+    CHECK(rnc_host_step(bh, 1, 1700000000, 100 + i) == RNC_OK);
+    while (rnc_host_poll(ah, &event) == RNC_OK) {
+    }
+    while (rnc_host_poll(bh, &event) == RNC_OK) {
+    }
+    if (i == 5)
+      CHECK(rnc_node_announce(b, dest, 1700000000, 105) == RNC_OK);
+    found = rnc_node_lookup(a, dest, 100 + i, &route) == RNC_OK;
+  }
+  CHECK(found && route.interface_id >= 0x80000000u);
+  /* a bad name is refused rather than listening somewhere else */
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.unix_name = "";
+  cfg.address = "127.0.0.1"; /* an empty name falls back to the address */
+  CHECK(rnc_host_add(ch, 4, &cfg) == RNC_OK);
+  rnc_host_free(ch);
+  {
+    char too_long[RNC_HOST_UNIX_NAME_MAX + 2];
+    rnc_host *dh = rnc_host_new(a);
+    memset(too_long, 'n', sizeof(too_long));
+    too_long[sizeof(too_long) - 1] = 0;
+    cfg.unix_name = too_long;
+    CHECK(dh && rnc_host_add(dh, 5, &cfg) == RNC_INVALID);
+    rnc_host_free(dh);
+  }
+  rnc_host_free(bh);
+  rnc_host_free(ah);
+  /* the name is free again once the listener is gone */
+  {
+    rnc_host *again = rnc_host_new(a);
+    cfg.unix_name = name;
+    CHECK(again && rnc_host_add(again, 6, &cfg) == RNC_OK);
+    rnc_host_free(again);
+  }
+  rnc_node_free(a);
+  rnc_node_free(b);
+  puts("host Unix socket tests passed");
+#else
+  rnc_host_config cfg = {0};
+  rnc_node *n;
+  rnc_host *h;
+  rnc_identity id;
+  uint8_t key[64] = {0};
+  unsigned r = 0;
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK);
+  n = rnc_node_new(&id, 0, random_bytes, &r);
+  h = n ? rnc_host_new(n) : NULL;
+  CHECK(h);
+  cfg.kind = RNC_HOST_TCP_LISTEN;
+  cfg.unix_name = "default";
+  CHECK(rnc_host_add(h, 1, &cfg) == RNC_UNSUPPORTED); /* abstract sockets are a Linux feature */
+  rnc_host_free(h);
+  rnc_node_free(n);
+  puts("host Unix socket tests passed (unsupported here)");
+#endif
 }
 static void network(void) {
   unsigned ar = 0, br = 90;
@@ -1955,6 +2069,8 @@ int main(int argc, char **argv) {
     serial_pressure_test();
   else if (!strcmp(argv[1], "device"))
     device_test();
+  else if (!strcmp(argv[1], "unix"))
+    unix_socket();
   else if (!strcmp(argv[1], "udp"))
     udp_test();
   else if (!strcmp(argv[1], "policy"))

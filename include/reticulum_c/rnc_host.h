@@ -62,6 +62,13 @@ rnc_result rnc_host_auto_group(const char *group, uint8_t multicast[16]);
  * (or its broadcast address when `broadcast`), else, or with `prefer_ipv6`, its first IPv6 address (a
  * link-local one carries "%device"). 0 on success, -1 when the device has none or `out` is too small. */
 int rnc_host_device_address(const char *device, int broadcast, int prefer_ipv6, char *out, size_t capacity);
+/* The Linux abstract Unix socket address the reference's shared instance uses: "rns/<name><suffix>" with a
+ * leading NUL byte ("default" and "" for the data port, "default" and "/rpc" for the RPC port). `out` receives a
+ * struct sockaddr_un (capacity at least its size); the return value is the address length to pass to bind and
+ * connect, or 0 where abstract sockets do not exist, or for a name that is empty, longer than
+ * RNC_HOST_UNIX_NAME_MAX or has a NUL in it. */
+#define RNC_HOST_UNIX_NAME_MAX 80u
+size_t rnc_host_abstract_address(const char *name, const char *suffix, void *out, size_t capacity);
 /* The multicast group with the reference's type and scope nibbles: `permanent` selects ff0x over
  * ff1x, scope is one of the RNC_AUTO_SCOPE_ values (discovery_scope), else RNC_INVALID. */
 #define RNC_AUTO_SCOPE_LINK 2u
@@ -111,6 +118,12 @@ typedef struct rnc_host_config {
   /* TCP: the link runs over an I2P tunnel, so dead-peer detection uses the I2P timings (reference
    * `i2p_tunneled`). Connections a listener accepts inherit it. */
   int i2p_tunneled;
+  /* TCP_LISTEN and TCP_CONNECT: a Linux abstract Unix socket named "rns/<unix_name>" instead of an address
+   * and port, which is how the reference's shared instance listens by default (its name is the config's
+   * instance_name, "default" if unset). address and port are ignored. rnc_host_add returns RNC_UNSUPPORTED
+   * where abstract sockets do not exist, and RNC_INVALID for a name that is empty, over 80 bytes, or the
+   * empty string. */
+  const char *unix_name;
   uint16_t discovery_port, data_port; /* AUTO defaults29716/42671 */
   const rnc_ifac *ifac; /* optional sensitive configuration copied on add */
   uint32_t frequency, bandwidth; /* RNODE required Hz */

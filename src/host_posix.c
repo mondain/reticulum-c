@@ -23,11 +23,35 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <stddef.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+size_t rnc_host_abstract_address(const char *name, const char *suffix, void *out, size_t capacity) {
+#ifdef __linux__
+  struct sockaddr_un a;
+  size_t name_len = name ? strlen(name) : 0, suffix_len = suffix ? strlen(suffix) : 0, total;
+  if (!out || !name_len || name_len > RNC_HOST_UNIX_NAME_MAX || memchr(name, 0, name_len) ||
+      name_len + suffix_len + 5 >= sizeof(a.sun_path) || capacity < sizeof(a))
+    return 0;
+  memset(&a, 0, sizeof(a));
+  a.sun_family = AF_UNIX;
+  /* abstract: a leading NUL, then "rns/<name><suffix>", the length of the address is the length of the name */
+  total = (size_t)snprintf(a.sun_path + 1, sizeof(a.sun_path) - 1, "rns/%s%s", name, suffix ? suffix : "");
+  memcpy(out, &a, sizeof(a));
+  return offsetof(struct sockaddr_un, sun_path) + 1 + total;
+#else
+  (void)name;
+  (void)suffix;
+  (void)out;
+  (void)capacity;
+  return 0;
+#endif
+}
 
 rnc_result rnc_host_frame_encode(rnc_host_framing mode, uint8_t command,
                                  const uint8_t *data, size_t size,
@@ -1554,8 +1578,15 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       r = RNC_INVALID;
       goto fail;
     }
-    if (resolve(f->address[0] ? f->address : c->address, c->port, SOCK_STREAM, 1, AF_UNSPEC,
-                c->prefer_ipv6, &bind_address, &bind_size) < 0)
+    if (c->unix_name && *c->unix_name) { /* the reference's shared instance: an abstract Unix socket */
+      size_t len = rnc_host_abstract_address(c->unix_name, "", &bind_address, sizeof(bind_address));
+      if (!len) {
+        r = rnc_host_abstract_address("x", "", &bind_address, sizeof(bind_address)) ? RNC_INVALID : RNC_UNSUPPORTED;
+        goto fail;
+      }
+      bind_size = (socklen_t)len;
+    } else if (resolve(f->address[0] ? f->address : c->address, c->port, SOCK_STREAM, 1, AF_UNSPEC,
+                       c->prefer_ipv6, &bind_address, &bind_size) < 0)
       goto fail;
     f->fd = socket_bound(&bind_address, bind_size, SOCK_STREAM);
     if (f->fd < 0 || listen(f->fd, 8) < 0)
@@ -1563,8 +1594,15 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     f->status.bound_port = bound_port(f->fd);
     f->status.online = 1;
   } else if (c->kind == RNC_HOST_TCP_CONNECT) {
-    if (!c->port || resolve(c->address, c->port, SOCK_STREAM, 0, AF_UNSPEC,
-                            c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
+    if (c->unix_name && *c->unix_name) {
+      size_t len = rnc_host_abstract_address(c->unix_name, "", &f->peer, sizeof(f->peer));
+      if (!len) {
+        r = rnc_host_abstract_address("x", "", &f->peer, sizeof(f->peer)) ? RNC_INVALID : RNC_UNSUPPORTED;
+        goto fail;
+      }
+      f->peer_size = (socklen_t)len;
+    } else if (!c->port || resolve(c->address, c->port, SOCK_STREAM, 0, AF_UNSPEC,
+                                   c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
       r = RNC_INVALID;
       goto fail;
     }

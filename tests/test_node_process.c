@@ -65,7 +65,10 @@ static void cli(const char *exe) {
       path,
       "[interfaces]\n[[Broken]]\ntype=TCPServerInterface\nlisten_port=70000\n");
   CHECK(run_check(exe, path) != 0);
-  config_file(path, "[reticulum]\nshare_instance=Yes\n");
+  config_file(path, "[reticulum]\nshare_instance=Yes\nshared_instance_type=bogus\n");
+  CHECK(run_check(exe, path) != 0);
+  config_file(path, "[reticulum]\nshare_instance=Yes\nshared_instance_type=tcp\nshared_instance_port=4242\n"
+                    "instance_control_port=4242\n"); /* the two ports must differ */
   CHECK(run_check(exe, path) != 0);
   config_file(path, "[interfaces]\n[[Bad]]\ntype=UnknownInterface\n");
   CHECK(run_check(exe, path) != 0);
@@ -227,6 +230,15 @@ static int tcp_connect(unsigned port) {
   CHECK(!connect(fd, (struct sockaddr *)&addr, sizeof(addr)));
   return fd;
 }
+/* a client of the reference's shared instance: the abstract Unix socket "\0rns/<name>" */
+static int unix_connect(const char *name) {
+  struct sockaddr_storage addr;
+  size_t len = rnc_host_abstract_address(name, "", &addr, sizeof(addr));
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  CHECK(fd >= 0 && len);
+  CHECK(!connect(fd, (struct sockaddr *)&addr, (socklen_t)len));
+  return fd;
+}
 static uint64_t now_ms(void) {
   struct timespec t;
   CHECK(!clock_gettime(CLOCK_MONOTONIC, &t));
@@ -320,8 +332,7 @@ static void rpc_client_test(unsigned port, const uint8_t key[32],
   rnc_rpc_free(rpc);
   close(fd);
 }
-static void shared_data_test(unsigned local_port, unsigned world_port) {
-  int world = tcp_connect(world_port), local = tcp_connect(local_port);
+static void shared_data_fds(int local, int world) {
   uint8_t private_key[64] = {7}, raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX],
           decoded[RNC_MAX_FRAME], command;
   size_t n, m, i;
@@ -365,6 +376,10 @@ static void shared_data_test(unsigned local_port, unsigned world_port) {
   close(local);
   close(world);
   rnc_identity_clear(&id);
+}
+static void shared_data_test(unsigned local_port, unsigned world_port) {
+  int world = tcp_connect(world_port), local = tcp_connect(local_port);
+  shared_data_fds(local, world);
 }
 static void remove_tree(const char *path) {
   struct stat st;
@@ -1437,6 +1452,162 @@ static void shared(const char *exe, const char *reference, const char *python) {
   remove_tree(dir);
   puts(reference ? "unmodified RNS shared-instance test passed"
                  : "native shared-instance tests passed");
+}
+/* The shared instance as the reference does it on Linux: no shared_instance_type, so abstract Unix sockets named
+ * by instance_name, for both the data port and the RPC port. Clients find it by name (ctl through --config, the
+ * unmodified reference through its own config), and a second daemon cannot take the name. */
+static int ctl_run(const char *ctl, char *out, size_t size, ...);
+/* The reference's directory layout: a daemon started with only the directory (or with HOME and nothing else)
+ * keeps its identity in <dir>/storage/transport_identity, the tools find it there, and --config can name the
+ * directory for both. */
+static void layout_test(const char *exe, const char *ctl, const char *reference, const char *python) {
+  char home[] = "/tmp/rnc-home-XXXXXX", dir[256], cfg[256], storage[256], keypath[256], text[1024], out[16384],
+       line[512];
+  pid_t child;
+  int fds[2], status;
+  size_t used = 0;
+  unsigned tries;
+  struct stat sb;
+  CHECK(mkdtemp(home));
+  CHECK(snprintf(dir, sizeof(dir), "%s/.reticulum", home) > 0);
+  CHECK(!mkdir(dir, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(storage, sizeof(storage), "%s/storage", dir) > 0);
+  CHECK(snprintf(keypath, sizeof(keypath), "%s/storage/transport_identity", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = Yes\ninstance_name = rnc-layout-%d\n"
+                 "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = 0\n",
+                 (int)getpid()) > 0);
+  config_file(cfg, text);
+  out[0] = 0;
+  CHECK(!pipe(fds));
+  child = fork();
+  CHECK(child >= 0);
+  if (!child) { /* no --config, no --identity: the search finds $HOME/.reticulum */
+    close(fds[0]);
+    CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+    close(fds[1]);
+    CHECK(!setenv("HOME", home, 1));
+    execl(exe, exe, (char *)NULL);
+    _exit(127);
+  }
+  close(fds[1]);
+  for (tries = 0; tries < 100 && !strstr(out, "Ready"); ++tries) {
+    struct pollfd p = {fds[0], POLLIN, 0};
+    CHECK(poll(&p, 1, 100) >= 0);
+    if (p.revents & POLLIN) {
+      ssize_t n = read(fds[0], out + used, sizeof(out) - 1 - used);
+      CHECK(n > 0);
+      used += (size_t)n;
+      out[used] = 0;
+    }
+  }
+  CHECK(tries < 100 && strstr(out, "Ready"));
+  CHECK(!stat(storage, &sb) && S_ISDIR(sb.st_mode) && (sb.st_mode & 077) == 0);
+  CHECK(!stat(keypath, &sb) && S_ISREG(sb.st_mode) && sb.st_size == 64);
+  /* the tool finds the instance by the same search, and by the directory */
+  {
+    int pipefd[2];
+    pid_t tool;
+    ssize_t n;
+    size_t got = 0;
+    CHECK(!pipe(pipefd));
+    tool = fork();
+    CHECK(tool >= 0);
+    if (!tool) {
+      close(pipefd[0]);
+      CHECK(dup2(pipefd[1], STDOUT_FILENO) >= 0);
+      close(pipefd[1]);
+      CHECK(!setenv("HOME", home, 1));
+      execl(ctl, ctl, "status", (char *)NULL);
+      _exit(127);
+    }
+    close(pipefd[1]);
+    while ((n = read(pipefd[0], line + got, sizeof(line) - 1 - got)) > 0)
+      got += (size_t)n;
+    close(pipefd[0]);
+    line[got] = 0;
+    CHECK(waitpid(tool, &status, 0) == tool && WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(strstr(line, "Shared Instance"));
+  }
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "--config", dir, NULL) == 0 && strstr(out, "Shared Instance"));
+  if (reference)
+    rns_status(python, reference, dir);
+  CHECK(kill(child, SIGTERM) == 0 && waitpid(child, &status, 0) == child);
+  close(fds[0]);
+  remove_tree(home);
+}
+static void shared_unix(const char *exe, const char *ctl, const char *reference, const char *python) {
+  char dir[] = "/tmp/rnc-node-unix-XXXXXX", cfg[256], keypath[256], admin[256], other[256], text[2048],
+       identity[33], out[16384], name[64], wrong[256];
+  unsigned world;
+  pid_t process;
+  int fd;
+  {
+    struct sockaddr_storage probe;
+    if (!rnc_host_abstract_address("x", "", &probe, sizeof(probe))) { /* abstract sockets are a Linux feature */
+      puts("Unix-socket shared-instance test skipped (not Linux)");
+      return;
+    }
+  }
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(name, sizeof(name), "rnc-unix-%d", (int)getpid()) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(other, sizeof(other), "%s/other", dir) > 0);
+  CHECK(snprintf(wrong, sizeof(wrong), "%s/wrong", dir) > 0);
+  CHECK(snprintf(keypath, sizeof(keypath), "%s/storage", dir) > 0);
+  CHECK(!mkdir(keypath, 0700)); /* the reference reads the RPC key from <config>/storage/transport_identity */
+  CHECK(snprintf(keypath, sizeof(keypath), "%s/storage/transport_identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = Yes\ninstance_name = %s\n"
+                 "[interfaces]\n[[External TCP]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+                 "listen_port = 0\nmode = gateway\n", name) > 0);
+  config_file(cfg, text);
+  process = start(exe, cfg, keypath, admin, &fd);
+  ready_line(fd, identity);
+  world = admin_status(admin);
+  CHECK(world);
+  /* the data port: a local client announces, the world side hears it */
+  shared_data_fds(unix_connect(name), tcp_connect(world));
+  /* the RPC port, found through the config's instance_name */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "--config", cfg, "--identity", keypath, NULL) == 0 &&
+        strstr(out, "Shared Instance") && strstr(out, "External"));
+  /* another instance name is another (absent) instance */
+  CHECK(snprintf(text, sizeof(text), "[reticulum]\ninstance_name = %s-absent\n", name) > 0);
+  config_file(wrong, text);
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "--config", wrong, "--identity", keypath, NULL) != 0);
+  /* the name is taken: a second daemon on it does not start */
+  {
+    char second[256], second_key[256], second_admin[256];
+    int status;
+    pid_t child;
+    CHECK(snprintf(second, sizeof(second), "%s/second", dir) > 0);
+    CHECK(snprintf(second_key, sizeof(second_key), "%s/second_identity", dir) > 0);
+    CHECK(snprintf(second_admin, sizeof(second_admin), "%s/second_admin", dir) > 0);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = No\nshare_instance = Yes\ninstance_name = %s\n"
+                   "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = 0\n",
+                   name) > 0);
+    config_file(second, text);
+    child = fork();
+    CHECK(child >= 0);
+    if (!child) {
+      CHECK(freopen("/dev/null", "w", stdout) && freopen("/dev/null", "w", stderr));
+      execl(exe, exe, "--config", second, "--identity", second_key, "--admin", second_admin, (char *)NULL);
+      _exit(127);
+    }
+    CHECK(waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) != 0 && WEXITSTATUS(status) != 127);
+  }
+  if (reference)
+    rns_status(python, reference, dir);
+  stop(process, fd);
+  remove_tree(dir);
+  (void)other;
+  layout_test(exe, ctl, reference, python);
+  puts(reference ? "unmodified RNS Unix-socket shared-instance test passed"
+                 : "native Unix-socket shared-instance test passed");
 }
 /* The reference peer: starts RNS from a generated config, prints the hash of a
  * destination it announces once a second, and exits after `seconds`. */
@@ -4510,6 +4681,10 @@ int main(int argc, char **argv) {
     blackhole(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
+  else if (!strcmp(argv[2], "shared_unix") && argc == 4)
+    shared_unix(argv[1], argv[3], NULL, NULL);
+  else if (!strcmp(argv[2], "shared_unix_ref") && argc == 6)
+    shared_unix(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "netid_ref") && argc == 5)
     network_identity_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "tunnel_ref") && argc == 5)
