@@ -18,7 +18,12 @@
 #ifndef RNC_NODE_REQUESTS
 #define RNC_NODE_REQUESTS 32u
 #endif
-#define PATH_LIFETIME UINT64_C(604800000)
+/* How long a learned path lives (the reference: one week). A profile with few route slots shortens it so
+ * that paths nobody uses do not hold the slots. */
+#ifndef RNC_NODE_PATH_LIFETIME_MS
+#define RNC_NODE_PATH_LIFETIME_MS UINT64_C(604800000)
+#endif
+#define PATH_LIFETIME RNC_NODE_PATH_LIFETIME_MS
 #define PACKET_LIFETIME UINT64_C(300000)
 #define REQUEST_LIFETIME UINT64_C(15000)
 #define PATH_REQUEST_GRACE UINT64_C(400)   /* Transport.PATH_REQUEST_GRACE: let direct peers answer first */
@@ -98,6 +103,7 @@ typedef struct node_route {
   int used;
   rnc_route route;
   rnc_packet packet;
+  uint64_t used_ms; /* when the route was last heard (announced) or used: eviction order */
 } node_route;
 typedef struct node_tunnel_path {
   int used;
@@ -274,8 +280,10 @@ static node_route *route_find(rnc_node *n, const uint8_t address[16],
   size_t i;
   for (i = 0; i < RNC_NODE_ROUTES; i++)
     if (n->routes[i].used && n->routes[i].route.expires_ms > now &&
-        same(n->routes[i].route.destination, address))
+        same(n->routes[i].route.destination, address)) {
+      n->routes[i].used_ms = now;
       return &n->routes[i];
+    }
   return NULL;
 }
 static node_destination *destination_find(rnc_node *n,
@@ -370,9 +378,40 @@ static void remember(rnc_node *n, const uint8_t hash[32], uint64_t now) {
   memcpy(h->hash, hash, 32);
   h->expiry = after(now, PACKET_LIFETIME);
 }
+/* Gives up waiting entries that are farther away (more hops) than a new announce until `need`
+ * slots are free, the farthest and then the newest first: the entries wait for an interface's
+ * announce bandwidth, and a closer announce is worth more than a far one that has not gone out.
+ * 0 when that is not enough. */
+static int queue_make_room(rnc_node *n, size_t need, unsigned hops) {
+  while (queue_free(n) < need) {
+    size_t i, worst = RNC_NODE_QUEUE;
+    for (i = 0; i < RNC_NODE_QUEUE; i++) {
+      const node_queued *q = &n->queued[i];
+      if (!q->used || q->packet.hops <= hops)
+        continue;
+      if (worst == RNC_NODE_QUEUE || q->packet.hops > n->queued[worst].packet.hops ||
+          (q->packet.hops == n->queued[worst].packet.hops && q->due > n->queued[worst].due))
+        worst = i;
+    }
+    if (worst == RNC_NODE_QUEUE)
+      return 0;
+    n->queued[worst].used = 0;
+  }
+  return 1;
+}
 static void queue(rnc_node *n, uint32_t iface, const rnc_packet *p,
                   uint64_t due) {
   size_t i;
+  /* a newer copy of what is already waiting for this interface replaces it, it does not take a second slot */
+  for (i = 0; i < RNC_NODE_QUEUE; i++)
+    if (n->queued[i].used && n->queued[i].iface == iface &&
+        n->queued[i].packet.context == p->context &&
+        same(n->queued[i].packet.destination, p->destination)) {
+      n->queued[i].packet = *p;
+      n->queued[i].due = due;
+      n->queued[i].heard = 0;
+      return;
+    }
   for (i = 0; i < RNC_NODE_QUEUE; i++)
     if (!n->queued[i].used) {
       n->queued[i].used = 1;
@@ -1361,6 +1400,43 @@ rnc_result rnc_node_tunnel_at(const rnc_node *n, size_t index,
     }
   return RNC_AGAIN;
 }
+/* The route to give up when the table is full and a new one is learned on `ingress`, or
+ * RNC_NODE_ROUTES when none may go. What a route is worth depends on where it was learned: one
+ * from a fast interface (a host's serial line or a network) is cheap to learn again, the host
+ * answers a path request for it; one learned over a slow radio link is not. So the routes of the
+ * fastest interfaces go first, an announce on a fast interface never displaces a route learned
+ * on a slower one, and within a class the one least recently heard or used goes. A route that a
+ * pending path request is waiting for stays. */
+static size_t route_victim(rnc_node *n, uint32_t ingress) {
+  const node_interface *in = interface(n, ingress);
+  size_t i, k, best = RNC_NODE_ROUTES;
+  uint32_t best_rate = 0;
+  if (!in)
+    return RNC_NODE_ROUTES;
+  for (i = 0; i < RNC_NODE_ROUTES; i++) {
+    const node_interface *from;
+    uint32_t rate;
+    int wanted = 0;
+    if (!n->routes[i].used)
+      continue;
+    from = interface(n, n->routes[i].route.interface_id);
+    rate = from ? from->bitrate : UINT32_MAX; /* its interface is gone: the cheapest to lose */
+    if (rate < in->bitrate)
+      continue;
+    for (k = 0; k < RNC_NODE_REQUESTS; k++)
+      if (n->requests[k].used && n->requests[k].pending &&
+          same(n->requests[k].destination, n->routes[i].route.destination))
+        wanted = 1;
+    if (wanted)
+      continue;
+    if (best == RNC_NODE_ROUTES || rate > best_rate ||
+        (rate == best_rate && n->routes[i].used_ms < n->routes[best].used_ms)) {
+      best = i;
+      best_rate = rate;
+    }
+  }
+  return best;
+}
 static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
                             uint64_t unix_seconds, uint64_t now) {
   rnc_announce a;
@@ -1420,8 +1496,20 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
         n->requests[i].expiry > now && n->requests[i].ingress != ingress &&
         same(n->requests[i].destination, p->destination))
       answers++;
-  if (queue_free(n) < answers + ((update && p->context == 0) ? targets : 0))
-    return RNC_AGAIN;
+  {
+    /* Learning a path does not depend on being able to pass the announce on (the reference learns it
+     * and only drops the rebroadcast when its queue is full). So when the queue has no room even after
+     * giving up farther entries, the route is still learned and the announce is simply not relayed. */
+    size_t need = answers + ((update && p->context == 0) ? targets : 0);
+    if (queue_free(n) < need && !queue_make_room(n, need, p->hops)) {
+      if (update && p->context == 0 && targets) {
+        targets = 0;
+        need = answers;
+      }
+      if (queue_free(n) < need)
+        return RNC_AGAIN;
+    }
+  }
 
   if (update) {
     if (route)
@@ -1432,6 +1520,8 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
           slot = i;
           break;
         }
+    if (slot == RNC_NODE_ROUTES)
+      slot = route_victim(n, ingress);
     if (slot == RNC_NODE_ROUTES)
       return RNC_AGAIN;
     if (targets && p->context == 0) {
@@ -1448,6 +1538,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
     fresh.route.hops = p->hops;
     fresh.route.announced_at = stamp;
     fresh.route.expires_ms = after(now, path_lifetime(n, ingress));
+    fresh.used_ms = now;
     memcpy(fresh.route.destination, p->destination, 16);
     memcpy(fresh.route.next_hop,
            (p->flags & 0x40) ? p->transport_id : p->destination, 16);
