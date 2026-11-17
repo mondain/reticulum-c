@@ -245,9 +245,9 @@ running this firmware in rnode mode was driven over USB by that host adapter (91
     delivered to its serial host (announce counted);
   - announces transmitted by the Supreme arrived at the host through the T-Echo as valid
     announces (two of 167 bytes) with RSSI -31 dBm and SNR 12.75 and 14.25 dB.
-NOT verified: anything with the unmodified reference RNodeInterface or rnsd, and traffic through Sideband (a
-script for the reference, mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and
-has not been run), a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,
+NOT verified over USB: anything with the unmodified reference RNodeInterface or rnsd, and Sideband (its
+Bluetooth session is recorded below). A script for the reference, mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and
+has not been run. Also not verified: a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,
 which are not implemented), range, sustained load, and the flow-control path with a real
 host. A host program that opens the Supreme's USB port resets it (ESP32-S3 USB serial),
 which is a property of that board, not of rnode mode. Other boards build only.
