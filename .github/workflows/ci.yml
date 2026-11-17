@@ -32,27 +32,6 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ctest --test-dir build --output-on-failure
-  leviculum:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev libbz2-dev pkg-config libdbus-1-dev libudev-dev
-      - name: Prepare pinned, unmodified Leviculum oracle
-        run: |
-          git clone https://codeberg.org/Lew_Palm/leviculum.git "$RUNNER_TEMP/leviculum"
-          git -C "$RUNNER_TEMP/leviculum" checkout 395edd42fbbffcdfb438fcd80afa17668459d331
-          rustup toolchain install 1.97.1 --profile minimal
-          cd "$RUNNER_TEMP/leviculum"
-          cargo +1.97.1 build --locked -p leviculum-ffi --release --target x86_64-unknown-linux-gnu
-          ln -s libleviculum.so target/x86_64-unknown-linux-gnu/release/libleviculum.so.0
-      - run: >-
-          cmake -S . -B build -G Ninja -DRNC_LEVICULUM_TESTS=ON
-          -DRNC_LEVICULUM_REFERENCE_DIR="$RUNNER_TEMP/leviculum"
-          -DRNC_LEVICULUM_LIBRARY="$RUNNER_TEMP/leviculum/target/x86_64-unknown-linux-gnu/release/libleviculum.so"
-      - run: cmake --build build
-      - run: ctest --test-dir build --output-on-failure
   macos:
     runs-on: macos-15
     steps:

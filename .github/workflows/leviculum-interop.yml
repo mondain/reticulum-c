@@ -1,0 +1,32 @@
+name: Leviculum interoperability
+# The interoperability suite against the pinned Leviculum oracle builds a Rust library and is
+# slow, so it is not part of the push and pull request checks (ci.yml). It runs when a release
+# tag is pushed, and on demand: Actions -> Leviculum interoperability -> Run workflow, on any branch.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  leviculum:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev libbz2-dev pkg-config libdbus-1-dev libudev-dev
+      - name: Prepare pinned, unmodified Leviculum oracle
+        run: |
+          git clone https://codeberg.org/Lew_Palm/leviculum.git "$RUNNER_TEMP/leviculum"
+          git -C "$RUNNER_TEMP/leviculum" checkout 395edd42fbbffcdfb438fcd80afa17668459d331
+          rustup toolchain install 1.97.1 --profile minimal
+          cd "$RUNNER_TEMP/leviculum"
+          cargo +1.97.1 build --locked -p leviculum-ffi --release --target x86_64-unknown-linux-gnu
+          ln -s libleviculum.so target/x86_64-unknown-linux-gnu/release/libleviculum.so.0
+      - run: >-
+          cmake -S . -B build -G Ninja -DRNC_LEVICULUM_TESTS=ON
+          -DRNC_LEVICULUM_REFERENCE_DIR="$RUNNER_TEMP/leviculum"
+          -DRNC_LEVICULUM_LIBRARY="$RUNNER_TEMP/leviculum/target/x86_64-unknown-linux-gnu/release/libleviculum.so"
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure
