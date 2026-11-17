@@ -1,8 +1,10 @@
 RNode mode for the reticulum-c microcontroller firmware: design
 ================================================================
 
-Status: approved 2026-11-14. USB stage implemented and bench-checked once on a T-Echo
-(see mcu/README.txt); Bluetooth stage not built.
+Status: approved 2026-11-14. USB stage implemented and bench-checked on a T-Echo; Bluetooth
+LE stage implemented for nRF52840 and ESP32 boards and bench-checked on a T-Echo from a Linux
+PC and from Sideband on Android (2026-11-14 and 2026-11-15; the ESP32 transport is compiled
+only). See mcu/README.txt for the evidence and what is not verified.
 
 1. Intent
 ---------

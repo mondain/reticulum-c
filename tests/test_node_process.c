@@ -137,6 +137,20 @@ static void cli(const char *exe) {
               "[interfaces]\n[[T]]\ntype = TCPServerInterface\n"
               "listen_port = 0\noutgoing = maybe\n");
   CHECK(run_check(exe, path) != 0);
+  /* the reference accepts interface_enabled as well as enabled on any interface */
+  config_file(path,
+              "[reticulum]\nshare_instance = No\n[interfaces]\n[[T]]\ntype = TCPServerInterface\n"
+              "interface_enabled = yes\nlisten_port = 0\n");
+  CHECK(run_check(exe, path) == 0);
+  config_file(path,
+              "[reticulum]\nshare_instance = No\n[interfaces]\n[[Off]]\ntype = TCPServerInterface\n"
+              "interface_enabled = no\nlisten_port = 0\n[[On]]\ntype = TCPServerInterface\n"
+              "enabled = yes\nlisten_port = 0\n");
+  CHECK(run_check(exe, path) == 0);
+  config_file(path,
+              "[reticulum]\nshare_instance = No\n[interfaces]\n[[T]]\ntype = TCPServerInterface\n"
+              "interface_enabled = maybe\nlisten_port = 0\n");
+  CHECK(run_check(exe, path) != 0);
   CHECK(!unlink(path) && !rmdir(dir));
   puts("node CLI tests passed");
 }

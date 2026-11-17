@@ -220,7 +220,7 @@ LoRa automatically. Frequency and power must be chosen explicitly. Wi-Fi
 passwords are not stored by the page. Browser flashing requires HTTPS and a
 browser with Web Serial support; downloads remain available without it.
 
-The PlatformIO firmware also has an `rnode` mode (`set mode rnode`, or "Run as: RNode modem" in the setup form): the board becomes a LoRa modem that Sideband, rnsd or another Reticulum host drives over USB with the RNode protocol. It is tested against this project's host RNode adapter on a simulated radio only, has no Bluetooth yet, and has not been tried on hardware; see `mcu/README.txt`.
+The PlatformIO firmware also has an `rnode` mode (`set mode rnode`, or "Run as: RNode modem" in the setup form): the board becomes a LoRa modem that Sideband, rnsd or another Reticulum host drives over USB, or over Bluetooth LE once a six digit PIN is set (`set ble.pin`), with the RNode protocol. On a LilyGo T-Echo it has been driven over USB by this project's host RNode adapter, and over Bluetooth LE from a Linux PC and from Sideband on Android, with packets exchanged over the air with a T-Beam Supreme. Not yet verified: the unmodified reference RNodeInterface and rnsd, range, and the ESP32 Bluetooth transport (compiled only, never run on hardware). The board runs no Reticulum node of its own in this mode, so it announces nothing and its own packet counters stay at 0 until a host drives it; see `mcu/README.txt`.
 
 The Pages workflow builds all eight board variants from the displayed source
 commit, validates flash layouts and checksums, and retains up to five versions.
