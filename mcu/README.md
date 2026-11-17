@@ -273,8 +273,14 @@ through the same bridge and received the Supreme's announce over LoRa, delivered
 announces sent through it by that node the T-Echo's screen read TX 7, RX 2, SNR 12.5 dB, link Bluetooth,
 and the Supreme's read RX 7. NOT verified: the reference's own Bluetooth mode, the
 reference over USB, anything received through the reference, rnsd, and that the Supreme forwards what the
-T-Echo sends (a plain announce sent through the T-Echo did not appear on the Supreme's serial side in 9
-minutes; the cause is not established).
+T-Echo sends. A plain announce for a new destination, sent by a host through the T-Echo in rnode mode,
+did not appear on the Supreme's serial side in 9 minutes, whereas the T-Echo's own announce in leaf mode
+was forwarded the same day (2 hops, /echo and /info answered). Established so far: the packets do reach
+the Supreme's node (its RX counter, 7, counts packets that passed air-frame reassembly), so the loss is
+inside the node, not in the radio or the framing, which rnode and leaf modes share; an announce stamped
+10 minutes in the past was dropped as well as one stamped with real time, so the 300 second rule for
+announces from the future is not the cause (the Supreme's clock was 156 seconds behind). The cause is
+not established.
 
 NOT verified over USB: rnsd, and Sideband (its Bluetooth session is recorded above). A script for the
 reference, mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and has not been run over USB. Also not verified: a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,
