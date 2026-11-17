@@ -582,7 +582,10 @@ mcu/tests/test_radio_app.c, which feed a gateway board 6 to 150 announces over i
 require that it still repeats a new destination heard over the radio (on the earlier code this failed from 11
 announces on). On hardware the failure was seen on a T-Beam Supreme gateway after a host connected it to a
 public network for a few minutes: it then forwarded no announce for a new destination from a T-Echo
-until it was reset. The change has not been run on that hardware.
+until it was reset. On 2026-11-17 the change was run on it: with this code on the Supreme (build 110b48a), 218
+announces from a public network were passed to it in 4 minutes, and two fresh host announces sent through a
+T-Echo (one with a real-time stamp, one dated 10 minutes back) were both forwarded to its serial side. One run
+on one board.
 
 ## Configuration knobs (`feature/config-knobs`)
 
@@ -1207,9 +1210,9 @@ mcu/README.md).
 Evidence: unit tests of the framer, every command and the failure cases; this project's
 host RNode adapter over a pseudo terminal against the module with a simulated radio and
 a simulated peer (detect, configuration, announce out, announce in with signal figures).
-A script for the unmodified reference `RNodeInterface` exists but has not been run over USB; on 2026-11-17
-the reference configured a T-Echo through a Bluetooth bridge once its readback wait was lengthened (see
-`mcu/README.md`). On
+A script for the unmodified reference `RNodeInterface` exists but has not been run; on 2026-11-17 the
+reference, driven by hand, configured a T-Echo and sent announces through it over USB with its default
+timing, and through a Bluetooth bridge once its readback wait was lengthened (see `mcu/README.md`). On
 2026-11-14 a T-Echo in rnode mode, driven over USB by the same host adapter, exchanged
 announces both ways over the air with a T-Beam Supreme running this project's gateway
 firmware (915 MHz, 125 kHz, SF8, 0 dBm, close range; RSSI about -31 dBm, SNR 12 to 14 dB).
