@@ -24,7 +24,9 @@
  *
  * What shrinks (default host value -> this profile):
  *   RNC_MAX_MTU              4096 -> 500    dominant: sizes every packet buffer
- *   RNC_NODE_ROUTES           128 -> 12
+ *   RNC_NODE_ROUTES           128 -> 12      a full table gives up the least recently used route of the
+ *                                            fastest interface (see route_victim in node.c)
+ *   RNC_NODE_PATH_LIFETIME_MS  1 week -> 1 day  paths nobody refreshes do not hold the few slots
  *   RNC_NODE_KNOWN            256 -> 8      remembered announces (path recall)
  *   RNC_NODE_LINKS             64 -> 8      link-table entries relayed for others
  *   RNC_NODE_EVENTS            64 -> 8      node output queue (>= INTERFACES + REQUESTS + 2)
@@ -55,6 +57,9 @@
 
 #ifndef RNC_NODE_INTERFACES
 #define RNC_NODE_INTERFACES 2u
+#endif
+#ifndef RNC_NODE_PATH_LIFETIME_MS
+#define RNC_NODE_PATH_LIFETIME_MS UINT64_C(86400000)
 #endif
 #ifndef RNC_NODE_ROUTES
 #define RNC_NODE_ROUTES 12u

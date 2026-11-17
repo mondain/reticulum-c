@@ -552,6 +552,38 @@ this test environment (its transmit path reports a bad file descriptor after it
 starts the child), so that direction runs the client on a terminal, which uses
 the reference's pty mode.
 
+## Path table pressure (`feature/route-eviction`)
+
+The node keeps a fixed number of paths (128 on a host, 12 in the microcontroller profile) and a fixed
+number of announces waiting for an interface's announce bandwidth (64 and 4). The reference keeps
+every path until it expires and queues up to 4096 announces per interface; a node with fixed tables
+needs a policy when they fill, and before this change it had none:
+
+- A full path table refused every announce for a new destination until a path expired, a week
+  later. A host that forwards a large network to a small gateway (a public network to a LoRa board) filled
+  the board's table at once, and from then on the board no longer learned, or repeated, any new node
+  heard over its radio. Only destinations it already knew kept working.
+- A full announce queue made the node refuse to learn the announce at all. A slow interface drains one
+  announce per bandwidth interval (about 25 s for a 183 byte announce at LoRa speeds), so a burst of announces
+  from a fast interface left the queue full for minutes and almost none of them were learned. The reference
+  learns the path and only drops the rebroadcast.
+
+Now: a full table gives up one route, chosen by where it was learned. A route from a faster interface
+(a host's serial line or a network) goes first, because the host can answer a path request for it; the
+least recently heard or used within that class goes first; an announce arriving on a faster interface
+never displaces a route learned on a slower one; a route a pending path request waits for stays.
+When the queue has no room the path is still learned and the announce is not relayed; a closer announce
+(fewer hops) takes the place of the farthest waiting one, and a newer copy of a waiting announce
+replaces it. The microcontroller profile keeps paths for one day instead of a week
+(`RNC_NODE_PATH_LIFETIME_MS`), so paths nobody refreshes do not hold its few slots.
+
+Evidence: tests/test_route_eviction.c (six cases on the host profile) and the gateway tests in
+mcu/tests/test_radio_app.c, which feed a gateway board 6 to 150 announces over its serial line and
+require that it still repeats a new destination heard over the radio (on the earlier code this failed from 11
+announces on). On hardware the failure was seen on a T-Beam Supreme gateway after a host connected it to a
+public network for a few minutes: it then forwarded no announce for a new destination from a T-Echo
+until it was reset. The change has not been run on that hardware.
+
 ## Configuration knobs (`feature/config-knobs`)
 
 - `outgoing = No` on an interface: it still receives, but nothing is sent on it

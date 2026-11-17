@@ -553,6 +553,13 @@ The earlier serial-only application image was about 251 KB (ESP32) and 275 KB
 measurements, not sizes for the current Wi-Fi/radio-enabled images. See size.txt
 in OUTDIR for the actual build's report.
 
+The tables are small on purpose, and a gateway that is attached to a large network by its host fills
+them: the 12 paths, and the 4 announces that wait for the radio's announce bandwidth. A route costs
+1168 bytes and a waiting announce 560 (measured in this profile; the whole node is about 51 KB). When the
+path table is full the board gives up the least recently used path learned over the serial or Wi-Fi side
+before one learned over the radio, and a closer announce displaces a farther one in the queue; see
+COMPATIBILITY.md, "Path table pressure". Paths live one day in this profile.
+
 ## Boards
 
 The firmware targets chips, not boards, because the serial path is the same:

@@ -165,7 +165,8 @@ static rnc_result c_random(void *ctx, uint8_t *out, size_t n) {
   p_random(ctx, out, n);
   return RNC_OK;
 }
-static uint64_t unix_of(sim_medium *med) { return (uint64_t)RNC_MCU_BUILD_EPOCH + 2000u + med->now_us / 1000000u; }
+static int64_t g_client_clock_offset = 2000; /* seconds the client's clock is ahead of the application's */
+static uint64_t unix_of(sim_medium *med) { return (uint64_t)((int64_t)RNC_MCU_BUILD_EPOCH + g_client_clock_offset) + med->now_us / 1000000u; }
 
 static int client_make(client *c, sim_medium *med, int chip, uint32_t seed, const rnc_lora_params *params) {
   memset(c, 0, sizeof(*c));
@@ -510,6 +511,174 @@ static void test_gateway_vs_leaf(void) {
   }
 }
 
+
+/* a host announces a brand-new destination through the radio of a gateway board: the gateway
+ * must repeat it on its serial side (as it does for another board's announce) */
+static size_t unescape_hdlc(const uint8_t *in, size_t n, uint8_t *out) {
+  size_t i, k = 0;
+  for (i = 0; i < n; i++) {
+    if (in[i] == 0x7d && i + 1 < n)
+      out[k++] = (uint8_t)(in[++i] ^ 0x20);
+    else
+      out[k++] = in[i];
+  }
+  return k;
+}
+static int has16(const uint8_t *hay, size_t n, const uint8_t needle[16]) {
+  size_t i;
+  for (i = 0; i + 16 <= n; i++)
+    if (!memcmp(hay + i, needle, 16))
+      return 1;
+  return 0;
+}
+static void test_host_announce_through_gateway(void) {
+  static const int64_t offsets[] = {0, 156, 2000};
+  unsigned pass;
+  for (pass = 0; pass < 3; pass++) {
+    sim_medium med;
+    board a;
+    client c;
+    world w;
+    rnc_lora_params p = prm(125000, 8, 0);
+    uint8_t dest[16];
+    static uint8_t flat[16384];
+    size_t fn;
+    g_client_clock_offset = offsets[pass];
+    sim_medium_init(&med, 40 + pass);
+    CHECK_EQ(board_make(&a, &med, 1262, 1, RNC_LORA_MODE_GATEWAY, &p, "gw"), 0);
+    CHECK_EQ(client_make(&c, &med, 1262, 3, &p), 0);
+    sim_link(&med, c.sb.radio_id, a.sb.radio_id, 100);
+    memset(&w, 0, sizeof(w));
+    w.med = &med;
+    w.boards[0] = &a;
+    w.nboards = 1;
+    w.clients[0] = &c;
+    w.nclients = 1;
+    world_run(&w, 20000);
+    CHECK_EQ(rnc_node_add_destination(c.node, &c.id, "reticulum_c.bench.probe", NULL, 0, dest), RNC_OK);
+    CHECK_EQ(rnc_node_announce(c.node, dest, unix_of(&med), med.now_us / 1000u), RNC_OK);
+    world_run(&w, 60000);
+    fn = unescape_hdlc(a.pl.out, a.pl.out_len, flat);
+    /* the gateway's own announce is there as a control */
+    CHECK(has16(flat, fn, a.dest));
+    /* a host clock up to the 300 s limit ahead of the board's is fine; 2000 s ahead is not */
+    if (offsets[pass] <= 300)
+      CHECK(has16(flat, fn, dest));
+    else
+      CHECK(!has16(flat, fn, dest));
+    rnc_requester_free(c.req);
+    rnc_node_free(c.node);
+    rnc_mcu_app_free(a.app);
+  }
+  g_client_clock_offset = 2000;
+}
+
+/* an announce for a fresh destination, as a host node would forward it over the serial line:
+ * HDLC framed (flag 0x7e, escape 0x7d, mask 0x20) */
+static size_t serial_announce_frame(board *a, sim_medium *med, unsigned index, uint8_t *out, size_t cap,
+                                    uint8_t dest[16]) {
+  rnc_identity id;
+  rnc_node *node;
+  rnc_node_event ev;
+  uint8_t wire[RNC_MAX_FRAME + 8];
+  char name[40];
+  size_t wn = 0, k = 0, i;
+  if (rnc_identity_generate(&id, c_random, &a->pl) != RNC_OK)
+    return 0;
+  node = rnc_node_new(&id, 0, c_random, &a->pl);
+  if (!node)
+    return 0;
+  snprintf(name, sizeof(name), "reticulum_c.public.d%u", index);
+  if (rnc_node_add_interface(node, 1, 115200u) != RNC_OK ||
+      rnc_node_add_destination(node, &id, name, NULL, 0, dest) != RNC_OK ||
+      rnc_node_announce(node, dest, unix_of(med), med->now_us / 1000u) != RNC_OK) {
+    rnc_node_free(node);
+    return 0;
+  }
+  for (i = 0; i < 4 && !wn; i++) {
+    (void)rnc_node_tick(node, unix_of(med), med->now_us / 1000u + 1000u * i);
+    while (rnc_node_poll(node, &ev) == RNC_OK)
+      if (ev.type == RNC_NODE_SEND && rnc_packet_encode(&ev.packet, wire, sizeof(wire), &wn) == RNC_OK)
+        break;
+  }
+  rnc_node_free(node);
+  if (!wn)
+    return 0;
+  out[k++] = 0x7e;
+  for (i = 0; i < wn && k + 3 < cap; i++) {
+    if (wire[i] == 0x7e || wire[i] == 0x7d) {
+      out[k++] = 0x7d;
+      out[k++] = (uint8_t)(wire[i] ^ 0x20);
+    } else
+      out[k++] = wire[i];
+  }
+  out[k++] = 0x7e;
+  return k;
+}
+
+/* A gateway whose host forwards a network's announces over the serial line learns far more
+ * destinations than it has route slots (RNC_NODE_ROUTES is 12 here). A full table used to refuse every
+ * new destination for the whole path lifetime, so the announce of one more node, heard over the
+ * radio, was neither learned nor repeated. The gateway must go on repeating it, in a slow trickle of
+ * announces (the queue empties between them) and in a burst (it does not), and must not let the
+ * serial side push out a route learned over the radio. */
+static void test_gateway_under_serial_feed(void) {
+  static const unsigned feed[] = {6, 11, 12, 13, 20, 20, 150};
+  static const unsigned spacing_s[] = {60, 60, 60, 60, 60, 2, 2}; /* between announces from the host */
+  unsigned pass, i, j;
+  for (pass = 0; pass < 7; pass++) {
+    sim_medium med;
+    board a;
+    client c;
+    world w;
+    rnc_lora_params p = prm(125000, 8, 0);
+    uint8_t first[16], dest[16], d[16], frame[1024];
+    static uint8_t flat[262144];
+    size_t fn, n;
+    g_client_clock_offset = 0;
+    sim_medium_init(&med, 77 + pass);
+    CHECK_EQ(board_make(&a, &med, 1262, 1, RNC_LORA_MODE_GATEWAY, &p, "gw"), 0);
+    CHECK_EQ(client_make(&c, &med, 1262, 3, &p), 0);
+    sim_link(&med, c.sb.radio_id, a.sb.radio_id, 100);
+    memset(&w, 0, sizeof(w));
+    w.med = &med;
+    w.boards[0] = &a;
+    w.nboards = 1;
+    w.clients[0] = &c;
+    w.nclients = 1;
+    world_run(&w, 20000);
+    /* a destination heard over the radio first: the serial side must not push its route out */
+    CHECK_EQ(rnc_node_add_destination(c.node, &c.id, "reticulum_c.bench.first", NULL, 0, first), RNC_OK);
+    CHECK_EQ(rnc_node_announce(c.node, first, unix_of(&med), med.now_us / 1000u), RNC_OK);
+    world_run(&w, 60000);
+    for (i = 0; i < feed[pass]; i++) {
+      n = serial_announce_frame(&a, &med, i, frame, sizeof(frame), d);
+      CHECK(n > 0);
+      if (a.pl.in_len + n < sizeof(a.pl.in)) {
+        memcpy(a.pl.in + a.pl.in_len, frame, n);
+        a.pl.in_len += n;
+      }
+      for (j = 0; j < spacing_s[pass]; j++)
+        world_run(&w, 1000);
+    }
+    /* a quiet minute at most, then one more node announces over the radio */
+    world_run(&w, 60000);
+    a.pl.out_len = 0;
+    CHECK_EQ(rnc_node_add_destination(c.node, &c.id, "reticulum_c.bench.probe", NULL, 0, dest), RNC_OK);
+    CHECK_EQ(rnc_node_announce(c.node, dest, unix_of(&med), med.now_us / 1000u), RNC_OK);
+    world_run(&w, 90000);
+    fn = unescape_hdlc(a.pl.out, a.pl.out_len, flat);
+    if (!has16(flat, fn, dest))
+      fprintf(stderr, "after %u announces from the host, %u s apart, the radio announce of a new destination was not repeated\n",
+              feed[pass], spacing_s[pass]);
+    CHECK(has16(flat, fn, dest));
+    rnc_requester_free(c.req);
+    rnc_node_free(c.node);
+    rnc_mcu_app_free(a.app);
+  }
+  g_client_clock_offset = 2000;
+}
+
 /* the LoRa interface being down must not stop the application from starting, and a radio that
  * comes up later announces */
 static void test_radio_comes_up_later(void) {
@@ -569,6 +738,8 @@ int main(void) {
   test_leaf_network();
   test_lossy_channel();
   test_gateway_vs_leaf();
+  test_host_announce_through_gateway();
+  test_gateway_under_serial_feed();
   test_radio_comes_up_later();
   if (failures) {
     fprintf(stderr, "test_radio_app: %d failure(s)\n", failures);
