@@ -565,6 +565,13 @@ the reference's pty mode.
   does by default, and the daemon carries on with the others; with the option
   set the daemon exits. Before, any such interface stopped the daemon. A TCP
   client that cannot reach its peer was never affected: it keeps retrying.
+- `enabled` and `interface_enabled` on an interface are the same key, as in the
+  reference (`enabled = yes` or `interface_enabled = yes`; a value that is not a
+  boolean is rejected). Before, only `enabled` was read on a normal interface and
+  `interface_enabled` was refused, so a configuration copied from the reference
+  failed `--check`. One difference remains: the reference leaves an interface
+  disabled unless one of the two keys is true, while here an interface with
+  neither key is enabled.
 
 Not done: `link_mtu_discovery`. The reference signals the next hop's hardware MTU
 when it opens a link and so can use packets larger than 500 bytes on TCP; links

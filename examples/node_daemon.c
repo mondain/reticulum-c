@@ -380,7 +380,8 @@ static int interface_key(interface_config *f, const char *key,
     if (d >= 0)
       return d;
   }
-  if (!strcmp(key, "enabled")) {
+  /* the reference accepts either spelling on any interface */
+  if (!strcmp(key, "enabled") || !strcmp(key, "interface_enabled")) {
     if (!boolean(value, &b))
       return 0;
     f->enabled = b;
