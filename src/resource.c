@@ -602,7 +602,7 @@ static rnc_result resource_send_prepared(rnc_resource *r, const void *data,
     head[2] = (uint8_t)o->metadata_size;
     memcpy(head + 3, o->metadata, o->metadata_size);
   }
-  if (size && !source)
+  if (size && !source && data)
     memcpy(r->data + prefix, data, size);
   r->outgoing = 1;
   r->compress = o->compress;

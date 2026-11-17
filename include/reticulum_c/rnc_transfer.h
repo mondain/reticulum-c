@@ -18,8 +18,9 @@ extern "C" {
 /* Largest file: the Resource limit (16 MiB) less room for the metadata. */
 #define RNC_TRANSFER_MAX_SIZE (16u * 1024u * 1024u - 4096u)
 #define RNC_TRANSFER_DEFAULT_LIMIT RNC_TRANSFER_MAX_SIZE
-/* Largest file moved through the streaming calls below, which hold one 1 MiB segment of it in memory at a time. */
-#define RNC_TRANSFER_STREAM_MAX_SIZE (UINT64_C(1) << 40)
+/* Largest file moved through the streaming calls below, which hold one 1 MiB segment of it in memory at a time:
+ * 1 TiB, or 2 GiB less one byte on a target whose size_t has 32 bits. */
+#define RNC_TRANSFER_STREAM_MAX_SIZE (sizeof(size_t) > 4 ? (UINT64_C(1) << 40) : UINT64_C(0x7fffffff))
 
 /* Streamed files, for sizes that should not be held in memory (the calls without "stream" in their name keep a
  * whole file in memory and stop at RNC_TRANSFER_MAX_SIZE). The Resource protocol moves a large file as
