@@ -1207,7 +1207,9 @@ mcu/README.md).
 Evidence: unit tests of the framer, every command and the failure cases; this project's
 host RNode adapter over a pseudo terminal against the module with a simulated radio and
 a simulated peer (detect, configuration, announce out, announce in with signal figures).
-A script for the unmodified reference `RNodeInterface` exists but has not been run. On
+A script for the unmodified reference `RNodeInterface` exists but has not been run over USB; on 2026-11-17
+the reference configured a T-Echo through a Bluetooth bridge once its readback wait was lengthened (see
+`mcu/README.md`). On
 2026-11-14 a T-Echo in rnode mode, driven over USB by the same host adapter, exchanged
 announces both ways over the air with a T-Beam Supreme running this project's gateway
 firmware (915 MHz, 125 kHz, SF8, 0 dBm, close range; RSSI about -31 dBm, SNR 12 to 14 dB).

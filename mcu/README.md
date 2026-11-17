@@ -258,9 +258,26 @@ running this firmware in rnode mode was driven over USB by that host adapter (91
 - announces transmitted by the Supreme arrived at the host through the T-Echo as valid
   announces (two of 167 bytes) with RSSI -31 dBm and SNR 12.75 and 14.25 dB.
 
-NOT verified over USB: anything with the unmodified reference RNodeInterface or rnsd, and Sideband (its
-Bluetooth session is recorded below). A script for the reference, mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and
-has not been run. Also not verified: a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,
+Reference RNodeInterface (RNS 1.5.5), T-Echo, 2026-11-17: from a Linux PC, a pseudo terminal bridged
+to the T-Echo's Bluetooth UART (a script written for the test, not part of the project) was given to the
+unmodified reference as an RNodeInterface port (915 MHz, 125 kHz, SF8, CR 4/5, 0 dBm). The T-Echo answered
+detect, firmware 1.74, platform and MCU, and echoed the frequency, bandwidth, transmit power, spreading
+factor, coding rate and radio state it was given, correctly. With the reference's default settings the
+interface was refused ("Bandwidth mismatch" and the like) because the reference checks the readback 0.25
+seconds after configuring a serial port and the answer, through the bridge and Bluetooth, arrived about
+0.26 seconds after the command; the reference waits 1 second when it drives Bluetooth itself. With that one
+wait lengthened to 1 second the interface came online and sent a 167 byte announce (the reference's
+counter shows 167 bytes written to the T-Echo; whether the T-Echo then transmitted it was not read from
+its screen). This project's host node (reticulum-c-node, RNodeInterface) also configured the T-Echo
+through the same bridge and received the Supreme's announce over LoRa, delivered over Bluetooth; after
+announces sent through it by that node the T-Echo's screen read TX 7, RX 2, SNR 12.5 dB, link Bluetooth,
+and the Supreme's read RX 7. NOT verified: the reference's own Bluetooth mode, the
+reference over USB, anything received through the reference, rnsd, and that the Supreme forwards what the
+T-Echo sends (a plain announce sent through the T-Echo did not appear on the Supreme's serial side in 9
+minutes; the cause is not established).
+
+NOT verified over USB: rnsd, and Sideband (its Bluetooth session is recorded above). A script for the
+reference, mcu/tests/mcu_rnode_reference.sh, exists but needs pyserial and has not been run over USB. Also not verified: a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,
 which are not implemented), range, sustained load, and the flow-control path with a real
 host. A host program that opens the Supreme's USB port resets it (ESP32-S3 USB serial),
 which is a property of that board, not of rnode mode. Other boards build only.
