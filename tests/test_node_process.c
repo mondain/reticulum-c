@@ -5711,6 +5711,14 @@ static void interface_mtu(const char *exe) {
  * which step it was in, kills the two processes the test started, and fails. */
 static volatile const char *i2p_stage = "starting";
 static volatile pid_t i2p_router_pid, i2p_daemon_pid;
+/* a CHECK that fails leaves through exit(): take the router and the daemon with us, or whoever reads our output
+ * (ctest) waits for them until its own timeout */
+static void i2p_cleanup(void) {
+  if (i2p_daemon_pid > 0)
+    kill(i2p_daemon_pid, SIGKILL);
+  if (i2p_router_pid > 0)
+    kill(i2p_router_pid, SIGKILL);
+}
 static void i2p_stuck(int sig) {
   static const char head[] = "node I2P test stuck at: ";
   const char *stage = (const char *)i2p_stage;
@@ -5772,6 +5780,7 @@ static void i2p_daemon(const char *exe, const char *fake) {
   int fd;
   pid_t p, router;
   signal(SIGALRM, i2p_stuck);
+  atexit(i2p_cleanup);
   alarm(45);
   CHECK(mkdtemp(dir));
   CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
@@ -5807,13 +5816,14 @@ static void i2p_daemon(const char *exe, const char *fake) {
   for (tries = 0; tries < 100; ++tries) {
     struct timespec t = {0, 100000000};
     admin_command(admin, "STATUS", reply, sizeof(reply));
-    if (strstr(reply, "i2p=" V0_B32))
+    /* the controller and one dialler per peer arrive one after the other; the idle acceptor is not a peer */
+    if (strstr(reply, "i2p=" V0_B32) && count_of(reply, "interface id=") == 3)
       break;
     nanosleep(&t, NULL);
   }
+  if (tries == 100)
+    fprintf(stderr, "node I2P test: the status never showed the address with three interfaces:\n%s\n", reply);
   CHECK(tries < 100);
-  /* the controller and one dialler per peer; the idle acceptor is not a peer */
-  CHECK(count_of(reply, "interface id=") == 3);
   /* the stored key was used, and no key of the new name appeared */
   CHECK(count_of(reply, "online=1") >= 1);
   for (i = 0; i < 16; ++i) {
