@@ -28,7 +28,7 @@ typedef struct pair {
     rnc_resource *tx, *rx;
     rng ar, br, rr;
     unsigned txcomplete, rxcomplete, failed, parts, hmus;
-    int drop_part, drop_proof, drop_adv, reverse, duplicate_hmu, no_tick;
+    int drop_part, drop_proof, drop_adv, reverse, duplicate_hmu, no_tick, tolerate_errors;
     uint64_t now, step;
     size_t peak_window, peak_max, low_max;
     rnc_packet stash[2][160];
@@ -102,7 +102,7 @@ static void dispatch(pair *p, rnc_link *link, rnc_resource *resource, rnc_link_e
         r = rnc_resource_accept(resource, e->data, e->size, p->now);
     else
         r = rnc_resource_input(resource, e, p->now);
-    CHECK(r == RNC_OK || r == RNC_AGAIN);
+    CHECK(r == RNC_OK || r == RNC_AGAIN || p->tolerate_errors);
 }
 #define PENDING 160u
 static void transfer(pair *p, rnc_link *from, rnc_link *to, rnc_resource *receiver, int forward) {
@@ -420,6 +420,244 @@ static void timeout_follows_rate(void) {
     CHECK(rnc_resource_window(p.rx) < before);
     finish(&p);
 }
+/* ---- streamed transfers: a source for the sender, a sink for the receiver, one segment in memory at a time ---- */
+typedef struct stream_check {
+    uint64_t total, next_write, reads_end;
+    int compressible, begun, fail_write_at_segment, fail_read_at, begin_error;
+    uint8_t meta[16];
+    size_t meta_size, segments_seen;
+    uint64_t last_read_offset;
+    int reads_in_order;
+} stream_check;
+static uint8_t pattern_byte(const stream_check *c, uint64_t at) {
+    if (c->compressible)
+        return (uint8_t)("streamed resource data, repeated "[at % 33]);
+    {
+        uint64_t x = at * 0x9e3779b97f4a7c15ull;
+        x ^= x >> 29;
+        return (uint8_t)(x * 0xbf58476d1ce4e5b9ull >> 56);
+    }
+}
+static rnc_result stream_source(void *context, uint64_t offset, void *out, size_t size) {
+    stream_check *c = context;
+    size_t i;
+    if (c->fail_read_at && offset >= (uint64_t)c->fail_read_at)
+        return RNC_STATE;
+    if (offset < c->last_read_offset && offset != 0)
+        c->reads_in_order = 0;
+    c->last_read_offset = offset;
+    for (i = 0; i < size; i++)
+        ((uint8_t *)out)[i] = pattern_byte(c, offset + i);
+    return RNC_OK;
+}
+static rnc_result stream_begin(void *context, const uint8_t *metadata, size_t metadata_size, uint64_t total) {
+    stream_check *c = context;
+    if (c->begin_error)
+        return RNC_STATE;
+    CHECK(!c->begun && total == c->total);
+    if (metadata_size) {
+        CHECK(metadata_size == c->meta_size && !memcmp(metadata, c->meta, metadata_size));
+    } else
+        CHECK(!c->meta_size && !metadata);
+    c->begun = 1;
+    return RNC_OK;
+}
+static rnc_result stream_write(void *context, uint64_t offset, const void *data, size_t size) {
+    stream_check *c = context;
+    size_t i;
+    CHECK(c->begun && offset == c->next_write); /* in order, with no gap and no overlap */
+    if (c->fail_write_at_segment && ++c->segments_seen == (size_t)c->fail_write_at_segment)
+        return RNC_NO_SPACE;
+    for (i = 0; i < size; i++)
+        if (((const uint8_t *)data)[i] != pattern_byte(c, offset + i)) {
+            fprintf(stderr, "stream data differs at %llu\n", (unsigned long long)(offset + i));
+            CHECK(0);
+        }
+    c->next_write += size;
+    return RNC_OK;
+}
+static void init_stream(pair *p, uint64_t limit, int streaming_receiver, stream_check *c) {
+    rnc_resource_sink sink = {stream_begin, stream_write, c};
+    init(p, 1000);
+    rnc_resource_free(p->tx);
+    rnc_resource_free(p->rx);
+    p->tx = rnc_resource_new_streaming(p->a, limit, random_bytes, &p->ar);
+    p->rx = streaming_receiver ? rnc_resource_new_streaming(p->b, limit, random_bytes, &p->br)
+                               : rnc_resource_new(p->b, (size_t)limit, random_bytes, &p->br);
+    CHECK(p->tx && p->rx);
+    if (streaming_receiver)
+        CHECK(rnc_resource_set_sink(p->rx, &sink) == RNC_OK);
+}
+static void stream_case(uint64_t length, int compressible, int with_meta, unsigned steps) {
+    pair p;
+    stream_check c = {0};
+    uint8_t meta[] = {0x81, 0xa4, 'n', 'a', 'm', 'e', 0xa3, 'a', 'b', 'c'}, out[32];
+    rnc_resource_options o = {0};
+    size_t n;
+    c.total = length;
+    c.compressible = compressible;
+    c.reads_in_order = 1;
+    if (with_meta) {
+        memcpy(c.meta, meta, sizeof(meta));
+        c.meta_size = sizeof(meta);
+        o.metadata = meta;
+        o.metadata_size = sizeof(meta);
+    }
+    o.compress = compressible;
+    init_stream(&p, length + 4096u, 1, &c);
+    {
+        rnc_result sent = rnc_resource_send_stream(p.tx, stream_source, &c, length, &o, p.now);
+        if (sent == RNC_UNSUPPORTED && o.compress) { /* a build without bzip2 sends it plain */
+            o.compress = 0;
+            sent = rnc_resource_send_stream(p.tx, stream_source, &c, length, &o, p.now);
+        }
+        CHECK(sent == RNC_OK);
+    }
+    run(&p, steps);
+    CHECK(c.next_write == length && c.begun);
+    CHECK(c.reads_in_order);
+    CHECK(rnc_resource_data_size(p.rx) == length);
+    CHECK(rnc_resource_read(p.rx, out, sizeof(out), &n) == RNC_UNSUPPORTED); /* it went to the sink */
+    if (with_meta) {
+        CHECK(rnc_resource_metadata(p.rx, out, sizeof(out), &n) == RNC_OK && n == sizeof(meta) &&
+              !memcmp(out, meta, n));
+    }
+    finish(&p);
+}
+/* several segments, with and without metadata, incompressible and compressible */
+static void stream_test(void) {
+    stream_case(3u * RNC_RESOURCE_SEGMENT_MAX + 12345u, 0, 1, 200000);
+    stream_case(2u * RNC_RESOURCE_SEGMENT_MAX + 77u, 1, 0, 200000);
+    stream_case(5000, 0, 1, 20000); /* a single segment */
+    stream_case(0, 0, 0, 20000);    /* nothing at all */
+}
+/* a streaming sender to a receiver that keeps the data in memory, and the other way round */
+static void stream_mixed_test(void) {
+    pair p;
+    stream_check c = {0};
+    size_t length = RNC_RESOURCE_SEGMENT_MAX + 5000u, n, i;
+    uint8_t *copy = malloc(length);
+    CHECK(copy);
+    c.total = length;
+    c.reads_in_order = 1;
+    init_stream(&p, length + 4096u, 0, &c); /* streaming sender, in-memory receiver */
+    CHECK(rnc_resource_send_stream(p.tx, stream_source, &c, length, NULL, p.now) == RNC_OK);
+    run(&p, 100000);
+    CHECK(rnc_resource_read(p.rx, copy, length, &n) == RNC_OK && n == length);
+    for (i = 0; i < length; i++)
+        CHECK(copy[i] == pattern_byte(&c, i));
+    finish(&p);
+    /* in-memory sender, streaming receiver */
+    {
+        stream_check d = {0};
+        uint8_t *data = malloc(length);
+        CHECK(data);
+        d.total = length;
+        d.reads_in_order = 1;
+        for (i = 0; i < length; i++)
+            data[i] = pattern_byte(&d, i);
+        init_stream(&p, length + 4096u, 1, &d);
+        CHECK(rnc_resource_send(p.tx, data, length, NULL, p.now) == RNC_OK);
+        run(&p, 100000);
+        CHECK(d.next_write == length);
+        finish(&p);
+        free(data);
+    }
+    free(copy);
+}
+/* a sink that refuses fails the transfer on both sides; so does a source that fails, and a begin that refuses */
+static void stream_failure_test(void) {
+    pair p;
+    stream_check c = {0};
+    unsigned i;
+    c.total = 3u * RNC_RESOURCE_SEGMENT_MAX;
+    c.reads_in_order = 1;
+    c.fail_write_at_segment = 2;
+    init_stream(&p, c.total + 4096u, 1, &c);
+    p.tolerate_errors = 1;
+    CHECK(rnc_resource_send_stream(p.tx, stream_source, &c, c.total, NULL, p.now) == RNC_OK);
+    for (i = 0; i < 60000 && !p.failed; i++) {
+        CHECK(rnc_resource_pump(p.tx, p.now) == RNC_OK);
+        CHECK(rnc_resource_pump(p.rx, p.now) == RNC_OK);
+        transfer(&p, p.a, p.b, p.tx, 1);
+        transfer(&p, p.b, p.a, p.rx, 0);
+        events(&p, p.tx, 1);
+        events(&p, p.rx, 0);
+        p.now += 10;
+        CHECK(rnc_resource_tick(p.tx, p.now) == RNC_OK);
+        CHECK(rnc_resource_tick(p.rx, p.now) == RNC_OK);
+    }
+    CHECK(p.failed && !p.rxcomplete);
+    CHECK(c.next_write == RNC_RESOURCE_SEGMENT_MAX); /* the first segment arrived and was written, the second was refused */
+    finish(&p);
+    memset(&c, 0, sizeof(c));
+    c.total = 3u * RNC_RESOURCE_SEGMENT_MAX;
+    c.reads_in_order = 1;
+    c.fail_read_at = (int)RNC_RESOURCE_SEGMENT_MAX + 10;
+    init_stream(&p, c.total + 4096u, 1, &c);
+    p.tolerate_errors = 1;
+    CHECK(rnc_resource_send_stream(p.tx, stream_source, &c, c.total, NULL, p.now) == RNC_OK);
+    for (i = 0; i < 60000 && !p.failed; i++) {
+        rnc_result r = rnc_resource_pump(p.tx, p.now);
+        (void)r;
+        transfer(&p, p.a, p.b, p.tx, 1);
+        transfer(&p, p.b, p.a, p.rx, 0);
+        events(&p, p.tx, 1);
+        events(&p, p.rx, 0);
+        p.now += 10;
+        (void)rnc_resource_tick(p.tx, p.now);
+        (void)rnc_resource_tick(p.rx, p.now);
+    }
+    CHECK(p.failed && !p.txcomplete);
+    finish(&p);
+    /* a begin that refuses */
+    memset(&c, 0, sizeof(c));
+    c.total = 5000;
+    c.reads_in_order = 1;
+    c.begin_error = 1;
+    init_stream(&p, 9000, 1, &c);
+    p.tolerate_errors = 1;
+    CHECK(rnc_resource_send_stream(p.tx, stream_source, &c, c.total, NULL, p.now) == RNC_OK);
+    for (i = 0; i < 20000 && !p.failed; i++) {
+        (void)rnc_resource_pump(p.tx, p.now);
+        (void)rnc_resource_pump(p.rx, p.now);
+        transfer(&p, p.a, p.b, p.tx, 1);
+        transfer(&p, p.b, p.a, p.rx, 0);
+        events(&p, p.tx, 1);
+        events(&p, p.rx, 0);
+        p.now += 10;
+        (void)rnc_resource_tick(p.tx, p.now);
+        (void)rnc_resource_tick(p.rx, p.now);
+    }
+    CHECK(p.failed && c.next_write == 0);
+    finish(&p);
+}
+/* beyond the old 16 MiB limit */
+static void stream_big_test(void) {
+    stream_case(20u * 1024u * 1024u + 4321u, 0, 1, 2000000);
+}
+/* the argument checks */
+static void stream_arguments_test(void) {
+    pair p;
+    stream_check c = {0};
+    rnc_resource_sink sink = {NULL, stream_write, &c}, bad = {NULL, NULL, NULL};
+    init(&p, 1000);
+    /* a plain resource refuses streaming calls; the plain limit is unchanged */
+    CHECK(rnc_resource_send_stream(p.tx, stream_source, &c, 10, NULL, p.now) == RNC_INVALID);
+    CHECK(rnc_resource_set_sink(p.rx, &sink) == RNC_INVALID);
+    CHECK(rnc_resource_new(p.a, 16u * 1024u * 1024u + 1u, random_bytes, &p.ar) == NULL);
+    CHECK(rnc_resource_new_streaming(p.a, ((uint64_t)1 << 40) + (1 << 25), random_bytes, &p.ar) == NULL);
+    {
+        rnc_resource *s = rnc_resource_new_streaming(p.a, (uint64_t)100 << 20, random_bytes, &p.ar);
+        CHECK(s);
+        CHECK(rnc_resource_set_sink(s, &bad) == RNC_INVALID);
+        CHECK(rnc_resource_set_sink(s, &sink) == RNC_OK && rnc_resource_set_sink(s, NULL) == RNC_OK);
+        CHECK(rnc_resource_send_stream(s, NULL, &c, 10, NULL, p.now) == RNC_INVALID);
+        CHECK(rnc_resource_send_stream(s, stream_source, &c, (uint64_t)200 << 20, NULL, p.now) == RNC_INVALID);
+        rnc_resource_free(s);
+    }
+    finish(&p);
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     if (!strcmp(argv[1], "transfer"))
@@ -444,6 +682,16 @@ int main(int argc, char **argv) {
         window_very_slow();
     else if (!strcmp(argv[1], "window_shrinks"))
         window_shrinks();
+    else if (!strcmp(argv[1], "stream"))
+        stream_test();
+    else if (!strcmp(argv[1], "stream_mixed"))
+        stream_mixed_test();
+    else if (!strcmp(argv[1], "stream_failure"))
+        stream_failure_test();
+    else if (!strcmp(argv[1], "stream_big"))
+        stream_big_test();
+    else if (!strcmp(argv[1], "stream_arguments"))
+        stream_arguments_test();
     else
         CHECK(0);
     return 0;

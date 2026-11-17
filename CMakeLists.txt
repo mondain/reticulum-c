@@ -190,8 +190,12 @@ if(BUILD_TESTING)
     endforeach()
     add_executable(test_transfer tests/test_transfer.c)
     target_link_libraries(test_transfer PRIVATE reticulum_c)
-    foreach(case send large denied fetch refused unavailable no_compress arguments large_mtu)
+    foreach(case send large denied fetch refused unavailable no_compress arguments large_mtu stream_send stream_send_small stream_fetch stream_memory_client stream_failure stream_fetch_refused stream_arguments)
         add_test(NAME reticulum_transfer_${case} COMMAND test_transfer ${case})
+    endforeach()
+    foreach(case stream_send_big stream_fetch_big)
+        add_test(NAME reticulum_transfer_${case} COMMAND test_transfer ${case})
+        set_tests_properties(reticulum_transfer_${case} PROPERTIES TIMEOUT 300)
     endforeach()
     add_executable(test_requester tests/test_requester.c)
     target_link_libraries(test_requester PRIVATE reticulum_c)
@@ -237,12 +241,14 @@ endif()
     add_test(NAME reticulum_stream COMMAND test_stream)
     add_executable(test_resource tests/test_resource.c)
     target_link_libraries(test_resource PRIVATE reticulum_c)
-    foreach(case transfer segments invalid cancel quota window_fast window_slow window_very_slow window_shrinks timeout_rate)
+    foreach(case transfer segments invalid cancel quota window_fast window_slow window_very_slow window_shrinks timeout_rate stream stream_mixed stream_failure stream_arguments)
         add_test(NAME reticulum_resource_${case} COMMAND test_resource ${case})
     endforeach()
     if(RNC_COMPRESSION)
         add_test(NAME reticulum_resource_compression COMMAND test_resource compression)
     endif()
+    add_test(NAME reticulum_resource_stream_big COMMAND test_resource stream_big)
+    set_tests_properties(reticulum_resource_stream_big PROPERTIES TIMEOUT 300)
     # The fixture includes resource.c to inject allocation failures and inspect
     # private transfer state; all remaining modules come from the SDK.
     add_executable(test_resource_internal tests/test_resource_internal.c)
@@ -543,6 +549,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             add_test(NAME reticulum_node_process_disc_list COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> disc_list $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_disc_list PROPERTIES LABELS network TIMEOUT 60)
+            # it measures peak memory, which the sanitizers inflate many times over, so it runs in normal builds only
+            if(NOT RNC_SANITIZERS AND NOT APPLE) # peak memory is counted differently on macOS, whose runners are slow too
+                add_test(NAME reticulum_node_process_cp_big COMMAND test_node_process
+                    $<TARGET_FILE:reticulum-c-node> cp_big $<TARGET_FILE:reticulum-c-cp>)
+                set_tests_properties(reticulum_node_process_cp_big PROPERTIES LABELS network TIMEOUT 600)
+            endif()
             add_test(NAME reticulum_node_process_cli_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cli_tools $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
@@ -587,6 +599,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_rnid_announce_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_cp_big_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> cp_big_ref
+                    $<TARGET_FILE:reticulum-c-cp> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_cp_big_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 900)
                 add_test(NAME reticulum_rnodeconf_rns COMMAND ${CMAKE_COMMAND} -E env TZ=UTC
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_rnodeconf> $<TARGET_FILE:reticulum-c-rnodeconf> ref

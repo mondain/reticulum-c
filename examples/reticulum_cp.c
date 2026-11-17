@@ -98,64 +98,121 @@ static int safe_name(const uint8_t *name, size_t n, char *out, size_t cap) {
   out[n] = 0;
   return 1;
 }
-/* Writes data to dir/name; an existing file is replaced with -O and otherwise
- * kept, saving as name.1, name.2 and so on. */
-static int save_file(const char *dir, const char *name, const uint8_t *data,
-                     size_t size, int overwrite, char *saved, size_t cap) {
-  unsigned counter = 0;
-  int fd;
-  size_t written = 0;
-  if (overwrite) {
-    if (snprintf(saved, cap, "%s/%s", dir, name) >= (int)cap)
-      return 0;
-    (void)unlink(saved);
-  }
-  for (;;) {
-    if (counter) {
-      if (snprintf(saved, cap, "%s/%s.%u", dir, name, counter) >= (int)cap)
-        return 0;
-    } else if (snprintf(saved, cap, "%s/%s", dir, name) >= (int)cap)
-      return 0;
-    fd = open(saved, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd >= 0)
-      break;
-    if (errno != EEXIST || ++counter > 100000u)
-      return 0;
-  }
-  while (written < size) {
-    ssize_t n = write(fd, data + written, size - written);
-    if (n <= 0) {
-      close(fd);
-      (void)unlink(saved);
-      return 0;
-    }
-    written += (size_t)n;
-  }
-  return close(fd) == 0;
-}
-static rnc_result on_received(void *context, const uint8_t *identity_hash,
-                              const uint8_t *name, size_t name_size,
-                              const uint8_t *data, size_t size) {
-  char base[256], saved[PATH_MAX];
-  (void)context;
-  if (!safe_name(name, name_size, base, sizeof(base))) {
-    fprintf(stderr, "Ignoring a file with an invalid name\n");
+/* Incoming files are written as they arrive, to a temporary file in the save directory that is moved to its
+ * final name only when the whole file has come in, so a transfer that fails leaves nothing behind and a file of
+ * any size never sits in memory. */
+typedef struct incoming {
+  int fd, listening;
+  char temp[PATH_MAX], name[256];
+  uint8_t from[16];
+  int has_from;
+} incoming;
+static int save_failed;
+static rnc_result rx_open(void *context, const uint8_t *identity_hash, const uint8_t *name, size_t name_size,
+                          uint64_t size, void **file) {
+  incoming *in;
+  (void)size;
+  in = calloc(1, sizeof(*in));
+  if (!in)
+    return RNC_NO_SPACE;
+  in->listening = context != NULL;
+  if (!safe_name(name, name_size, in->name, sizeof(in->name))) {
+    fprintf(stderr, in->listening ? "Ignoring a file with an invalid name\n" : "The remote sent an invalid file name\n");
+    free(in);
     return RNC_INVALID;
   }
-  if (!save_file(opt.saved_dir, base, data, size, opt.overwrite, saved,
-                 sizeof(saved))) {
-    fprintf(stderr, "Could not save %s: %s\n", base, strerror(errno));
+  if (snprintf(in->temp, sizeof(in->temp), "%s/.rncp-XXXXXX", opt.saved_dir) >= (int)sizeof(in->temp) ||
+      (in->fd = mkstemp(in->temp)) < 0) {
+    fprintf(stderr, "Could not save %s: %s\n", in->name, strerror(errno));
+    free(in);
     return RNC_STATE;
   }
   if (identity_hash) {
-    fputs("Received from <", stdout);
-    print_hex(identity_hash, 16);
-    fputs(">\n", stdout);
+    in->has_from = 1;
+    memcpy(in->from, identity_hash, 16);
   }
-  printf("Saved received file to %s\n", saved);
-  fflush(stdout);
+  *file = in;
   return RNC_OK;
 }
+static rnc_result rx_write(void *file, uint64_t offset, const void *data, size_t size) {
+  incoming *in = file;
+  const uint8_t *p = data;
+  while (size) {
+    ssize_t n = pwrite(in->fd, p, size, (off_t)offset);
+    if (n <= 0) {
+      fprintf(stderr, "Could not write %s: %s\n", in->name, strerror(errno));
+      return RNC_STATE;
+    }
+    p += n;
+    offset += (uint64_t)n;
+    size -= (size_t)n;
+  }
+  return RNC_OK;
+}
+/* Gives the finished temporary file its name: replacing an existing file with -O, otherwise the first of name,
+ * name.1, name.2 ... that is free (linked, so that two receivers never take the same name). */
+static int place(const incoming *in, char *saved, size_t cap) {
+  unsigned counter = 0;
+  if (opt.overwrite)
+    return snprintf(saved, cap, "%s/%s", opt.saved_dir, in->name) < (int)cap && !rename(in->temp, saved);
+  for (; counter <= 100000u; ++counter) {
+    if ((counter ? snprintf(saved, cap, "%s/%s.%u", opt.saved_dir, in->name, counter)
+                 : snprintf(saved, cap, "%s/%s", opt.saved_dir, in->name)) >= (int)cap)
+      return 0;
+    if (!link(in->temp, saved)) {
+      (void)unlink(in->temp);
+      return 1;
+    }
+    if (errno == EEXIST)
+      continue;
+    /* no hard links on this filesystem: take the name if it is free */
+    if (access(saved, F_OK) != 0 && !rename(in->temp, saved))
+      return 1;
+    if (access(saved, F_OK) != 0)
+      return 0;
+  }
+  return 0;
+}
+static void rx_close(void *file, int complete) {
+  incoming *in = file;
+  char saved[PATH_MAX];
+  int ok = close(in->fd) == 0;
+  if (!complete || !ok) {
+    (void)unlink(in->temp);
+    if (complete)
+      save_failed = 1;
+  } else if (!place(in, saved, sizeof(saved))) {
+    fprintf(stderr, "Could not save %s: %s\n", in->name, strerror(errno));
+    (void)unlink(in->temp);
+    save_failed = 1;
+  } else {
+    if (in->listening && in->has_from) {
+      fputs("Received from <", stdout);
+      print_hex(in->from, 16);
+      fputs(">\n", stdout);
+    }
+    printf(in->listening ? "Saved received file to %s\n" : "Saved fetched file to %s\n", saved);
+    fflush(stdout);
+  }
+  free(in);
+}
+static const rnc_transfer_stream rx_stream = {rx_open, rx_write, rx_close};
+
+/* A file leaving: read where the transfer layer asks, a piece at a time */
+static rnc_result file_read(void *context, uint64_t offset, void *out, size_t size) {
+  int fd = (int)(intptr_t)context;
+  uint8_t *p = out;
+  while (size) {
+    ssize_t n = pread(fd, p, size, (off_t)offset);
+    if (n <= 0)
+      return RNC_STATE; /* shorter than it was: the file changed under us */
+    p += n;
+    offset += (uint64_t)n;
+    size -= (size_t)n;
+  }
+  return RNC_OK;
+}
+static void file_release(void *context) { (void)close((int)(intptr_t)context); }
 /* Normalises a path without touching the filesystem: no "." or ".." parts. */
 static int normalise(const char *path, char *out, size_t cap) {
   char work[PATH_MAX], cwd[PATH_MAX], *part, *save = NULL;
@@ -205,15 +262,10 @@ static int within(const char *dir, const char *path) {
   size_t n = strlen(dir);
   return !strncmp(path, dir, n) && path[n] == '/';
 }
-static int on_fetch(void *context, const uint8_t *path, size_t path_size,
-                    const uint8_t *identity_hash, uint8_t **data, size_t *size,
-                    uint8_t name[RNC_TRANSFER_NAME_MAX], size_t *name_size) {
-  char requested[PATH_MAX], expanded[PATH_MAX], file[PATH_MAX], real[PATH_MAX],
-      jail_real[PATH_MAX], copy[PATH_MAX], *base;
+/* Which file a fetch names, with the jail and path rules; RNC_FETCH_FOUND fills `file` with the path to read. */
+static int resolve_fetch(const uint8_t *path, size_t path_size, char file[PATH_MAX]) {
+  char requested[PATH_MAX], expanded[PATH_MAX], real[PATH_MAX], jail_real[PATH_MAX];
   struct stat st;
-  FILE *f;
-  (void)context;
-  (void)identity_hash;
   if (path_size == 0 || path_size >= sizeof(requested))
     return RNC_FETCH_NOT_FOUND;
   memcpy(requested, path, path_size);
@@ -228,7 +280,7 @@ static int on_fetch(void *context, const uint8_t *path, size_t path_size,
       rel += jn + 1;
     if (snprintf(joined, sizeof(joined), "%s/%s", opt.jail_dir, rel) >=
             (int)sizeof(joined) ||
-        !normalise(joined, file, sizeof(file)) || !within(opt.jail_dir, file)) {
+        !normalise(joined, file, PATH_MAX) || !within(opt.jail_dir, file)) {
       fprintf(stderr, "Disallowing fetch request outside of the fetch jail\n");
       return RNC_FETCH_NOT_ALLOWED;
     }
@@ -239,33 +291,40 @@ static int on_fetch(void *context, const uint8_t *path, size_t path_size,
       return RNC_FETCH_NOT_ALLOWED;
     }
   } else if (!expand_home(requested, expanded, sizeof(expanded)) ||
-             !normalise(expanded, file, sizeof(file)))
+             !normalise(expanded, file, PATH_MAX))
     return RNC_FETCH_NOT_FOUND;
   if (stat(file, &st) || !S_ISREG(st.st_mode)) {
     printf("Client-requested file not found: %s\n", file);
     return RNC_FETCH_NOT_FOUND;
   }
-  if ((uintmax_t)st.st_size > RNC_TRANSFER_MAX_SIZE) {
-    fprintf(stderr, "Requested file is too large to send\n");
+  return RNC_FETCH_FOUND;
+}
+static int on_fetch(void *context, const uint8_t *path, size_t path_size,
+                    const uint8_t *identity_hash, rnc_transfer_source *source) {
+  char file[PATH_MAX], copy[PATH_MAX], *base;
+  struct stat st;
+  int found, fd;
+  (void)context;
+  (void)identity_hash;
+  found = resolve_fetch(path, path_size, file);
+  if (found != RNC_FETCH_FOUND)
+    return found;
+  fd = open(file, O_RDONLY);
+  if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode)) {
+    if (fd >= 0)
+      close(fd);
     return RNC_FETCH_NOT_FOUND;
   }
-  f = fopen(file, "rb");
-  *data = malloc(st.st_size ? (size_t)st.st_size : 1);
-  if (!f || !*data || fread(*data, 1, (size_t)st.st_size, f) != (size_t)st.st_size) {
-    if (f)
-      fclose(f);
-    free(*data);
-    *data = NULL;
-    return RNC_FETCH_NOT_FOUND;
-  }
-  fclose(f);
-  *size = (size_t)st.st_size;
+  source->size = (uint64_t)st.st_size;
+  source->read = file_read;
+  source->context = (void *)(intptr_t)fd;
+  source->release = file_release;
   snprintf(copy, sizeof(copy), "%s", file);
   base = basename(copy);
-  *name_size = strlen(base);
-  if (*name_size > RNC_TRANSFER_NAME_MAX)
-    *name_size = RNC_TRANSFER_NAME_MAX;
-  memcpy(name, base, *name_size);
+  source->name_size = strlen(base);
+  if (source->name_size > RNC_TRANSFER_NAME_MAX)
+    source->name_size = RNC_TRANSFER_NAME_MAX;
+  memcpy(source->name, base, source->name_size);
   printf("Sending file %s to client\n", file);
   fflush(stdout);
   return RNC_FETCH_FOUND;
@@ -321,10 +380,15 @@ static int pump(app *a) {
   while (rnc_host_poll(a->host, &event) == RNC_OK) {
     if (event.type != RNC_HOST_NODE || event.node.type != RNC_NODE_LOCAL)
       continue;
-    if (a->listener)
+    /* a burst of packets can fill a link's event queue: tick to drain it and offer the packet again */
+    if (a->listener && rnc_transfer_listener_input(a->listener, &event.node, unix_now, now) == RNC_NO_SPACE) {
+      (void)rnc_transfer_listener_tick(a->listener, unix_now, now);
       (void)rnc_transfer_listener_input(a->listener, &event.node, unix_now, now);
-    if (a->client)
+    }
+    if (a->client && rnc_transfer_client_input(a->client, &event.node, unix_now, now) == RNC_NO_SPACE) {
+      (void)rnc_transfer_client_tick(a->client, unix_now, now);
       (void)rnc_transfer_client_input(a->client, &event.node, unix_now, now);
+    }
   }
   now = monotonic_ms();
   if (a->listener)
@@ -378,9 +442,9 @@ static int listen_mode(rnc_identity *id, app *a) {
   if (rnc_node_add_destination(a->node, id, APP_NAME, NULL, 0, destination) !=
       RNC_OK)
     return 1;
-  opt.config.context = NULL;
-  opt.config.received = on_received;
-  opt.config.fetch = opt.allow_fetch ? on_fetch : NULL;
+  opt.config.stream = rx_stream;
+  opt.config.context = (void *)1; /* tells rx_open it is the listener */
+  opt.config.fetch_stream = opt.allow_fetch ? on_fetch : NULL;
   opt.config.allow_all = opt.no_auth;
   opt.config.no_compress = opt.no_compress;
   a->listener = rnc_transfer_listener_new(a->node, id, destination, &opt.config,
@@ -470,13 +534,10 @@ static void rate_text(double bits_per_second, char *out, size_t cap) {
 }
 static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
                       const char *send_path) {
-  uint8_t *data = NULL, *result_data = NULL;
-  size_t size = 0, capacity = RNC_TRANSFER_MAX_SIZE;
+  uint64_t size = 0, timeout = UINT64_C(86400000); /* the transfer layer's own timeouts end a stalled transfer */
   rnc_transfer_result r;
   rnc_result status;
-  uint64_t timeout = 120000u;
   int last_percent = -1, rc = 1;
-  char base[PATH_MAX], saved[PATH_MAX];
   a->client = rnc_transfer_client_new(a->node, 0, secure_random, NULL);
   if (a->client)
     rnc_transfer_client_set_compression(a->client, !opt.no_compress);
@@ -490,40 +551,34 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
   }
   if (send_path) {
     struct stat st;
-    FILE *f = fopen(send_path, "rb");
+    int fd = open(send_path, O_RDONLY);
     char copy[PATH_MAX], *name;
-    if (!f || fstat(fileno(f), &st) || !S_ISREG(st.st_mode) ||
-        (uintmax_t)st.st_size > RNC_TRANSFER_MAX_SIZE) {
-      fprintf(stderr, "Cannot send %s: not a readable file of at most %u bytes\n",
-              send_path, (unsigned)RNC_TRANSFER_MAX_SIZE);
-      if (f)
-        fclose(f);
+    rnc_transfer_source source;
+    if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode)) {
+      fprintf(stderr, "Cannot send %s: not a readable file\n", send_path);
+      if (fd >= 0)
+        close(fd);
       return 1;
     }
-    size = (size_t)st.st_size;
-    data = malloc(size ? size : 1);
-    if (!data || fread(data, 1, size, f) != size) {
-      fclose(f);
-      free(data);
-      return 1;
-    }
-    fclose(f);
+    size = (uint64_t)st.st_size;
     snprintf(copy, sizeof(copy), "%s", send_path);
     name = basename(copy);
-    status = rnc_transfer_send(a->client, destination, id, (const uint8_t *)name,
-                               strlen(name), data, size, 1, timeout,
-                               (uint64_t)time(NULL), monotonic_ms());
+    memset(&source, 0, sizeof(source));
+    source.size = size;
+    source.read = file_read;
+    source.context = (void *)(intptr_t)fd;
+    source.release = file_release; /* closes the file, also when the call below fails */
+    status = rnc_transfer_send_stream(a->client, destination, id, (const uint8_t *)name, strlen(name), &source, 1,
+                                      timeout, (uint64_t)time(NULL), monotonic_ms());
     if (status != RNC_OK) {
       fprintf(stderr, "Could not start the transfer (%d)\n", (int)status);
-      free(data);
       return 1;
     }
-    printf("Sending %s (%zu bytes)\n", name, size);
+    printf("Sending %s (%llu bytes)\n", name, (unsigned long long)size);
   } else {
-    status = rnc_transfer_fetch(a->client, destination, id,
-                                (const uint8_t *)opt.fetch_path,
-                                strlen(opt.fetch_path), 1, timeout,
-                                (uint64_t)time(NULL), monotonic_ms());
+    status = rnc_transfer_fetch_stream(a->client, destination, id, (const uint8_t *)opt.fetch_path,
+                                       strlen(opt.fetch_path), &rx_stream, NULL, 1, timeout, (uint64_t)time(NULL),
+                                       monotonic_ms());
     if (status != RNC_OK) {
       fprintf(stderr, "Could not start the fetch (%d)\n", (int)status);
       return 1;
@@ -531,11 +586,6 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
     printf("Fetching %s\n", opt.fetch_path);
   }
   fflush(stdout);
-  result_data = malloc(capacity);
-  if (!result_data) {
-    free(data);
-    return 1;
-  }
   while (!stopping) {
     double progress;
     if (!pump(a))
@@ -555,21 +605,15 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
         last_percent = percent;
       }
     }
-    if (rnc_transfer_client_poll(a->client, &r, result_data, capacity) ==
-        RNC_OK) {
+    if (rnc_transfer_client_poll(a->client, &r, NULL, 0) == RNC_OK) {
       if (r.status == RNC_TRANSFER_DONE) {
         if (send_path) {
           puts("Transfer complete");
           rc = 0;
-        } else if (!safe_name(r.name, r.name_size, base, sizeof(base))) {
-          fprintf(stderr, "The remote sent an invalid file name\n");
-        } else if (!save_file(opt.saved_dir, base, result_data, r.size,
-                              opt.overwrite, saved, sizeof(saved))) {
-          fprintf(stderr, "Could not save %s: %s\n", base, strerror(errno));
-        } else {
-          printf("Saved fetched file to %s\n", saved);
-          rc = 0;
-        }
+        } else if (!save_failed)
+          rc = 0; /* rx_close has told where the file went */
+        else
+          fprintf(stderr, "The fetched file could not be saved\n");
       } else if (r.status == RNC_TRANSFER_NOT_FOUND)
         fprintf(stderr, "The remote does not have the file %s\n",
                 opt.fetch_path ? opt.fetch_path : "");
@@ -582,9 +626,6 @@ static int run_client(rnc_identity *id, app *a, const uint8_t destination[16],
     }
   }
   flush_out(a);
-  free(data);
-  OPENSSL_cleanse(result_data, capacity);
-  free(result_data);
   return rc;
 }
 

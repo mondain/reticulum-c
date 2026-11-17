@@ -24,6 +24,10 @@ static rnc_result rng(void *ctx, uint8_t *p, size_t n) {
 /* Interface MTU for the next setup() and the largest packet on the wire. */
 static size_t iface_mtu = 500, max_wire, wire_total;
 static int listener_no_compress;
+static const rnc_transfer_stream listener_stream_fns;
+static int on_fetch_stream(void *ctx, const uint8_t *path, size_t path_size, const uint8_t *identity_hash,
+                           rnc_transfer_source *src);
+static int listener_streams; /* the next setup() makes a listener that streams files in and serves them from a source */
 typedef struct net {
   rnc_identity client_id, server_id;
   rnc_node *client, *server;
@@ -95,27 +99,38 @@ static void pump(net *n, unsigned steps) {
   unsigned i;
   for (i = 0; i < steps; i++) {
     rnc_node_event e;
+    unsigned rounds, k;
+    int moved;
     n->now += 10;
     CHECK(rnc_node_tick(n->client, UNIX, n->now) == RNC_OK);
     CHECK(rnc_node_tick(n->server, UNIX, n->now) == RNC_OK);
     CHECK(rnc_transfer_listener_tick(n->listener, UNIX, n->now) == RNC_OK);
     CHECK(rnc_transfer_client_tick(n->xfer, UNIX, n->now) == RNC_OK);
-    while (rnc_node_poll(n->client, &e) == RNC_OK) {
-      if (e.type == RNC_NODE_SEND) {
-        wire_note(&e.packet);
-        CHECK(rnc_node_input(n->server, 1, &e.packet, UNIX, n->now) == RNC_OK);
+    /* a window of parts can be larger than a node's queue of undelivered events, so move a few packets each way at a
+     * time and let each side take what it was handed before more arrives, as a host does */
+    for (rounds = 0, moved = 1; moved && rounds < 100000; rounds++) {
+      moved = 0;
+      CHECK(rnc_transfer_listener_tick(n->listener, UNIX, n->now) == RNC_OK);
+      CHECK(rnc_transfer_client_tick(n->xfer, UNIX, n->now) == RNC_OK);
+      for (k = 0; k < 4 && rnc_node_poll(n->client, &e) == RNC_OK; k++) {
+        moved = 1;
+        if (e.type == RNC_NODE_SEND) {
+          wire_note(&e.packet);
+          CHECK(rnc_node_input(n->server, 1, &e.packet, UNIX, n->now) == RNC_OK);
+        }
+        else if (e.type == RNC_NODE_LOCAL)
+          CHECK(rnc_transfer_client_input(n->xfer, &e, UNIX, n->now) == RNC_OK);
       }
-      else if (e.type == RNC_NODE_LOCAL)
-        CHECK(rnc_transfer_client_input(n->xfer, &e, UNIX, n->now) == RNC_OK);
-    }
-    while (rnc_node_poll(n->server, &e) == RNC_OK) {
-      if (e.type == RNC_NODE_SEND) {
-        wire_note(&e.packet);
-        CHECK(rnc_node_input(n->client, 1, &e.packet, UNIX, n->now) == RNC_OK);
-      }
-      else if (e.type == RNC_NODE_LOCAL) {
-        rnc_result r = rnc_transfer_listener_input(n->listener, &e, UNIX, n->now);
-        CHECK(r == RNC_OK || r == RNC_AGAIN);
+      for (k = 0; k < 4 && rnc_node_poll(n->server, &e) == RNC_OK; k++) {
+        moved = 1;
+        if (e.type == RNC_NODE_SEND) {
+          wire_note(&e.packet);
+          CHECK(rnc_node_input(n->client, 1, &e.packet, UNIX, n->now) == RNC_OK);
+        }
+        else if (e.type == RNC_NODE_LOCAL) {
+          rnc_result r = rnc_transfer_listener_input(n->listener, &e, UNIX, n->now);
+          CHECK(r == RNC_OK || r == RNC_AGAIN);
+        }
       }
     }
   }
@@ -149,6 +164,10 @@ static void setup(net *n, int allow, int fetch) {
   cfg.no_compress = listener_no_compress;
   cfg.fetch = fetch ? on_fetch : NULL;
   cfg.context = n;
+  if (listener_streams) {
+    cfg.stream = listener_stream_fns;
+    cfg.fetch_stream = on_fetch_stream;
+  }
   n->listener = rnc_transfer_listener_new(n->server, &n->server_id,
                                           n->destination, &cfg, rng, NULL);
   n->xfer = rnc_transfer_client_new(n->client, 0, rng, NULL);
@@ -402,6 +421,262 @@ static void no_compress(void) {
   } else
     CHECK(plain > 100000 && fetched_plain > 100000);
 }
+/* ---- streamed files ---- */
+typedef struct stream_log {
+  unsigned opens, closes, completes, abandoned, releases, serves;
+  uint64_t size, next, wanted_size;
+  uint8_t name[RNC_TRANSFER_NAME_MAX];
+  size_t name_size;
+  int anonymous, fail_at, pattern_mismatch, fetch_mode;
+  uint8_t who[16];
+  uint64_t source_size;
+} stream_log;
+static stream_log listener_log, client_log, source_log;
+static uint8_t pat(uint64_t at) {
+  uint64_t x = (at + 1) * 0x9e3779b97f4a7c15ull;
+  x ^= x >> 31;
+  return (uint8_t)(x * 0xd6e8feb86659fd93ull >> 56);
+}
+static rnc_result log_open(stream_log *l, const uint8_t *who, const uint8_t *name, size_t name_size, uint64_t size,
+                           void **file) {
+  l->opens++;
+  l->size = size;
+  l->anonymous = !who;
+  if (who)
+    memcpy(l->who, who, 16);
+  memcpy(l->name, name, name_size);
+  l->name_size = name_size;
+  l->next = 0;
+  *file = l;
+  return RNC_OK;
+}
+static rnc_result log_write(stream_log *l, uint64_t offset, const void *data, size_t size) {
+  size_t i;
+  if (offset != l->next)
+    l->pattern_mismatch = 1;
+  if (l->fail_at && offset >= (uint64_t)l->fail_at)
+    return RNC_NO_SPACE;
+  for (i = 0; i < size; i++)
+    if (((const uint8_t *)data)[i] != pat(offset + i))
+      l->pattern_mismatch = 1;
+  l->next = offset + size;
+  return RNC_OK;
+}
+static void log_close(stream_log *l, int complete) {
+  l->closes++;
+  if (complete)
+    l->completes++;
+  else
+    l->abandoned++;
+}
+static rnc_result listener_open(void *ctx, const uint8_t *who, const uint8_t *name, size_t name_size, uint64_t size,
+                                void **file) {
+  (void)ctx;
+  return log_open(&listener_log, who, name, name_size, size, file);
+}
+static rnc_result listener_write(void *file, uint64_t offset, const void *data, size_t size) {
+  return log_write(file, offset, data, size);
+}
+static void listener_close(void *file, int complete) { log_close(file, complete); }
+static const rnc_transfer_stream listener_stream_fns = {listener_open, listener_write, listener_close};
+static rnc_result client_open(void *ctx, const uint8_t *who, const uint8_t *name, size_t name_size, uint64_t size,
+                              void **file) {
+  (void)ctx;
+  return log_open(&client_log, who, name, name_size, size, file);
+}
+static const rnc_transfer_stream client_stream_fns = {client_open, listener_write, listener_close};
+static rnc_result source_read(void *ctx, uint64_t offset, void *out, size_t size) {
+  size_t i;
+  (void)ctx;
+  for (i = 0; i < size; i++)
+    ((uint8_t *)out)[i] = pat(offset + i);
+  return RNC_OK;
+}
+static void source_release(void *ctx) {
+  (void)ctx;
+  source_log.releases++;
+}
+static int on_fetch_stream(void *ctx, const uint8_t *path, size_t path_size, const uint8_t *identity_hash,
+                           rnc_transfer_source *src) {
+  (void)ctx;
+  (void)path;
+  (void)path_size;
+  (void)identity_hash;
+  source_log.serves++;
+  if (source_log.fetch_mode != RNC_FETCH_FOUND)
+    return source_log.fetch_mode;
+  src->size = source_log.source_size;
+  src->read = source_read;
+  src->release = source_release;
+  memcpy(src->name, "streamed.bin", 12);
+  src->name_size = 12;
+  return RNC_FETCH_FOUND;
+}
+static void stream_reset(uint64_t size) {
+  memset(&listener_log, 0, sizeof(listener_log));
+  memset(&client_log, 0, sizeof(client_log));
+  memset(&source_log, 0, sizeof(source_log));
+  source_log.source_size = size;
+  source_log.fetch_mode = RNC_FETCH_FOUND;
+}
+/* push a file through a source into the listener's stream */
+static void stream_send_case(uint64_t size, unsigned steps) {
+  net n;
+  rnc_transfer_source src;
+  rnc_transfer_result r;
+  stream_reset(size);
+  listener_streams = 1;
+  setup(&n, 1, 0);
+  listener_streams = 0;
+  memset(&src, 0, sizeof(src));
+  src.size = size;
+  src.read = source_read;
+  src.release = source_release;
+  CHECK(rnc_transfer_send_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"big.bin", 7, &src, 5, 6000000,
+                                 UNIX, n.now) == RNC_OK);
+  r = finish(&n, NULL, 0, steps, NULL, 5);
+  CHECK(r.status == RNC_TRANSFER_DONE);
+  CHECK(listener_log.opens == 1 && listener_log.completes == 1 && listener_log.abandoned == 0);
+  CHECK(listener_log.size == size && listener_log.next == size && !listener_log.pattern_mismatch);
+  CHECK(!listener_log.anonymous && !memcmp(listener_log.who, n.client_id.hash, 16));
+  CHECK(listener_log.name_size == 7 && !memcmp(listener_log.name, "big.bin", 7));
+  CHECK(source_log.releases == 1);
+  CHECK(n.received == 0); /* it did not take the in-memory route */
+  pump(&n, 300);
+  CHECK(rnc_transfer_listener_link_count(n.listener) == 0);
+  teardown(&n);
+}
+static void stream_send(void) { stream_send_case(2500000, 400000); }
+static void stream_send_small(void) {
+  stream_send_case(1000, 20000);
+  stream_send_case(0, 20000);
+}
+static void stream_send_big(void) { stream_send_case((uint64_t)20 * 1024 * 1024 + 99, 3000000); }
+/* the listener serves a file from a source and the client fetches it into a stream */
+static void stream_fetch_case(uint64_t size, unsigned steps) {
+  net n;
+  rnc_transfer_result r;
+  stream_reset(size);
+  listener_streams = 1;
+  setup(&n, 1, 0);
+  listener_streams = 0;
+  CHECK(rnc_transfer_fetch_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"some/path", 9,
+                                  &client_stream_fns, NULL, 8, 6000000, UNIX, n.now) == RNC_OK);
+  r = finish(&n, NULL, 0, steps, NULL, 8);
+  CHECK(r.status == RNC_TRANSFER_DONE && r.size == size);
+  CHECK(r.name_size == 12 && !memcmp(r.name, "streamed.bin", 12));
+  CHECK(client_log.opens == 1 && client_log.completes == 1 && client_log.abandoned == 0);
+  CHECK(client_log.size == size && client_log.next == size && !client_log.pattern_mismatch && client_log.anonymous);
+  CHECK(source_log.serves == 1);
+  pump(&n, 400);
+  CHECK(source_log.releases == 1);
+  teardown(&n);
+}
+static void stream_fetch(void) { stream_fetch_case(2500000, 400000); }
+static void stream_fetch_big(void) { stream_fetch_case((uint64_t)20 * 1024 * 1024 + 7, 3000000); }
+/* a memory-bound client still reaches a streaming listener, and the listener's memory limit does not apply */
+static void stream_memory_client(void) {
+  net n;
+  uint8_t data[40000], out[16];
+  rnc_transfer_result r;
+  size_t i;
+  stream_reset(0);
+  for (i = 0; i < sizeof(data); i++)
+    data[i] = pat(i);
+  listener_streams = 1;
+  setup(&n, 1, 0);
+  listener_streams = 0;
+  CHECK(rnc_transfer_send(n.xfer, n.destination, &n.client_id, (const uint8_t *)"mem.bin", 7, data, sizeof(data), 2,
+                          600000, UNIX, n.now) == RNC_OK);
+  r = finish(&n, out, sizeof(out), 60000, NULL, 2);
+  CHECK(r.status == RNC_TRANSFER_DONE);
+  CHECK(listener_log.opens == 1 && listener_log.completes == 1 && listener_log.size == sizeof(data) &&
+        !listener_log.pattern_mismatch);
+  teardown(&n);
+}
+/* a sink that refuses fails the job; the file is abandoned (close with 0), the source is released once */
+static void stream_failure(void) {
+  net n;
+  rnc_transfer_source src;
+  rnc_transfer_result r;
+  stream_reset(3000000);
+  listener_log.fail_at = 1500000;
+  listener_streams = 1;
+  setup(&n, 1, 0);
+  listener_streams = 0;
+  memset(&src, 0, sizeof(src));
+  src.size = 3000000;
+  src.read = source_read;
+  src.release = source_release;
+  CHECK(rnc_transfer_send_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"x.bin", 5, &src, 3, 400000,
+                                 UNIX, n.now) == RNC_OK);
+  r = finish(&n, NULL, 0, 500000, NULL, 3);
+  CHECK(r.status == RNC_TRANSFER_FAILED);
+  pump(&n, 500);
+  CHECK(listener_log.opens == 1 && listener_log.closes == 1 && listener_log.abandoned == 1 && listener_log.completes == 0);
+  CHECK(source_log.releases == 1);
+  teardown(&n);
+}
+/* a fetch that finds nothing, or is refused, opens no stream */
+static void stream_fetch_refused(void) {
+  net n;
+  rnc_transfer_result r;
+  stream_reset(10);
+  source_log.fetch_mode = RNC_FETCH_NOT_FOUND;
+  listener_streams = 1;
+  setup(&n, 1, 0);
+  listener_streams = 0;
+  CHECK(rnc_transfer_fetch_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"nope", 4, &client_stream_fns,
+                                  NULL, 1, 100000, UNIX, n.now) == RNC_OK);
+  r = finish(&n, NULL, 0, 60000, NULL, 1);
+  CHECK(r.status == RNC_TRANSFER_NOT_FOUND && client_log.opens == 0);
+  source_log.fetch_mode = RNC_FETCH_NOT_ALLOWED;
+  CHECK(rnc_transfer_fetch_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"nope", 4, &client_stream_fns,
+                                  NULL, 2, 100000, UNIX, n.now) == RNC_OK);
+  r = finish(&n, NULL, 0, 60000, NULL, 2);
+  CHECK(r.status == RNC_TRANSFER_NOT_ALLOWED && client_log.opens == 0 && source_log.releases == 0);
+  teardown(&n);
+}
+static void stream_arguments(void) {
+  net n;
+  rnc_transfer_source src;
+  rnc_transfer_stream broken = {NULL, listener_write, listener_close};
+  rnc_transfer_config cfg;
+  stream_reset(10);
+  setup(&n, 1, 0);
+  memset(&src, 0, sizeof(src));
+  src.size = 10;
+  src.release = source_release;
+  /* no read function, or too big for the limit: refused, and the source is released */
+  CHECK(rnc_transfer_send_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"a", 1, &src, 1, 1000, UNIX,
+                                 n.now) == RNC_INVALID && source_log.releases == 1);
+  src.read = source_read;
+  rnc_transfer_client_set_stream_limit(n.xfer, 5);
+  CHECK(rnc_transfer_send_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"a", 1, &src, 1, 1000, UNIX,
+                                 n.now) == RNC_INVALID && source_log.releases == 2);
+  rnc_transfer_client_set_stream_limit(n.xfer, 10);
+  CHECK(rnc_transfer_send_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"a", 1, NULL, 1, 1000, UNIX,
+                                 n.now) == RNC_INVALID);
+  CHECK(rnc_transfer_fetch_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"p", 1, &broken, NULL, 1, 1000,
+                                  UNIX, n.now) == RNC_INVALID);
+  CHECK(rnc_transfer_fetch_stream(n.xfer, n.destination, &n.client_id, (const uint8_t *)"p", 1, NULL, NULL, 1, 1000,
+                                  UNIX, n.now) == RNC_INVALID);
+  /* an unknown destination: no route, and a source is released */
+  {
+    uint8_t unknown[16] = {7};
+    CHECK(rnc_transfer_send_stream(n.xfer, unknown, &n.client_id, (const uint8_t *)"a", 1, &src, 1, 1000, UNIX, n.now) ==
+              RNC_STATE && source_log.releases == 3);
+  }
+  /* a listener whose stream is half there is refused */
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.allow_all = 1;
+  cfg.stream = broken;
+  CHECK(rnc_transfer_listener_new(n.server, &n.server_id, n.destination, &cfg, rng, NULL) == NULL);
+  cfg.stream = listener_stream_fns;
+  cfg.max_stream_size = RNC_TRANSFER_STREAM_MAX_SIZE + 1;
+  CHECK(rnc_transfer_listener_new(n.server, &n.server_id, n.destination, &cfg, rng, NULL) == NULL);
+  teardown(&n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "send"))
@@ -422,6 +697,24 @@ int main(int argc, char **argv) {
     no_compress();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
+  else if (!strcmp(argv[1], "stream_send"))
+    stream_send();
+  else if (!strcmp(argv[1], "stream_send_small"))
+    stream_send_small();
+  else if (!strcmp(argv[1], "stream_send_big"))
+    stream_send_big();
+  else if (!strcmp(argv[1], "stream_fetch"))
+    stream_fetch();
+  else if (!strcmp(argv[1], "stream_fetch_big"))
+    stream_fetch_big();
+  else if (!strcmp(argv[1], "stream_memory_client"))
+    stream_memory_client();
+  else if (!strcmp(argv[1], "stream_failure"))
+    stream_failure();
+  else if (!strcmp(argv[1], "stream_fetch_refused"))
+    stream_fetch_refused();
+  else if (!strcmp(argv[1], "stream_arguments"))
+    stream_arguments();
   else
     CHECK(0);
   puts("transfer test passed");

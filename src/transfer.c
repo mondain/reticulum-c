@@ -15,13 +15,63 @@
 
 /* One link with the three engines rncp needs: a request service (fetch_file)
  * and one Resource each way for the files themselves. */
+/* A file arriving through the application's stream functions, and one leaving through its source */
+typedef struct stream_in {
+  rnc_transfer_stream fns;
+  void *context;
+  uint8_t identity[16];
+  int has_identity, opened, closed;
+  void *file;
+  uint8_t name[RNC_TRANSFER_NAME_MAX];
+  size_t name_size;
+  uint64_t size;
+} stream_in;
+typedef struct stream_out {
+  void (*release)(void *context);
+  void *context;
+  int live;
+} stream_out;
 typedef struct conn {
   rnc_link *link;
   rnc_service *service;
   rnc_resource *rx, *tx;
   uint8_t id[16];
+  stream_in in;
+  stream_out out;
 } conn;
-static int conn_open(conn *c, rnc_node *node, size_t max_size,
+static int metadata_name(const uint8_t *meta, size_t size, const uint8_t **name, size_t *n);
+static rnc_result stream_begin(void *context, const uint8_t *metadata, size_t metadata_size, uint64_t total) {
+  stream_in *in = context;
+  const uint8_t *name;
+  size_t n;
+  rnc_result r;
+  if (!metadata || !metadata_name(metadata, metadata_size, &name, &n))
+    return RNC_PROTOCOL;
+  memcpy(in->name, name, n);
+  in->name_size = n;
+  in->size = total;
+  r = in->fns.open(in->context, in->has_identity ? in->identity : NULL, name, n, total, &in->file);
+  if (r == RNC_OK)
+    in->opened = 1;
+  return r;
+}
+static rnc_result stream_write(void *context, uint64_t offset, const void *data, size_t size) {
+  stream_in *in = context;
+  return in->opened && !in->closed ? in->fns.write(in->file, offset, data, size) : RNC_STATE;
+}
+/* Tell the application the incoming file is finished (1) or abandoned (0), once. */
+static void stream_in_close(stream_in *in, int complete) {
+  if (in->opened && !in->closed) {
+    in->closed = 1;
+    in->fns.close(in->file, complete);
+  }
+}
+static void stream_out_release(stream_out *out) {
+  if (out->live && out->release)
+    out->release(out->context);
+  out->live = 0;
+}
+static int conn_open(conn *c, rnc_node *node, uint64_t max_size, int streaming,
                      rnc_random_fn random, void *context) {
   (void)node;
   memset(c, 0, sizeof(*c));
@@ -29,8 +79,13 @@ static int conn_open(conn *c, rnc_node *node, size_t max_size,
   if (!c->link)
     return 0;
   c->service = rnc_service_new(c->link, 4096, random, context);
-  c->rx = rnc_resource_new(c->link, max_size + 4096u, random, context);
-  c->tx = rnc_resource_new(c->link, max_size + 4096u, random, context);
+  if (streaming) {
+    c->rx = rnc_resource_new_streaming(c->link, max_size + 4096u, random, context);
+    c->tx = rnc_resource_new_streaming(c->link, max_size + 4096u, random, context);
+  } else {
+    c->rx = rnc_resource_new(c->link, (size_t)max_size + 4096u, random, context);
+    c->tx = rnc_resource_new(c->link, (size_t)max_size + 4096u, random, context);
+  }
   if (!c->service || !c->rx || !c->tx) {
     rnc_resource_free(c->rx);
     rnc_resource_free(c->tx);
@@ -41,9 +96,18 @@ static int conn_open(conn *c, rnc_node *node, size_t max_size,
   }
   return 1;
 }
+/* Incoming files go through `fns`. The conn must stay where it is: the sink points into it. */
+static rnc_result conn_stream_in(conn *c, const rnc_transfer_stream *fns, void *context) {
+  rnc_resource_sink sink = {stream_begin, stream_write, &c->in};
+  c->in.fns = *fns;
+  c->in.context = context;
+  return rnc_resource_set_sink(c->rx, &sink);
+}
 static void conn_close(conn *c, rnc_node *node) {
   if (!c->link)
     return;
+  stream_in_close(&c->in, 0);
+  stream_out_release(&c->out);
   (void)rnc_node_unbind_link(node, c->id);
   rnc_resource_free(c->rx);
   rnc_resource_free(c->tx);
@@ -135,7 +199,9 @@ rnc_transfer_listener *rnc_transfer_listener_new(
   rnc_transfer_listener *l;
   if (!node || !identity || !identity->has_private || !destination || !config ||
       !random || config->allowed_count > RNC_TRANSFER_ALLOWED ||
-      config->max_size > RNC_TRANSFER_MAX_SIZE)
+      config->max_size > RNC_TRANSFER_MAX_SIZE ||
+      config->max_stream_size > RNC_TRANSFER_STREAM_MAX_SIZE ||
+      (config->stream.write && (!config->stream.open || !config->stream.close)))
     return NULL;
   l = calloc(1, sizeof(*l));
   if (!l)
@@ -146,6 +212,8 @@ rnc_transfer_listener *rnc_transfer_listener_new(
   l->config = *config;
   if (!l->config.max_size)
     l->config.max_size = RNC_TRANSFER_DEFAULT_LIMIT;
+  if (!l->config.max_stream_size)
+    l->config.max_stream_size = RNC_TRANSFER_STREAM_MAX_SIZE;
   l->random = random;
   l->random_context = random_context;
   l->scratch = malloc(PATH_MAX_BYTES + 16u);
@@ -202,9 +270,20 @@ static rnc_result accept_link(rnc_transfer_listener *l,
   if (!s)
     return RNC_NO_SPACE;
   memset(s, 0, sizeof(*s));
-  if (!conn_open(&s->c, l->node, l->config.max_size, l->random,
-                 l->random_context))
+  /* streaming resources when files may go to a stream or be served from a source */
+  if (!conn_open(&s->c, l->node,
+                 l->config.stream.write || l->config.fetch_stream ? l->config.max_stream_size : l->config.max_size,
+                 l->config.stream.write || l->config.fetch_stream, l->random, l->random_context))
     return RNC_NO_SPACE;
+  if (l->config.stream.write)
+    result = conn_stream_in(&s->c, &l->config.stream, l->config.context);
+  else
+    result = RNC_OK;
+  if (result != RNC_OK) {
+    conn_close(&s->c, l->node);
+    rnc_cleanse(s, sizeof(*s));
+    return result;
+  }
   result = rnc_link_configure_mtu(
       s->c.link, rnc_node_link_mtu_on(l->node, event->interface_id));
   if (result == RNC_OK)
@@ -214,7 +293,7 @@ static rnc_result accept_link(rnc_transfer_listener *l,
     result = rnc_link_address(s->c.link, s->c.id);
   if (result == RNC_OK)
     result = rnc_node_bind_link_on(l->node, s->c.id, event->interface_id);
-  if (result == RNC_OK && l->config.fetch)
+  if (result == RNC_OK && (l->config.fetch || l->config.fetch_stream))
     result = rnc_service_register(s->c.service, FETCH_PATH,
                                   RNC_SERVICE_ALLOW_ALL, NULL, 0);
   if (result != RNC_OK) {
@@ -268,6 +347,36 @@ static void listener_requests(rnc_transfer_listener *l, listener_slot *s,
     if (!rmp_len(&r, 1, &n) || !rmp_take(&r, n, &path) || r.i != r.n) {
       answer[0] = 0xc2;
       (void)rnc_service_respond(s->c.service, event.request_id, answer, 1, now);
+      continue;
+    }
+    if (l->config.fetch_stream) {
+      rnc_transfer_source src;
+      memset(&src, 0, sizeof(src));
+      found = l->config.fetch_stream(l->config.context, path, n, s->identified ? s->remote : NULL, &src);
+      answer[0] = 0xc2;
+      if (found == RNC_FETCH_NOT_ALLOWED) {
+        answer[0] = 0xcc;
+        answer[1] = REQ_FETCH_NOT_ALLOWED;
+        answer_size = 2;
+      } else if (found == RNC_FETCH_FOUND && src.read && src.name_size && src.name_size <= RNC_TRANSFER_NAME_MAX &&
+                 src.size <= l->config.max_stream_size) {
+        uint8_t meta[RNC_TRANSFER_NAME_MAX + 16];
+        rnc_resource_options o = {0};
+        o.compress = rnc_stream_compression_available() && !l->config.no_compress;
+        o.metadata = meta;
+        o.metadata_size = metadata_encode(src.name, src.name_size, meta);
+        stream_out_release(&s->c.out); /* a previous file still being served is over */
+        if (rnc_resource_send_stream(s->c.tx, src.read, src.context, src.size, &o, now) == RNC_OK) {
+          s->c.out.release = src.release;
+          s->c.out.context = src.context;
+          s->c.out.live = 1;
+          src.release = NULL; /* now owned by the connection */
+          answer[0] = 0xc3;
+        }
+      }
+      if (src.release && found == RNC_FETCH_FOUND)
+        src.release(src.context); /* refused or failed: nothing will read it */
+      (void)rnc_service_respond(s->c.service, event.request_id, answer, answer_size, now);
       continue;
     }
     found = l->config.fetch(l->config.context, path, n,
@@ -333,6 +442,8 @@ rnc_result rnc_transfer_listener_tick(rnc_transfer_listener *l,
       else if (le.type == RNC_LINK_IDENTIFIED) {
         s->identified = 1;
         memcpy(s->remote, le.identity_hash, 16);
+        s->c.in.has_identity = 1;
+        memcpy(s->c.in.identity, le.identity_hash, 16);
         if (!l->config.allow_all && !listed(l, s->remote))
           (void)rnc_link_close(s->c.link, now_ms);
       } else if (le.type == RNC_LINK_PACKET ||
@@ -352,7 +463,12 @@ rnc_result rnc_transfer_listener_tick(rnc_transfer_listener *l,
       (void)rnc_service_tick(s->c.service, now_ms);
       listener_requests(l, s, now_ms);
       while (rnc_resource_poll(s->c.rx, &re) == RNC_OK)
-        if (re.type == RNC_RESOURCE_COMPLETE && l->config.received) {
+        if (l->config.stream.write) {
+          if (re.type == RNC_RESOURCE_COMPLETE)
+            stream_in_close(&s->c.in, 1);
+          else if (re.type == RNC_RESOURCE_FAILED)
+            stream_in_close(&s->c.in, 0);
+        } else if (re.type == RNC_RESOURCE_COMPLETE && l->config.received) {
           uint8_t *data = NULL, name[RNC_TRANSFER_NAME_MAX];
           size_t size = 0, name_size = 0;
           if (take_file(&s->c, &data, &size, name, &name_size)) {
@@ -363,8 +479,9 @@ rnc_result rnc_transfer_listener_tick(rnc_transfer_listener *l,
             free(data);
           }
         }
-      while (rnc_resource_poll(s->c.tx, &re) == RNC_OK) {
-      }
+      while (rnc_resource_poll(s->c.tx, &re) == RNC_OK)
+        if (re.type == RNC_RESOURCE_COMPLETE || re.type == RNC_RESOURCE_FAILED)
+          stream_out_release(&s->c.out);
       while (rnc_link_poll(s->c.link, &le) == RNC_OK)
         if (le.type == RNC_LINK_SEND)
           (void)rnc_node_send(l->node, &le.packet, unix_seconds, now_ms);
@@ -397,6 +514,9 @@ typedef struct client_job {
   uint8_t *output;
   size_t output_size;
   double progress;
+  int streamed;            /* the file goes through a source or a stream, not through memory */
+  rnc_transfer_source src; /* send: the source (also owned by the conn once the job is up) */
+  uint64_t stream_size;    /* fetch: the size the stream was opened with */
 } client_job;
 struct rnc_transfer_client {
   rnc_node *node;
@@ -404,6 +524,7 @@ struct rnc_transfer_client {
   rnc_random_fn random;
   void *random_context;
   int no_compress;
+  uint64_t stream_max;
   client_job jobs[RNC_TRANSFER_JOBS];
 };
 rnc_transfer_client *rnc_transfer_client_new(rnc_node *node, size_t max_size,
@@ -417,9 +538,14 @@ rnc_transfer_client *rnc_transfer_client_new(rnc_node *node, size_t max_size,
     return NULL;
   c->node = node;
   c->max_size = max_size ? max_size : RNC_TRANSFER_DEFAULT_LIMIT;
+  c->stream_max = RNC_TRANSFER_STREAM_MAX_SIZE;
   c->random = random;
   c->random_context = random_context;
   return c;
+}
+void rnc_transfer_client_set_stream_limit(rnc_transfer_client *c, uint64_t max_size) {
+  if (c && max_size && max_size <= RNC_TRANSFER_STREAM_MAX_SIZE)
+    c->stream_max = max_size;
 }
 void rnc_transfer_client_set_compression(rnc_transfer_client *c, int enabled) {
   if (c)
@@ -454,15 +580,18 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
                             const uint8_t destination[16],
                             const rnc_identity *identity, const uint8_t *name,
                             size_t name_size, const void *input, size_t size,
-                            uint32_t tag, uint64_t timeout, uint64_t now) {
+                            uint32_t tag, uint64_t timeout, uint64_t now,
+                            const rnc_transfer_source *source,
+                            const rnc_transfer_stream *stream, void *stream_context) {
   client_job *j = NULL;
   rnc_route route;
   rnc_result result;
   size_t i;
   if (!c || !destination || !identity || !identity->has_private || !timeout ||
-      timeout > UINT64_MAX - now || (size && !input) ||
+      timeout > UINT64_MAX - now || (size && !input && !source) ||
       (kind == JOB_SEND && (!name || !name_size || name_size > RNC_TRANSFER_NAME_MAX ||
-                            size > c->max_size)) ||
+                            (source ? (!source->read || source->size > c->stream_max) : size > c->max_size))) ||
+      (stream && (!stream->open || !stream->write || !stream->close)) ||
       (kind == JOB_FETCH && (!size || size > PATH_MAX_BYTES)))
     return RNC_INVALID;
   for (i = 0; i < RNC_TRANSFER_JOBS; i++)
@@ -475,14 +604,30 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
   if (rnc_node_lookup(c->node, destination, now, &route) != RNC_OK)
     return RNC_STATE;
   memset(j, 0, sizeof(*j));
-  if (!conn_open(&j->c, c->node, c->max_size, c->random, c->random_context)) {
+  if (!conn_open(&j->c, c->node, source || stream ? c->stream_max : c->max_size, source || stream != NULL, c->random,
+                 c->random_context)) {
     rnc_cleanse(j, sizeof(*j));
     return RNC_NO_SPACE;
   }
-  j->input = malloc(size ? size : 1);
-  if (!j->input) {
-    result = RNC_NO_SPACE;
-    goto fail;
+  if (stream) {
+    result = conn_stream_in(&j->c, stream, stream_context);
+    if (result != RNC_OK)
+      goto fail;
+    j->streamed = 1;
+  }
+  if (source) { /* the file stays where it is; the connection releases it when the job is over */
+    j->src = *source;
+    j->streamed = 1;
+    j->c.out.release = source->release;
+    j->c.out.context = source->context;
+    j->c.out.live = 1;
+    j->input = NULL;
+  } else {
+    j->input = malloc(size ? size : 1);
+    if (!j->input) {
+      result = RNC_NO_SPACE;
+      goto fail;
+    }
   }
   result = rnc_link_configure_mtu(
       j->c.link, rnc_node_link_mtu_to(c->node, destination, now));
@@ -494,9 +639,9 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
     result = rnc_node_bind_link_on(c->node, j->c.id, route.interface_id);
   if (result != RNC_OK)
     goto fail;
-  if (size)
+  if (size && !source)
     memcpy(j->input, input, size);
-  j->input_size = size;
+  j->input_size = source ? 0 : size;
   if (kind == JOB_SEND) {
     memcpy(j->name, name, name_size);
     j->name_size = name_size;
@@ -510,6 +655,8 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
   j->used = 1;
   return RNC_OK;
 fail:
+  if (source)
+    j->c.out.live = 0; /* the caller releases the source when the call fails */
   conn_close(&j->c, c->node);
   free(j->input);
   rnc_cleanse(j, sizeof(*j));
@@ -523,7 +670,31 @@ rnc_result rnc_transfer_send(rnc_transfer_client *c,
                              uint64_t unix_seconds, uint64_t now_ms) {
   (void)unix_seconds;
   return job_start(c, JOB_SEND, destination, identity, name, name_size, data,
-                   size, tag, timeout_ms, now_ms);
+                   size, tag, timeout_ms, now_ms, NULL, NULL, NULL);
+}
+rnc_result rnc_transfer_send_stream(rnc_transfer_client *c, const uint8_t destination[16],
+                                    const rnc_identity *identity, const uint8_t *name, size_t name_size,
+                                    const rnc_transfer_source *source, uint32_t tag, uint64_t timeout_ms,
+                                    uint64_t unix_seconds, uint64_t now_ms) {
+  rnc_result r;
+  (void)unix_seconds;
+  if (!source)
+    return RNC_INVALID;
+  r = job_start(c, JOB_SEND, destination, identity, name, name_size, NULL, 0, tag, timeout_ms, now_ms, source, NULL,
+                NULL);
+  if (r != RNC_OK && source->release)
+    source->release(source->context);
+  return r;
+}
+rnc_result rnc_transfer_fetch_stream(rnc_transfer_client *c, const uint8_t destination[16],
+                                     const rnc_identity *identity, const uint8_t *path, size_t path_size,
+                                     const rnc_transfer_stream *stream, void *stream_context, uint32_t tag,
+                                     uint64_t timeout_ms, uint64_t unix_seconds, uint64_t now_ms) {
+  (void)unix_seconds;
+  if (!stream)
+    return RNC_INVALID;
+  return job_start(c, JOB_FETCH, destination, identity, NULL, 0, path, path_size, tag, timeout_ms, now_ms, NULL,
+                   stream, stream_context);
 }
 rnc_result rnc_transfer_fetch(rnc_transfer_client *c,
                               const uint8_t destination[16],
@@ -533,7 +704,7 @@ rnc_result rnc_transfer_fetch(rnc_transfer_client *c,
                               uint64_t now_ms) {
   (void)unix_seconds;
   return job_start(c, JOB_FETCH, destination, identity, NULL, 0, path,
-                   path_size, tag, timeout_ms, now_ms);
+                   path_size, tag, timeout_ms, now_ms, NULL, NULL, NULL);
 }
 rnc_result rnc_transfer_client_input(rnc_transfer_client *c,
                                      const rnc_node_event *event,
@@ -581,7 +752,13 @@ static void job_resource_events(client_job *j, rnc_resource *res, uint64_t now) 
       j->progress = 1.0;
       if (j->kind == JOB_SEND && re.outgoing)
         job_finish(j, RNC_TRANSFER_DONE, now);
-      else if (j->kind == JOB_FETCH && !re.outgoing) {
+      else if (j->kind == JOB_FETCH && !re.outgoing && j->streamed) {
+        stream_in_close(&j->c.in, 1);
+        memcpy(j->name, j->c.in.name, j->c.in.name_size);
+        j->name_size = j->c.in.name_size;
+        j->stream_size = j->c.in.size;
+        job_finish(j, RNC_TRANSFER_DONE, now);
+      } else if (j->kind == JOB_FETCH && !re.outgoing) {
         uint8_t *data = NULL;
         size_t size = 0;
         if (take_file(&j->c, &data, &size, j->name, &j->name_size)) {
@@ -645,8 +822,8 @@ rnc_result rnc_transfer_client_tick(rnc_transfer_client *c,
         o.compress = rnc_stream_compression_available() && !c->no_compress;
         o.metadata = meta;
         o.metadata_size = metadata_encode(j->name, j->name_size, meta);
-        if (rnc_resource_send(j->c.tx, j->input, j->input_size, &o, now_ms) ==
-            RNC_OK)
+        if ((j->src.read ? rnc_resource_send_stream(j->c.tx, j->src.read, j->src.context, j->src.size, &o, now_ms)
+                         : rnc_resource_send(j->c.tx, j->input, j->input_size, &o, now_ms)) == RNC_OK)
           j->state = JOB_RUNNING;
         else
           job_finish(j, RNC_TRANSFER_FAILED, now_ms);
@@ -735,11 +912,11 @@ rnc_result rnc_transfer_client_poll(rnc_transfer_client *c,
     if (j->kind == JOB_FETCH && j->status == RNC_TRANSFER_DONE) {
       memcpy(result->name, j->name, j->name_size);
       result->name_size = j->name_size;
-      result->size = j->output_size;
+      result->size = j->streamed ? (size_t)j->stream_size : j->output_size;
     }
-    if (result->size > capacity || (result->size && !data))
+    if (!j->streamed && (result->size > capacity || (result->size && !data)))
       return RNC_NO_SPACE;
-    if (result->size)
+    if (result->size && !j->streamed)
       memcpy(data, j->output, result->size);
     job_clear(c, j);
     return RNC_OK;

@@ -33,6 +33,39 @@ typedef struct rnc_resource_event {
 rnc_resource *rnc_resource_new(rnc_link *link, size_t max_size, rnc_random_fn random,
                                void *random_context);
 void rnc_resource_free(rnc_resource *resource);
+/* Streamed transfers, for files that should not sit in memory. The Resource protocol already moves a large
+ * resource as segments of up to RNC_RESOURCE_SEGMENT_MAX bytes, each authenticated on its own, so a streamed
+ * transfer holds one segment at a time instead of the whole.
+ *
+ * Sending: rnc_resource_send_stream takes a source callback instead of the data. It is called for each segment
+ * (and again if a segment has to be prepared again) with an offset into the data, strictly in ascending order,
+ * and must fill exactly `size` bytes or return an error, which fails the transfer.
+ * Receiving: with a sink set on the resource, each segment is handed over as soon as it has been decrypted,
+ * decompressed and its hash checked, so the data written so far is authentic but the transfer may still fail
+ * later; the sink must treat what it has as provisional until the COMPLETE event (a file written under a
+ * temporary name and renamed then, say). `begin` is called once, before the first byte, with the metadata (NULL
+ * when the sender sent none; it must fit the first segment) and the total size of the data; `write` follows in
+ * order with each piece and its offset. An error from either fails the transfer. */
+typedef rnc_result (*rnc_resource_source_fn)(void *context, uint64_t offset, void *out, size_t size);
+typedef rnc_result (*rnc_resource_begin_fn)(void *context, const uint8_t *metadata, size_t metadata_size,
+                                            uint64_t total_size);
+typedef rnc_result (*rnc_resource_write_fn)(void *context, uint64_t offset, const void *data, size_t size);
+typedef struct rnc_resource_sink {
+    rnc_resource_begin_fn begin; /* may be NULL */
+    rnc_resource_write_fn write;
+    void *context;
+} rnc_resource_sink;
+/* Like rnc_resource_new, for transfers that may go through a source or a sink: max_size bounds the data, up to
+ * 1 TiB (2 GiB on a 32 bit target) plus 16 MiB for what a transfer layer adds, and only the segment in flight is
+ * held in memory. */
+rnc_resource *rnc_resource_new_streaming(rnc_link *link, uint64_t max_size, rnc_random_fn random,
+                                         void *random_context);
+/* Sets (or, with NULL, clears) the sink for incoming transfers on a streaming resource; not while a transfer is
+ * active. With a sink, rnc_resource_read returns RNC_UNSUPPORTED, since the data went to the sink; the size and
+ * the metadata stay available once the transfer is complete. */
+rnc_result rnc_resource_set_sink(rnc_resource *resource, const rnc_resource_sink *sink);
+rnc_result rnc_resource_send_stream(rnc_resource *resource, rnc_resource_source_fn source, void *source_context,
+                                    uint64_t size, const rnc_resource_options *options, uint64_t now_ms);
 /* Copies caller data/options and prepares the first segment. Returns AGAIN
  * while another transfer is active; no partial acceptance. */
 rnc_result rnc_resource_send(rnc_resource *resource, const void *data, size_t size,
