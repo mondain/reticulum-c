@@ -550,7 +550,7 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                 $<TARGET_FILE:reticulum-c-node> disc_list $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_disc_list PROPERTIES LABELS network TIMEOUT 60)
             # it measures peak memory, which the sanitizers inflate many times over, so it runs in normal builds only
-            if(NOT RNC_SANITIZERS)
+            if(NOT RNC_SANITIZERS AND NOT APPLE) # peak memory is counted differently on macOS, whose runners are slow too
                 add_test(NAME reticulum_node_process_cp_big COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> cp_big $<TARGET_FILE:reticulum-c-cp>)
                 set_tests_properties(reticulum_node_process_cp_big PROPERTIES LABELS network TIMEOUT 600)
