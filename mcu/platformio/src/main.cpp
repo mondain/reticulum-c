@@ -11,13 +11,13 @@
 // is not wired, and framework logging is switched off, so no log text is ever mixed
 // into the stream. On ESP32 / ESP32-S3 the board can instead be provisioned (at runtime,
 // no credentials in the firmware) to run the HDLC stream over Wi-Fi and a TCP connection
-// to a Reticulum node: see wifi_mode.h and README.txt in this directory.
+// to a Reticulum node: see wifi_mode.h and README.md in this directory.
 //
 // Optionally a LoRa radio (mcu/radio) on the board selected by the build environment. Its
 // settings (lora.mode, lora.freq, lora.bw, lora.sf, lora.cr, lora.txp, lora.airtime) are
 // provisioned at runtime like the Wi-Fi ones and the radio stays OFF until every transmit
 // setting has been given: no frequency, bandwidth, spreading factor, coding rate or power
-// is compiled into any image (REGULATORY, see mcu/radio/README.txt). lora.mode leaf makes
+// is compiled into any image (REGULATORY, see mcu/radio/README.md). lora.mode leaf makes
 // LoRa the only interface (Serial is then free for status text); gateway keeps the serial
 // or Wi-Fi interface and adds LoRa with Reticulum transport on.
 #include <Arduino.h>
@@ -243,7 +243,7 @@ static uint64_t platform_now_ms(void *) {
 }
 
 // ----------------------------------------------------------- RNode mode ----
-// mode rnode: the board is a LoRa modem for a host (docs/rnode-mode-design.txt). No Reticulum
+// mode rnode: the board is a LoRa modem for a host (docs/rnode-mode-design.md). No Reticulum
 // node runs here; Serial carries KISS frames only. The radio is prepared but not started: the
 // RNode module starts it once the host has set every transmit setting and the radio state.
 #if defined(ARDUINO_ARCH_ESP32)

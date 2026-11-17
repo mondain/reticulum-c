@@ -1,5 +1,5 @@
 // The status screens of the T-Echo (e-paper) and the T-Beam Supreme (OLED); see
-// docs/display-status-design.txt. Only the environments that set RNC_DISPLAY_OLED or
+// docs/display-status-design.md. Only the environments that set RNC_DISPLAY_OLED or
 // RNC_DISPLAY_EPAPER build any of it; everywhere else these are empty stubs. RNC_DISPLAY_NULL
 // builds the same code with a driver that draws nothing (a compile check on any board).
 #pragma once

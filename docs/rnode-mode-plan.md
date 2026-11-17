@@ -18,7 +18,7 @@ when `mode=rnode`. Bluetooth is a second byte transport behind the same module.
 the project's host adapter `RNC_HOST_RNODE` and simulated LoRa (`rnc_lora_sim`) for tests,
 reference Reticulum 1.5.5 for interop.
 
-**Spec:** docs/rnode-mode-design.txt (approved 2026-11-14). Read it first.
+**Spec:** docs/rnode-mode-design.md (approved 2026-11-14). Read it first.
 
 ## Global Constraints
 
@@ -209,8 +209,8 @@ queue has room; `rnc_rnode_reset` clears everything.
 
 **Files:** Modify `mcu/tools/wifi-config.sh` (`--mode rnode`), `web/src/config.js` and
 `web/src/app.js` plus `web/index.html` (host connection choice "RNode modem" for boards that
-have a radio), `web/tests/config.test.js`, `mcu/README.txt`, `mcu/radio/README.txt`,
-`docs/releasing.txt`, `.github/scripts/package-mcu.sh` (flash.txt and README text),
+have a radio), `web/tests/config.test.js`, `mcu/README.md`, `mcu/radio/README.md`,
+`docs/releasing.md`, `.github/scripts/package-mcu.sh` (flash.txt and README text),
 `COMPATIBILITY.md`
 
 - [ ] Step 1: `web/tests/config.test.js`: with transport `rnode`, `buildCommands` returns
@@ -223,13 +223,13 @@ have a radio), `web/tests/config.test.js`, `mcu/README.txt`, `mcu/radio/README.t
 
 ### Task 8: Bench on the T-Echo over USB
 
-**Files:** Modify `mcu/radio/README.txt`, `docs/rnode-mode-design.txt` (status), `COMPATIBILITY.md`
+**Files:** Modify `mcu/radio/README.md`, `docs/rnode-mode-design.md` (status), `COMPATIBILITY.md`
 
 - [ ] Step 1: flash a build from this branch to the T-Echo with the browser flasher; set `mode rnode`.
 - [ ] Step 2: on a computer run `rnsd` with an `RNodeInterface` on the board's port (915 MHz,
   125 kHz, SF8, CR 5, 0 dBm); confirm it reports the interface online; exchange an announce
   and a request with the Supreme gateway on the same settings.
-- [ ] Step 3: record the result, settings and any retry in `mcu/radio/README.txt` as the
+- [ ] Step 3: record the result, settings and any retry in `mcu/radio/README.md` as the
   evidence level for rnode mode. Commit `docs: record the rnode mode bench result`.
 
 ## Stage 2: Bluetooth
@@ -258,7 +258,7 @@ have a radio), `web/tests/config.test.js`, `mcu/README.txt`, `mcu/radio/README.t
 - [ ] Step 2: build `lilygo_t_echo`, `heltec_t114`, `wiscore_rak4631`; record flash and RAM
   use against the limits in the board JSON; stop and report if over budget.
 - [ ] Step 3: bench: pair the T-Echo with Sideband on the phone, set the radio there, exchange
-  an announce. Record in `mcu/radio/README.txt`. Commit `firmware: Bluetooth LE transport for nRF52840 boards`.
+  an announce. Record in `mcu/radio/README.md`. Commit `firmware: Bluetooth LE transport for nRF52840 boards`.
 
 ### Task 11: ESP32 Bluetooth
 
@@ -267,7 +267,7 @@ have a radio), `web/tests/config.test.js`, `mcu/README.txt`, `mcu/radio/README.t
 - [ ] Step 1: NimBLE Nordic UART service with the same naming and passkey rule.
 - [ ] Step 2: build the five ESP32 environments; for any that does not fit with its other
   modes, compile the transport out for that board and document the limit in
-  `mcu/platformio/README.txt`. Commit `firmware: Bluetooth LE transport for ESP32 boards`.
+  `mcu/platformio/README.md`. Commit `firmware: Bluetooth LE transport for ESP32 boards`.
 
 ## Self-Review Notes
 

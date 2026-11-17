@@ -9,7 +9,7 @@
  * The module owns no hardware and no clock. The owner feeds it the bytes from the host
  * (rnc_rnode_feed), sends what it wants to say (rnc_rnode_pull) and calls rnc_rnode_step.
  * The radio is an rnc_lora_if the owner prepared with rnc_lora_if_init; the module starts,
- * reconfigures and stops it as the host commands (see docs/rnode-mode-design.txt).
+ * reconfigures and stops it as the host commands (see docs/rnode-mode-design.md).
  *
  * Command values follow src/host_posix.c of this project (the host side of the same
  * protocol) and RNodeInterface.py of Reticulum 1.5.5.

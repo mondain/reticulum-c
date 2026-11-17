@@ -1,4 +1,4 @@
-// Bluetooth LE transport for the RNode mode (docs/rnode-mode-design.txt 6.6): one Nordic UART
+// Bluetooth LE transport for the RNode mode (docs/rnode-mode-design.md 6.6): one Nordic UART
 // service, device name "RNode XXXX", passkey pairing with the operator's PIN (set ble.pin).
 // Bluetooth stays off, and does not advertise, until a PIN is set. nRF52840 boards use the
 // Adafruit Bluefruit stack (ble_nrf.cpp); ESP32 boards use NimBLE-Arduino (ble_esp32.cpp).

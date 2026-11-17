@@ -3,7 +3,7 @@
 /*
  * What the screens of the T-Echo (e-paper) and the T-Beam Supreme (OLED) show: one status
  * record that the firmware fills in, and one text layout of it, in portable C so the words
- * and the PIN rule are tested on the host (docs/display-status-design.txt).
+ * and the PIN rule are tested on the host (docs/display-status-design.md).
  *
  * The Bluetooth PIN appears only while it is needed: Bluetooth is on (a PIN is set) and no
  * authenticated link exists. The layout checks the rule itself, so the digits are never

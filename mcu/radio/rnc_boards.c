@@ -1,6 +1,6 @@
 /* Board table; see rnc_boards.h. Pin maps and chip variants are facts about the hardware
  * (taken from the public board definitions of the RNode firmware project and checked against
- * manufacturer documentation where I know it; see README.txt for the confidence of each
+ * manufacturer documentation where I know it; see README.md for the confidence of each
  * entry). */
 #include "rnc_boards.h"
 #include <string.h>

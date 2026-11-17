@@ -172,7 +172,7 @@ instead, provision it after flashing, with no credentials in the image:
        pip, an ESP-IDF environment, or Docker with --docker)
   or, with a serial terminal at 115200 baud: send the line  rnc-config  within 2
   seconds after reset (or press BOOT), then use  set mode wifi, set ssid ..., save,
-  reboot  (see MANUAL.txt).
+  reboot  (see MANUAL.md).
 
 Replace /dev/ttyUSB0 with the board's port (/dev/ttyACM0 on a native USB port,
 COMx on Windows). Hold BOOT while pressing RESET if the board does not enter the

@@ -1,7 +1,7 @@
 #ifndef PROVISION_H
 #define PROVISION_H
 /* Runtime provisioning over the serial port: a line console that edits the settings in
- * the "rnccfg" NVS partition (mode, ssid, password, host, port). See mcu/README.txt.
+ * the "rnccfg" NVS partition (mode, ssid, password, host, port). See mcu/README.md.
  *
  * The console is NOT always on. It runs when
  *   - the board is in Wi-Fi mode and the stored settings cannot start a connection, or

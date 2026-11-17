@@ -66,7 +66,7 @@ menu "Reticulum MCU example"
         help
             During this window after every boot the line "rnc-config" on the serial
             port, or the BOOT button held for 300 ms, starts the provisioning console
-            (mcu/README.txt). In serial mode this much start-up time passes before the
+            (mcu/README.md). In serial mode this much start-up time passes before the
             node starts. The console also starts, without waiting, when Wi-Fi mode is
             selected and the stored settings are unusable.
 
@@ -84,7 +84,7 @@ menu "Reticulum MCU example"
         default RETICULUM_MCU_LORA_BOARD_NONE
         help
             Selects the pin map and the radio chip of the board for the optional LoRa
-            interface (mcu/radio/README.txt). This is hardware, not a radio setting: the
+            interface (mcu/radio/README.md). This is hardware, not a radio setting: the
             frequency, bandwidth, spreading factor, coding rate and power are NEVER set
             here. They are provisioned at runtime (lora.* keys of the console and of
             mcu/tools/wifi-config.sh) and the radio stays off until all of them are

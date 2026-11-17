@@ -7,7 +7,7 @@ thread, socket or random-device access is owned by the protocol library.
 Instance creation allocates; the default OpenSSL backend and Resources/services
 also allocate during use. `-DRNC_CRYPTO=portable` selects the Monocypher-based
 backend without linking OpenSSL into the core. See [PROVENANCE.md](PROVENANCE.md)
-for its components and [mcu/README.txt](mcu/README.txt) for firmware integration.
+for its components and [mcu/README.md](mcu/README.md) for firmware integration.
 
 The capacities below describe the default host profile. `-DRNC_PROFILE=mcu`
 reduces tables, queues and Channel windows and caps MTU at 500;

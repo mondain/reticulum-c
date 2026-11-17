@@ -2,7 +2,7 @@
  *
  * Wires rnc_mcu_app to the hardware RNG, esp_timer, NVS (identity and clock mark) and
  * one of two transports, chosen at runtime from the settings in the "rnccfg" NVS
- * partition (mcu/README.txt):
+ * partition (mcu/README.md):
  *
  *   serial (default)  HDLC on a UART or the built-in USB Serial/JTAG; the host sees
  *                     the board as a serial port, for a reticulum-c-node or

@@ -17,7 +17,7 @@
 #   --mode serial      stores "serial" (and removes the Wi-Fi use): the board goes back
 #                      to the HDLC serial transport.
 #   --mode rnode       stores "rnode": the board is a LoRa modem for a host (Sideband, rnsd)
-#                      that sets the radio itself (docs/rnode-mode-design.txt). No Wi-Fi or
+#                      that sets the radio itself (docs/rnode-mode-design.md). No Wi-Fi or
 #                      lora.* setting is needed.
 #   --partitions FILE  the partitions.csv of the firmware (the release zips contain it);
 #                      the offset and size of "rnccfg" are read from it. Default: the
@@ -33,7 +33,7 @@
 #                      partition, so the node gets a new identity at its next start
 #                      (and any other NVS data of the sketch is lost). The ESP-IDF
 #                      firmware has a separate settings partition and keeps its identity.
-#   --lora-mode off|leaf|gateway   the LoRa radio (mcu/radio/README.txt). off (the default)
+#   --lora-mode off|leaf|gateway   the LoRa radio (mcu/radio/README.md). off (the default)
 #                      keeps the radio off; leaf makes LoRa the only interface; gateway keeps
 #                      the serial or Wi-Fi interface and adds LoRa with Reticulum transport on.
 #   --lora-freq F --lora-bw B --lora-sf N --lora-cr N --lora-txp DBM [--lora-airtime PCT]
@@ -53,7 +53,7 @@
 # SECURITY: the settings are stored UNENCRYPTED in flash, and the TCP link to the
 # node is plaintext and unauthenticated at the transport level (Reticulum's own link
 # encryption applies above it). Anyone with the board can read the password. See
-# mcu/README.txt. The image file and the temporary CSV contain the password: they are
+# mcu/README.md. The image file and the temporary CSV contain the password: they are
 # written with mode 600 and the temporary ones are removed on exit.
 set -eu
 

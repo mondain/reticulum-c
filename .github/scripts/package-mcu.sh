@@ -25,18 +25,18 @@ usage() { sed -n '2,12p' "$0" >&2; exit 2; }
 # describe BOARD: sets TITLE, MANUAL (file in the checkout), SERIAL (setup text), WIFI
 # (empty for the nRF52 boards, "idf" or "arduino" for the ESP32 firmware)
 describe() {
-  MANUAL=mcu/platformio/README.txt
+  MANUAL=mcu/platformio/README.md
   WIFI=
   LORA=
   case $1 in
     esp-idf-esp32)
       TITLE="ESP32 boards (ESP-IDF build): Heltec WiFi LoRa 32 V2, LilyGo T-Beam, TTGO LoRa32 and other ESP32 boards with a USB-UART bridge"
-      MANUAL=mcu/README.txt
+      MANUAL=mcu/README.md
       WIFI=idf
       SERIAL="UART0 (GPIO1 TX / GPIO3 RX) at 115200 baud, 8N1: the port behind the USB-UART bridge." ;;
     esp-idf-esp32s3)
       TITLE="ESP32-S3 boards (ESP-IDF build): Heltec WiFi LoRa 32 V3, LilyGo T-Beam Supreme, T3-S3, T-Deck and other ESP32-S3 boards"
-      MANUAL=mcu/README.txt
+      MANUAL=mcu/README.md
       WIFI=idf
       SERIAL="UART0 (GPIO43 TX / GPIO44 RX) at 115200 baud, 8N1; boards with a native USB port can use the USB Serial/JTAG transport (menuconfig, needs a rebuild)." ;;
     heltec_wifi_lora_32_v3) WIFI=arduino; LORA=arduino; TITLE="Heltec WiFi LoRa 32 V3 (ESP32-S3), Arduino/PlatformIO build"
@@ -86,7 +86,7 @@ package_board() {
     mkdir -p "$dir/tools"
     cp "$ROOT/mcu/tools/wifi-config.sh" "$dir/tools/"
   fi
-  cp "$ROOT/$MANUAL" "$dir/MANUAL.txt"
+  cp "$ROOT/$MANUAL" "$dir/MANUAL.md"
   {
     echo "release:   $release"
     echo "version:   $VERSION"
@@ -124,7 +124,7 @@ of every hour; it is a safety net, not a compliance proof.
   The over-the-air format is meant to be compatible with stock RNodes on the same frequency
   and modem settings. A T-Echo leaf and Supreme SX1262 gateway have passed a short 915 MHz bench exchange;
   range, sustained load and stock RNode radio interoperability remain unverified.
-  Read MANUAL.txt and the notes in the project (mcu/radio/README.txt) before relying on it.
+  Read MANUAL.md and the notes in the project (mcu/radio/README.md) before relying on it.
 "
   fi
   if [ -n "$WIFI" ]; then
@@ -148,7 +148,7 @@ credentials are in this image: provision them after flashing, in either way:
      (115200 baud, 8N1), or press BOOT after reset; then  set mode wifi, set ssid ...,
      set password ..., set host ..., save, reboot.
 
-MANUAL.txt describes both, the reconnect behaviour and the security notes.
+MANUAL.md describes both, the reconnect behaviour and the security notes.
 "
   fi
   cat > "$dir/README.txt" <<EOF
@@ -181,17 +181,17 @@ Browser install and setup
   verification; factory erase requires an explicit choice and confirmation.
   nRF52840 supports acknowledged application-only serial DFU and UF2 downloads.
   Wi-Fi setup keeps an existing masked password when left blank; choose an
-  open network explicitly to remove it. See MANUAL.txt for the applicable port.
+  open network explicitly to remove it. See MANUAL.md for the applicable port.
 
 Files
   flash.txt     the exact flashing commands for this board (start here)
   BUILDINFO     release, version, commit, toolchain versions, build time
   size.txt      memory and flash use
-  MANUAL.txt    the full manual for this firmware (setup, host configuration, limits)
+  MANUAL.md    the full manual for this firmware (setup, host configuration, limits)
   the images    .bin / .uf2 / .hex / .zip, named in flash.txt
 The ELF file with symbols is not included; build from source to debug.
 
-Limits (read MANUAL.txt for the complete list)
+Limits (read MANUAL.md for the complete list)
   - Hardware bench coverage: T-Echo and Supreme SX1262, including routed /echo and
     /info over LoRa. Other boards have build/model coverage only. This is not
     sustained-load, range or independent radio interoperability evidence.
@@ -226,7 +226,7 @@ source_archive() {
 package_sources() {
   release=$1 out=$2
   source_archive "$release" esp-idf-component "$out" \
-    CMakeLists.txt idf_component.yml LICENSE include src mcu/app mcu/radio mcu/esp-idf mcu/tools mcu/build-esp-idf.sh mcu/README.txt <<EOF
+    CMakeLists.txt idf_component.yml LICENSE include src mcu/app mcu/radio mcu/esp-idf mcu/tools mcu/build-esp-idf.sh mcu/README.md <<EOF
 reticulum-c $release as an ESP-IDF component
 =============================================
 The Reticulum protocol core (C11, sans-I/O), built with the small mcu capacity profile and
@@ -242,16 +242,16 @@ reticulum_c_mcu_app (the example application). The core defines RNC_PROFILE_MCU 
 every file that includes the reticulum_c headers sees the same capacity constants.
 
 mcu/esp-idf/example is a complete firmware project; mcu/build-esp-idf.sh --docker esp32s3
-builds it (see mcu/README.txt for the details, boards and limits).
+builds it (see mcu/README.md for the details, boards and limits).
 
 This is a source archive: the firmware images are in the reticulum-c-$release-mcu-*.zip
 files of the release. See the manual for board-specific hardware evidence.
 The LoRa radio (mcu/radio) is optional and OFF
 until configured: select the board with the Kconfig choice "LoRa board" and read
-mcu/radio/README.txt (regulatory notes) first.
+mcu/radio/README.md (regulatory notes) first.
 EOF
   source_archive "$release" platformio-library "$out" \
-    CMakeLists.txt library.json LICENSE include src mcu/app mcu/radio mcu/platformio mcu/tools mcu/README.txt mcu/build-platformio.sh <<EOF
+    CMakeLists.txt library.json LICENSE include src mcu/app mcu/radio mcu/platformio mcu/tools mcu/README.md mcu/build-platformio.sh <<EOF
 reticulum-c $release as a PlatformIO library
 ============================================
 The Reticulum protocol core (C11, sans-I/O) and a portable example application for the
@@ -267,13 +267,13 @@ then #include "rnc_mcu_app.h" (see mcu/app) or the core headers. The library is 
 mcu capacity profile and the portable crypto backend (no OpenSSL); the build flags and the
 include paths for your sources come from library.json and mcu/platformio/lib_extra.py.
 
-mcu/platformio is a complete project for eight boards (README.txt there); with a Python 3
+mcu/platformio is a complete project for eight boards (README.md there); with a Python 3
 and network access, mcu/build-platformio.sh builds all of them with a pinned PlatformIO.
 
 This is a source archive: the firmware images are in the reticulum-c-$release-mcu-*.zip
 files of the release. See the manual for board-specific hardware evidence.
 The LoRa radio (mcu/radio) is optional and OFF
-until configured; read mcu/radio/README.txt (regulatory notes) first.
+until configured; read mcu/radio/README.md (regulatory notes) first.
 EOF
 }
 

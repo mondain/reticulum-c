@@ -1,5 +1,4 @@
-LoRa radio support for the reticulum-c microcontroller firmware
-================================================================
+# LoRa radio support for the reticulum-c microcontroller firmware
 
 STATUS: hardware bench exchange verified on 2026-11-14 with a LilyGo T-Echo leaf
 and a T-Beam Supreme SX1262 gateway. Settings: 915 MHz, 125 kHz bandwidth, SF8,
@@ -14,15 +13,16 @@ This does not establish range, sustained-load reliability, other board pin maps,
 or on-air interoperability with stock RNode firmware. The additional chip models
 are authored from the same datasheets as the drivers and can share mistakes.
 
-RNode mode (added after that bench run): rnc_rnode.* is the device side of the RNode
-KISS protocol on top of the same rnc_lora_if; see mcu/README.txt "RNode mode". It has
-a short two-radio hardware check (T-Echo in rnode mode on USB with this project's host adapter, a Supreme gateway as the other station, 915 MHz, both directions); see mcu/README.txt. The radio is started only by the module, only after the host
+RNode mode (added after that bench run): `rnc_rnode.*` is the device side of the RNode
+KISS protocol on top of the same rnc_lora_if; see mcu/README.md "RNode mode". It has
+a short two-radio hardware check (T-Echo in rnode mode on USB with this project's host adapter, a Supreme gateway as the other station, 915 MHz, both directions); see mcu/README.md. The radio is started only by the module, only after the host
 has set every transmit setting and the radio state; the airtime budget stays active.
 
-What is here
-------------
+## What is here
+
 Portable C (C11), no platform headers, no dependency on the protocol core:
 
+```text
   rnc_radio_hal.h   the hardware interface: SPI transfer, GPIO write/read, microsecond delay
                     and clock. Polling based; the interrupt line is only a hint.
   rnc_lora_phy.*    LoRa arithmetic: bandwidth table, symbol time, low data rate rule,
@@ -43,14 +43,15 @@ Portable C (C11), no platform headers, no dependency on the protocol core:
                     parsing, validation, printing.
   rnc_boards.*      the board table: chip variant, pins, TCXO, antenna switch, PMU.
   rnc_radio.*       the one place that decides whether the radio may run (see "Regulatory").
+```
 
 Ports (not portable code): mcu/esp-idf/example/main/radio_hal_idf.c (ESP-IDF spi_master,
 gpio, esp_timer), mcu/platformio/src/radio_hal.cpp (Arduino SPI library, ESP32 and nRF52),
 mcu/platformio/variants/rnc_nrf52840 (an identity pin map so that chip GPIO numbers can be
 used on the nRF52 boards).
 
-REGULATORY SAFETY
------------------
+## REGULATORY SAFETY
+
 The radio is OFF until the operator has set, explicitly, the mode (lora.mode leaf or
 gateway) AND the frequency, bandwidth, spreading factor, coding rate and transmit power.
 Until then the chip is not spoken to at all: no SPI traffic, no transmission, no
@@ -67,8 +68,8 @@ transmissions only, in the time on air computed from the settings, and does not 
 regulator's rules (sub-bands, listen-before-talk requirements, per-band limits).
 The firmware does not check the frequency against any regional plan.
 
-Provenance and licence
-----------------------
+## Provenance and licence
+
 The RNode firmware (https://github.com/markqvist/RNode_Firmware, GPL-3.0) was cloned into a
 scratch directory outside this repository and READ to establish FACTS about the on-air
 format, modem settings and boards: byte layouts, constants, register values, pin numbers,
@@ -79,45 +80,45 @@ fact could not be established from the source, the section "Not established" say
 This directory is covered by the repository's MIT licence. The facts, listed below, are
 not copyrightable expression; the RNode firmware keeps its own licence. See PROVENANCE.md.
 
-The over-the-air format
------------------------
+## The over-the-air format
+
 Established from the RNode firmware (facts only):
 
- 1. Every LoRa frame starts with one header byte. Bits 7..4 are a sequence number (a random
-    nibble per packet), bits 3..1 are zero when sent, bit 0 is the "split" flag.
- 2. A frame holds at most 255 bytes (the LoRa payload limit): the header plus 254 packet
-    bytes. A packet of up to 254 bytes is sent in one frame with the split flag clear.
-    A larger packet, up to the RNode's MTU of 508 bytes, is sent as two frames with the
-    same header byte (split flag set): the first with exactly 254 packet bytes, the second
-    with the rest. Reticulum's own MTU is 500, so the second frame carries at most 246.
- 3. Reception: one packet is kept pending and one sequence value ("unset" = 0xFF). A frame
-    without the split flag is a whole packet and discards a pending half. A split frame
-    starts a new pending packet when none is pending or when its sequence number differs
-    from the pending one (the old half is lost); with the same sequence number it is the
-    second half and completes the packet. There is no timeout and no length check.
- 4. Radio settings the firmware applies: explicit header, CRC on, standard (non inverted)
-    IQ, private network sync word (SX127x: 0x12; SX126x: 0x1424 in registers 0x0740/0x0741),
-    coding rate given as the denominator 5..8, bandwidths from 7.8 to 500 kHz, spreading
-    factor 5..12 (SX126x) or 6..12 (SX127x; SF6 needs implicit headers).
- 5. Preamble: the firmware targets 24 ms (6 ms for rates above 30 kbit/s) with a floor of
-    18 symbols. On the SX127x it writes the symbol count minus 4 to the preamble register.
- 6. The low data rate optimisation is switched on when the integer expression
-    2^SF / (BW in kHz, integer) exceeds 16. This differs from the datasheet's "symbol time
-    above 16 ms" exactly where the symbol is 16.384 ms long (SF12 at 250 kHz, SF11 at 125 kHz,
-    SF10 at 62.5 kHz, SF9 at 31.25 kHz): the firmware leaves it off there. The explicit
-    header carries no flag for it, so a receiver that chose the other way could not decode.
-    THIS CODE FOLLOWS THE FIRMWARE (rnc_lora_ldro), and a test pins the four cases.
- 7. The bit rate the Reticulum RNode interface uses for announce and path timing is
-    SF * (4 / CR) / (2^SF / BW) with BW in kHz; this code gives the same figure (rounded to
-    an integer); mcu/tests/mcu_radio_reference.sh compares all 320 settings with the
-    unmodified reference RNodeInterface.updateBitrate.
- 8. Channel access and airtime in the firmware: a CSMA scheme with a slot of 12 symbols
-    clamped to 24..100 ms (6 ms minimum above 30 kbit/s), a DIFS of two slots, a random
-    contention window; a long term airtime accounting over one hour with limits that the
-    host sets in hundredths of a percent. These numbers are used here for the slot and the
-    DIFS; the window growth and the budget mechanism are this project's own design.
- 9. Boards: pin numbers, chip variants, TCXO voltage selection and whether DIO2 drives the
-    antenna switch, as in the table below.
+1. Every LoRa frame starts with one header byte. Bits 7..4 are a sequence number (a random
+   nibble per packet), bits 3..1 are zero when sent, bit 0 is the "split" flag.
+2. A frame holds at most 255 bytes (the LoRa payload limit): the header plus 254 packet
+   bytes. A packet of up to 254 bytes is sent in one frame with the split flag clear.
+   A larger packet, up to the RNode's MTU of 508 bytes, is sent as two frames with the
+   same header byte (split flag set): the first with exactly 254 packet bytes, the second
+   with the rest. Reticulum's own MTU is 500, so the second frame carries at most 246.
+3. Reception: one packet is kept pending and one sequence value ("unset" = 0xFF). A frame
+   without the split flag is a whole packet and discards a pending half. A split frame
+   starts a new pending packet when none is pending or when its sequence number differs
+   from the pending one (the old half is lost); with the same sequence number it is the
+   second half and completes the packet. There is no timeout and no length check.
+4. Radio settings the firmware applies: explicit header, CRC on, standard (non inverted)
+   IQ, private network sync word (SX127x: 0x12; SX126x: 0x1424 in registers 0x0740/0x0741),
+   coding rate given as the denominator 5..8, bandwidths from 7.8 to 500 kHz, spreading
+   factor 5..12 (SX126x) or 6..12 (SX127x; SF6 needs implicit headers).
+5. Preamble: the firmware targets 24 ms (6 ms for rates above 30 kbit/s) with a floor of
+   18 symbols. On the SX127x it writes the symbol count minus 4 to the preamble register.
+6. The low data rate optimisation is switched on when the integer expression
+   2^SF / (BW in kHz, integer) exceeds 16. This differs from the datasheet's "symbol time
+   above 16 ms" exactly where the symbol is 16.384 ms long (SF12 at 250 kHz, SF11 at 125 kHz,
+   SF10 at 62.5 kHz, SF9 at 31.25 kHz): the firmware leaves it off there. The explicit
+   header carries no flag for it, so a receiver that chose the other way could not decode.
+   THIS CODE FOLLOWS THE FIRMWARE (rnc_lora_ldro), and a test pins the four cases.
+7. The bit rate the Reticulum RNode interface uses for announce and path timing is
+   SF * (4 / CR) / (2^SF / BW) with BW in kHz; this code gives the same figure (rounded to
+   an integer); mcu/tests/mcu_radio_reference.sh compares all 320 settings with the
+   unmodified reference RNodeInterface.updateBitrate.
+8. Channel access and airtime in the firmware: a CSMA scheme with a slot of 12 symbols
+   clamped to 24..100 ms (6 ms minimum above 30 kbit/s), a DIFS of two slots, a random
+   contention window; a long term airtime accounting over one hour with limits that the
+   host sets in hundredths of a percent. These numbers are used here for the slot and the
+   DIFS; the window growth and the budget mechanism are this project's own design.
+9. Boards: pin numbers, chip variants, TCXO voltage selection and whether DIO2 drives the
+   antenna switch, as in the table below.
 
 What this implementation adds (none of it changes what is sent): a pending first half is
 kept only if it carries exactly 254 bytes; it expires after 2 s plus half the time on air
@@ -131,26 +132,26 @@ Known difference: for a packet of exactly 508 bytes the RNode firmware also send
 header-only frame. This code sends two frames, and ignores a header-only frame that it
 receives. Reticulum never sends more than 500 bytes.
 
-Not established
----------------
- - Whether this firmware and stock RNode firmware actually decode each other.
-   The hardware bench used reticulum-c at both ends. The derivation may have
-   missed a setting (for example a register the RNode firmware
-   sets that does not appear in what was read, or behaviour of the chip not covered by the
-   datasheets).
- - The TCXO voltage of each board beyond what the RNode firmware uses (it is the only
-   source); a wrong value shows as an oscillator start error at start-up, which this code
-   detects (init fails and the interface retries) but cannot fix.
- - Whether the RNode firmware's treatment of the SX126x PA is the best for each power; the
-   firmware always uses the +22 dBm PA setting. This code uses the datasheet's optimal
-   settings for four power classes, which changes the efficiency, not the format.
- - The CAD parameters (SetCadParams) are values commonly used for 125 kHz bandwidth, not
-   taken from a datasheet table I could check; CAD is implemented and model-tested but the
-   interface does not use it (it listens for the preamble and header instead).
- - The behaviour of the real chips at the edges of the datasheet's ranges.
+## Not established
 
-Driver and HAL design
----------------------
+- Whether this firmware and stock RNode firmware actually decode each other.
+  The hardware bench used reticulum-c at both ends. The derivation may have
+  missed a setting (for example a register the RNode firmware
+  sets that does not appear in what was read, or behaviour of the chip not covered by the
+  datasheets).
+- The TCXO voltage of each board beyond what the RNode firmware uses (it is the only
+  source); a wrong value shows as an oscillator start error at start-up, which this code
+  detects (init fails and the interface retries) but cannot fix.
+- Whether the RNode firmware's treatment of the SX126x PA is the best for each power; the
+  firmware always uses the +22 dBm PA setting. This code uses the datasheet's optimal
+  settings for four power classes, which changes the efficiency, not the format.
+- The CAD parameters (SetCadParams) are values commonly used for 125 kHz bandwidth, not
+  taken from a datasheet table I could check; CAD is implemented and model-tested but the
+  interface does not use it (it listens for the preamble and header instead).
+- The behaviour of the real chips at the edges of the datasheet's ranges.
+
+## Driver and HAL design
+
 The HAL is a table of five hooks (rnc_radio_hal.h): spi_transfer (one transaction with chip
 select asserted around exactly that call), gpio_write, gpio_read, delay_us, now_us. Pins
 are named by role (reset, busy, dio, rxen, txen); a pin the board lacks reads as -1.
@@ -192,8 +193,9 @@ airtime, sends its frames back to back, and the radio returns to receive. A queu
 older than 60 s is dropped. A radio that fails to start or to resume is retried every 10 s
 and the application announces when it comes up.
 
-Modes and configuration
------------------------
+## Modes and configuration
+
+```text
 lora.mode off      (default) no radio.
 lora.mode leaf     LoRa is the node's only interface. It announces on LoRa, answers /echo and
                    /info over LoRa, forwards nothing (no transport). The serial or Wi-Fi
@@ -204,11 +206,15 @@ lora.mode gateway  the serial or Wi-Fi interface (as chosen by "mode") plus LoRa
                    (2 interfaces, 12 paths, 8 remembered announces, 4 queued announces,
                    8 link table entries): this is a small gateway, not a repeater for a
                    busy network. Transport is OFF in every other mode.
+```
+
 If leaf is requested but the radio cannot be used (settings incomplete, board not
 supported), the board falls back to its serial or Wi-Fi leaf behaviour instead of going
 silent.
 
-Keys (same console, tools and storage ideas as the Wi-Fi provisioning, mcu/README.txt):
+Keys (same console, tools and storage ideas as the Wi-Fi provisioning, mcu/README.md):
+
+```text
   lora.mode     off | leaf | gateway
   lora.freq     Hz (868100000) or MHz with a decimal point (868.1); 137 to 1020 MHz
   lora.bw       Hz (125000) or kHz below 1000 (125, 62.5, 7.8); one of 7.8 10.4 15.6 20.8
@@ -217,18 +223,21 @@ Keys (same console, tools and storage ideas as the Wi-Fi provisioning, mcu/READM
   lora.cr       5..8, or 4/5 .. 4/8
   lora.txp      -9..22 dBm at the chip output (limited by the chip and the board)
   lora.airtime  percent of every hour, 0.01 to 100 (default 1)
+```
+
 Console: set lora.freq 868.1 ... save, reboot. Without a console: mcu/tools/wifi-config.sh
 --lora-mode ... --lora-freq ... (see its header). Storage: ESP-IDF NVS partition "rnccfg",
 Arduino ESP32 Preferences "rnc_net", nRF52 the internal file system (/rnc_lora). The
 build selects the BOARD (Kconfig choice RETICULUM_MCU_LORA_BOARD in ESP-IDF, the
 environment name in PlatformIO), never the frequency or power.
 
-Boards
-------
+## Boards
+
 Pin numbers are chip GPIO numbers (nRF52: port * 32 + pin). "Confidence" describes
 the source and bench coverage of each entry. Only the Supreme SX1262 and T-Echo
 entries have been exercised on hardware.
 
+```text
  id (PlatformIO env)       chip     SCK MISO MOSI  CS RST BUSY DIO  other                  confidence
  heltec_wifi_lora_32_V3    SX1262     9   11   10   8  12   13  14  TCXO 3.3 V, DIO2 sw.  pins medium-high (RNode
                            ESP32-S3                                                         firmware), TCXO voltage
@@ -251,13 +260,15 @@ entries have been exercised on hardware.
  lilygo_t_echo             SX1262    19   23   22  24  25   17  20  TCXO 1.8 V, VEXT P0.12 short hardware bench passed;
                            nRF52840                                  high, DIO2 sw.         RNode does not enable DIO2
                                                                                             here; this table does
+```
 
 The T-Beam Supreme SX1262 is offered as lilygo_t_beam_supreme (8 MB flash, native USB).
 Its AXP2101 ALDO3 radio rail is enabled and checked before SPI startup.
 Not offered as environments: the T-Deck and boards with SX1280 or LR1121.
 
-Tests (all on the host, label mcu; none of them proves anything about real radios)
-----------------------------------------------------------------------------------
+## Tests (all on the host, label mcu; none of them proves anything about real radios)
+
+```text
  reticulum_mcu_radio            core arithmetic and framing (time on air against widely published
                                  values and an independent implementation of the formula over
                                  the whole grid; the 254/255/256/500/508 boundary; a differential
@@ -279,17 +290,19 @@ Tests (all on the host, label mcu; none of them proves anything about real radio
                                  logic over TCP plus a modelled radio).
  reticulum_mcu_radio_reference  (with the reference oracle) the bit rate of all 320 settings
                                  against the unmodified reference RNodeInterface.
+```
+
 The models (mcu/tests/radio/) are strict about command order, length and state, but they were
 written by the author of the drivers.
 
-Limits
-------
- - Hardware coverage is the short T-Echo/Supreme SX1262 bench exchange described
-   above. Range, sustained load, other boards and stock RNode interoperability
-   remain unverified.
- - Half duplex, one radio, one channel, one set of modem settings at a time.
- - No frequency hopping, no FSK, no implicit-header traffic, no Bluetooth, no display.
- - No IFAC.
- - Gateway mode shares the 8-slot event queue and 12-path table of the mcu profile.
- - The time on air uses the configured preamble; an SX127x sends 4 symbols fewer than the
-   number configured (the register holds the count minus 4), so the budget is slightly high.
+## Limits
+
+- Hardware coverage is the short T-Echo/Supreme SX1262 bench exchange described
+  above. Range, sustained load, other boards and stock RNode interoperability
+  remain unverified.
+- Half duplex, one radio, one channel, one set of modem settings at a time.
+- No frequency hopping, no FSK, no implicit-header traffic, no Bluetooth, no display.
+- No IFAC.
+- Gateway mode shares the 8-slot event queue and 12-path table of the mcu profile.
+- The time on air uses the configured preamble; an SX127x sends 4 symbols fewer than the
+  number configured (the register holds the count minus 4), so the budget is slightly high.

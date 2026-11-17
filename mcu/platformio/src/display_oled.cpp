@@ -1,6 +1,6 @@
 // The status screen of the T-Beam Supreme: a 128 x 64 SH1106 OLED on I2C (address 0x3C, SDA 17,
 // SCL 18). The AXP2101 power chip is on the other bus (Wire1 on 42/41, radio_hal.cpp), so the
-// two do not share a bus. See display_mode.h and docs/display-status-design.txt.
+// two do not share a bus. See display_mode.h and docs/display-status-design.md.
 #include "display_mode.h"
 
 #if defined(RNC_DISPLAY_OLED)

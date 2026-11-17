@@ -180,7 +180,7 @@ source revision, or check a release's asset list before choosing its archive.
 
 Each firmware archive holds the flashable files and flash instructions; the
 ESP-IDF component and PlatformIO library are also released as source archives
-for use in your own firmware. `mcu/README.txt` and `mcu/platformio/README.txt`
+for use in your own firmware. `mcu/README.md` and `mcu/platformio/README.md`
 cover prerequisites, building, flashing and wiring a board to a node daemon.
 Network and radio. ESP32 and ESP32-S3 firmware can join a network over Wi-Fi as
 a TCP client of any node. A board can also carry a LoRa radio (SX1262/SX1268 or
@@ -194,7 +194,7 @@ there are no transmit defaults, the hourly airtime budget defaults to 1%, and th
 operator is responsible for legal frequency, power and duty cycle. The ESP-IDF
 release images are generic and select no radio board; the eight PlatformIO
 archives include the board's pin table. Board pin tables are in
-`mcu/radio/README.txt`; the Supreme SX1262 has a dedicated PlatformIO target
+`mcu/radio/README.md`; the Supreme SX1262 has a dedicated PlatformIO target
 with AXP2101 radio power control. T-Beam v1.2 and Supreme LR1121 are unsupported.
 
 Hardware evidence: a LilyGo T-Echo leaf and T-Beam Supreme SX1262 gateway have
@@ -220,7 +220,7 @@ LoRa automatically. Frequency and power must be chosen explicitly. Wi-Fi
 passwords are not stored by the page. Browser flashing requires HTTPS and a
 browser with Web Serial support; downloads remain available without it.
 
-The PlatformIO firmware also has an `rnode` mode (`set mode rnode`, or "Run as: RNode modem" in the setup form): the board becomes a LoRa modem that Sideband, rnsd or another Reticulum host drives over USB, or over Bluetooth LE once a six digit PIN is set (`set ble.pin`), with the RNode protocol. On a LilyGo T-Echo it has been driven over USB by this project's host RNode adapter, and over Bluetooth LE from a Linux PC and from Sideband on Android, with packets exchanged over the air with a T-Beam Supreme. Not yet verified: the unmodified reference RNodeInterface and rnsd, range, and the ESP32 Bluetooth transport (compiled only, never run on hardware). The board runs no Reticulum node of its own in this mode, so it announces nothing and its own packet counters stay at 0 until a host drives it; see `mcu/README.txt`.
+The PlatformIO firmware also has an `rnode` mode (`set mode rnode`, or "Run as: RNode modem" in the setup form): the board becomes a LoRa modem that Sideband, rnsd or another Reticulum host drives over USB, or over Bluetooth LE once a six digit PIN is set (`set ble.pin`), with the RNode protocol. On a LilyGo T-Echo it has been driven over USB by this project's host RNode adapter and, over Bluetooth LE, from a Linux PC (BlueZ). Sideband on one Android phone connected to it over Bluetooth LE in a single session, and the T-Echo then counted two packets received and two sent over the air with a T-Beam Supreme. To connect Sideband: set `ble.pin`, pair the phone with that PIN in Android's Bluetooth settings, turn on "Connect using Bluetooth" and "Device requires BLE" in Sideband and restart it (Sideband's plain "Bluetooth" option is classic Bluetooth and cannot see this board). Not yet verified: that Sideband displays the announces the board receives, reconnecting repeatedly, other phones, the unmodified reference RNodeInterface and rnsd, range, and the ESP32 Bluetooth transport (compiled only, never run on hardware). The board runs no Reticulum node of its own in this mode, so it announces nothing and its own packet counters stay at 0 until a host drives it; see `mcu/README.md`.
 
 The Pages workflow builds all eight board variants from the displayed source
 commit, validates flash layouts and checksums, and retains up to five versions.
