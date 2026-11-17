@@ -46,8 +46,9 @@ How a release happens
    the firmware for the ESP32 and nRF52 boards, packages it, and only then
    publishes the release.
    The release is created by the workflow's own token, which does not start other
-   workflows, so the browser installer does not list the new version by itself.
-   Publish it with:  gh workflow run pages.yml -f release_tag=v0.2.1
+   workflows, so the last step of the release job dispatches the browser installer
+   workflow (pages.yml) at the new tag. Nothing further is needed by hand; check
+   that the Firmware flasher Pages run succeeded.
 4. A tag that was pushed by mistake: delete the GitHub release, then the tag
    (git push origin :refs/tags/v0.2.1 and git tag -d v0.2.1).
 
@@ -86,11 +87,11 @@ events or manual dispatch. Main and manually dispatched builds use
 main-<12-character-commit>; release-event builds use the release tag.
 
 The Release workflow publishes with GITHUB_TOKEN, so its release event does not
-trigger another workflow. After an automated release, manually run Firmware
-flasher Pages at the release tag to publish that revision to the installer;
-the current manual path still labels it main-<12-character-commit>. A release
-published directly by a user or an external token can trigger the tagged path.
-For example, with the GitHub CLI: gh workflow run pages.yml --ref v0.2.1
+trigger another workflow. Its last step therefore dispatches Firmware flasher
+Pages with release_tag set to the tag, which labels the installer entry with the
+tag. A release published directly by a user or an external token triggers the
+tagged path through the release event. To publish a tag by hand (for example to
+repeat a failed run), with the GitHub CLI: gh workflow run pages.yml -f release_tag=v0.2.1
 See https://docs.github.com/en/actions/concepts/security/github_token for the
 event restrictions. Pages publication does not add archives to an older release.
 
