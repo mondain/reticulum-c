@@ -7,7 +7,7 @@
  * choice, PlatformIO build flag) and feed it to their HAL.
  *
  * Pin numbers are the chip's own GPIO numbers (ESP32: GPIO n; nRF52: port * 32 + pin).
- * Where they come from and how sure each entry is: mcu/radio/README.txt. A pin of -1 is
+ * Where they come from and how sure each entry is: mcu/radio/README.md. A pin of -1 is
  * not present on the board.
  *
  * REGULATORY: nothing here sets a frequency or a power. See rnc_lora_cfg.h.

@@ -59,7 +59,7 @@ PIO=$VENV/bin/pio
 export PLATFORMIO_CORE_DIR=${PLATFORMIO_CORE_DIR:-$HOME/.platformio}
 export PLATFORMIO_NO_ANSI=true PLATFORMIO_DISABLE_PROGRESSBAR=true PLATFORMIO_CHECK_PLATFORMS_INTERVAL=0
 # RELEASE BUILDS MUST NOT CONTAIN Wi-Fi CREDENTIALS. Developers can compile defaults in
-# with PLATFORMIO_BUILD_FLAGS (-DRNC_MCU_DEV_WIFI_SSID=... see mcu/platformio/README.txt);
+# with PLATFORMIO_BUILD_FLAGS (-DRNC_MCU_DEV_WIFI_SSID=... see mcu/platformio/README.md);
 # such a build is marked "dev-wifi-defaults: yes" in build-info.txt (the release packaging
 # refuses it) and this script fails when RNC_RELEASE=1 is set.
 DEV_WIFI=no

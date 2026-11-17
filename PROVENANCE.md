@@ -95,7 +95,7 @@ The radio drivers were written independently from those facts and from the publi
 Semtech documents (SX1261/2 and SX1276/77/78/79 data sheets, AN1200.13); the later
 AXP2101 helper has the additional source of facts described below. Facts that could
 not be established from the source are listed under "Not established" in
-`mcu/radio/README.txt`. The RNode firmware keeps its own licence.
+`mcu/radio/README.md`. The RNode firmware keeps its own licence.
 
 RNode firmware commit read: 56775c51b60a6190242e324c210997dcc7637e53.
 

@@ -46,7 +46,7 @@ int rnc_radio_setup(rnc_radio *r, const rnc_board *board, const rnc_radio_hal *h
 /* Prepares `r` for a radio that a host drives (RNode mode, rnc_rnode.h): the driver and the
  * LoRa interface are bound to the board and the HAL, but nothing is started and the chip is
  * not touched: the RNode module is the gate there and starts the radio only after the host
- * has set every transmit setting and the radio state (docs/rnode-mode-design.txt 6.4).
+ * has set every transmit setting and the radio state (docs/rnode-mode-design.md 6.4).
  * `airtime_hundredths` is the airtime budget the module starts from. Returns RNC_RADIO_OK or
  * RNC_RADIO_BOARD_UNSUPPORTED (no such board, not supported, or no HAL). */
 int rnc_radio_prepare_host(rnc_radio *r, const rnc_board *board, const rnc_radio_hal *hal,

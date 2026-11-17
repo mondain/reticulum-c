@@ -16,7 +16,7 @@ Adafruit SH110X on the Supreme).
 **Tech Stack:** C11 (portable), Arduino/PlatformIO C++, GxEPD2, Adafruit GFX, Adafruit
 SH110X, Adafruit BusIO, ctest.
 
-**Spec:** docs/display-status-design.txt (approved 2026-11-14, with section 6.6). Read it first.
+**Spec:** docs/display-status-design.md (approved 2026-11-14, with section 6.6). Read it first.
 
 ## Global Constraints
 
@@ -209,7 +209,7 @@ pinned; `-DRNC_DISPLAY_OLED`).
   and record what was needed.
 - [ ] Step 4: with the owner looking: rnode mode with a PIN (PIN line shown), pair from BlueZ
   (PIN disappears when paired), disconnect (PIN returns), `set ble.pin` empty (no PIN line);
-  record what was seen in `mcu/README.txt`. Commit `firmware: OLED status screen on the T-Beam Supreme`.
+  record what was seen in `mcu/README.md`. Commit `firmware: OLED status screen on the T-Beam Supreme`.
 
 ### Task 5: E-paper driver for the T-Echo
 
@@ -236,11 +236,11 @@ pinned; `-DRNC_DISPLAY_OLED`).
 
 ### Task 6: Docs, CI check and review
 
-**Files:** Modify `mcu/README.txt`, `COMPATIBILITY.md`, `web/index.html` (one sentence),
-`docs/display-status-design.txt` (status).
+**Files:** Modify `mcu/README.md`, `COMPATIBILITY.md`, `web/index.html` (one sentence),
+`docs/display-status-design.md` (status).
 
 - [ ] Step 1: document the screens, the PIN rule, what each screen shows, the refresh policy and
-  the evidence level (what was seen, on which boards) in `mcu/README.txt` and
+  the evidence level (what was seen, on which boards) in `mcu/README.md` and
   `COMPATIBILITY.md`.
 - [ ] Step 2: run the unit tests, the web tests and all eight environment builds; Expected: PASS.
 - [ ] Step 3: push the branch and open a PR (stacked on `feature/rnode-mode`); watch the CI mcu

@@ -1,7 +1,7 @@
 // The status screen of the T-Echo: a 1.54 inch e-paper (GxEPD2_154_D67) on SPIM3, with CS 30, DC 28,
 // RESET 2, BUSY 3, SCK 31 and MOSI 29. The radio uses SPIM2; SPIM0 and SPIM1 are disabled in the
 // Adafruit nRF52 core (they serve as I2C), and a driver on one of them hangs at its first transfer. See display_mode.h and
-// docs/display-status-design.txt. E-paper refreshes take seconds: this runs in the display task
+// docs/display-status-design.md. E-paper refreshes take seconds: this runs in the display task
 // only, and the refresh policy (rnc_refresh) keeps them rare.
 #include "display_mode.h"
 

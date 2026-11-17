@@ -1,7 +1,7 @@
 // Wi-Fi TCP transport and runtime provisioning for the ESP32 / ESP32-S3 environments
 // (Arduino framework). Compiles to nothing on the nRF52 environments.
 //
-// The same concept as the ESP-IDF firmware (mcu/README.txt):
+// The same concept as the ESP-IDF firmware (mcu/README.md):
 //   - settings (mode, ssid, password, host, port) in Preferences, namespace "rnc_net";
 //   - mode "serial" (the default) keeps the HDLC stream on Serial as before;
 //   - mode "wifi" runs the HDLC stream over a TCP client connection to a Reticulum

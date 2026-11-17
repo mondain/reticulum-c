@@ -107,7 +107,7 @@ def esp32(build, art):
             "      (replaces the board's NVS partition, so the node gets a new identity)\n"
             "  or, with a serial terminal at 115200 baud: send the line  rnc-config  within 2\n"
             "  seconds after reset (or press BOOT), then  set mode wifi, set ssid ..., set password\n"
-            "  ..., set host ..., save, reboot  (see MANUAL.txt).\n"
+            "  ..., set host ..., save, reboot  (see MANUAL.md).\n"
             % (chip, chip, flash_mode, flash_freq, flash_size, args, chip))
 
 
