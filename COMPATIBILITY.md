@@ -585,7 +585,13 @@ public network for a few minutes: it then forwarded no announce for a new destin
 until it was reset. On 2026-11-17 the change was run on it: with this code on the Supreme (build 110b48a), 218
 announces from a public network were passed to it in 4 minutes, and two fresh host announces sent through a
 T-Echo (one with a real-time stamp, one dated 10 minutes back) were both forwarded to its serial side. One run
-on one board.
+on one board. The release build was rechecked on 2026-11-17 (0.5.2, flashed from the release
+archive with the parts written separately so the identity and settings stayed): after 3 hours 23 minutes
+without a reboot (uptime 12,168 s, free heap 189,772 bytes, the same as at 11,697 s and 144 bytes
+below the 189,916 at start), with a gateway passing it the public network's announces for 5 minutes,
+two fresh announces sent from a T-Echo over LoRa came out of its serial side within a second, and a
+reference client on the public network found it at 3 hops, linked and got `/echo` and `/info`. One board,
+one afternoon.
 
 ## Configuration knobs (`feature/config-knobs`)
 

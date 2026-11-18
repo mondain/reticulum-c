@@ -294,7 +294,10 @@ depend on the relay queue; COMPATIBILITY.md, "Path table pressure"). Hardware ch
 110b48a on the Supreme: 218 announces were passed to it from a public network in 4 minutes, then two fresh host
 announces were sent through the T-Echo (USB, reference RNodeInterface), one with a real-time stamp and one
 dated 10 minutes back; both reached the Supreme's serial side, twice each (the relay and its retry). One
-run on one board; persistence over hours was not rechecked.
+run on one board. Rechecked on the 0.5.2 release build on 2026-11-17: after 3 hours 23 minutes without a
+reboot (free heap 189,772 bytes, 144 below the start) and a 5 minute public-network feed, two fresh
+announces from the T-Echo over LoRa were forwarded to the serial side within a second, and a reference
+client on the public network reached the Supreme at 3 hops (`/echo`, `/info`). One board, one afternoon.
 
 NOT verified over USB: rnsd, and Sideband (its Bluetooth session is recorded above). The script
 mcu/tests/mcu_rnode_reference.sh has not been run (the reference was driven by hand over USB, above). Also not verified: a stock RNode on the other end, rnodeconf (it needs the EEPROM commands,

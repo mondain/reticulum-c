@@ -38,8 +38,11 @@ is a separate publication and can include changes not yet in a tagged release.
 
 ## How a release happens
 
-1. Raise VERSION in CMakeLists.txt in a pull request, merge it, and let CI go
-   green on main.
+1. Raise the version in a pull request, merge it, and let CI go green on main. The
+   version is in six places (CMakeLists.txt, library.json, idf_component.yml, the
+   component copy under mcu/esp-idf/components/reticulum_c/idf_component.yml,
+   mcu/app/rnc_mcu_app.h and the "today" note at the top of this file); `sh .github/scripts/check-version.sh vX.Y.Z`
+   checks that they agree.
 2. Tag that commit and push only the tag:
 
    ```sh
@@ -47,7 +50,10 @@ is a separate publication and can include changes not yet in a tagged release.
    git push origin v0.2.1
    ```
 
-3. The Release workflow (.github/workflows/release.yml) runs on the tag push
+3. The tag push also runs the reference Python RNS and Leviculum interoperability
+   workflows (rns-interop.yml, leviculum-interop.yml). They run on tags and on demand,
+   not on every push or pull request, so a release is the normal point to see them.
+   The Release workflow (.github/workflows/release.yml) runs on the tag push
    and on nothing else that creates a release. Its first job, `version`, runs
    check-version.sh with the tag and stops the whole workflow unless the tag and
    every version file agree. Then it builds and tests the Linux archives, builds
@@ -118,8 +124,8 @@ system. Browser setup uses the rnc-config console, not RNode EEPROM provisioning
 Validate publication rules with python3 tests/test_web_firmware.py. In web/ run
 npm ci, npm test, npm run build and npm run test:ui (install Playwright Chromium
 with npx playwright install --with-deps chromium first). Pages success verifies
-this pipeline; check the separate C SDK and interoperability workflow for the
-full SDK CI result.
+this pipeline; check the C SDK CI workflow, and the interoperability workflows (tags and on demand),
+for the full SDK result.
 
 ## Trial builds
 
