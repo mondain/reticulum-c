@@ -1,6 +1,14 @@
 # SDK 0.2 readiness and validation record
 
-## Current status (2026-11-14)
+## Current status
+
+Latest release: 0.5.2 (2026-11-17), the first with path eviction for the microcontroller
+profile; the entries below are the 2026-11-14 snapshot. Hardware checked since then (T-Echo
+and T-Beam Supreme, rnode mode and Bluetooth, gateway forwarding for 3 hours) is recorded in
+`mcu/README.md` and [COMPATIBILITY.md](../COMPATIBILITY.md); the reference Python RNS and
+Leviculum interoperability jobs now run on tags and on demand, not on every push.
+
+### Snapshot of 2026-11-14
 
 The [browser firmware installer](https://mondain.github.io/reticulum-c/) is live.
 Its first published build is `main-8b46e4b63da4`, sourced from merge commit
@@ -30,7 +38,7 @@ Validation recorded at that implementation snapshot:
 Only those two board profiles have hardware bench evidence. Range, sustained
 load, other boards, actual Wi-Fi deployment and on-air stock RNode
 interoperability remain unverified. See the current [README](../README.md),
-[compatibility record](../COMPATIBILITY.md) and [release instructions](releasing.txt).
+[compatibility record](../COMPATIBILITY.md) and [release instructions](releasing.md).
 
 The sections below retain the original PR #2 preparation and evidence. Their
 snapshot counts and verification limits describe that historical milestone,
