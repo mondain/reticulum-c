@@ -75,7 +75,8 @@ Firmware per board:    reticulum-c-<version>-mcu-<board>.zip (flashable files,
                        (ESP-IDF) and the PlatformIO boards heltec_wifi_lora_32_v3,
                        heltec_wifi_lora_32_v2, ttgo_t_beam, lilygo_t3_s3,
                        lilygo_t_beam_supreme (SX1262 variant),
-                       wiscore_rak4631, heltec_t114, lilygo_t_echo
+                       wiscore_rak4631, heltec_t114, seeed_xiao_nrf52840_wio,
+                       lilygo_t_echo
 Sources for firmware:  reticulum-c-<version>-esp-idf-component.tar.gz and
                        reticulum-c-<version>-platformio-library.tar.gz
 Checksums:             SHA256SUMS covers every archive.
@@ -96,7 +97,7 @@ with compiled-in credentials.
 
 ## Browser installer publication
 
-.github/workflows/pages.yml builds all eight PlatformIO board environments and
+.github/workflows/pages.yml builds all nine PlatformIO board environments and
 deploys https://mondain.github.io/reticulum-c/ independently of the Release
 workflow. It runs for relevant main-branch pushes, externally published release
 events or manual dispatch. Main and manually dispatched builds use

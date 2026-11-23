@@ -36,6 +36,12 @@ static const rnc_board BOARDS[] = {
     {"heltec_t114", "Heltec Mesh Node T114 (nRF52840, SX1262)", RNC_BOARD_SX1262,
      {1262, RNC_SX126X_TCXO_1V8, 5000, 1, 0, 0x28}, 0, 19, 23, 22, 24, 25, 17, 20, N, N, N,
      RNC_BOARD_PMU_NONE, N, N, 1, 22, ""},
+    {"seeed_xiao_nrf52840_wio", "Seeed XIAO nRF52840 with Wio-SX1262 (nRF52840, SX1262)", RNC_BOARD_SX1262,
+     {1262, RNC_SX126X_TCXO_1V8, 5000, 1, 0, 0x28}, 0, 45, 46, 47, 4, 28, 29, 3, 5, N, N,
+     RNC_BOARD_PMU_NONE, N, N, 1, 22,
+     "Wio-SX1262 for XIAO (SKU 113010003 / kit 102010710) on D8-D10 (SPI), D4 CS, D2 RESET, D3 BUSY, "
+     "D1 DIO1, D5 RXEN; pins from the Meshtastic variant of the same kit and the Seeed schematic; RXEN "
+     "is held high and the TX path follows DIO2"},
     {"lilygo_t_echo", "LilyGo T-Echo (nRF52840, SX1262)", RNC_BOARD_SX1262,
      {1262, RNC_SX126X_TCXO_1V8, 5000, 1, 0, 0x28}, 0, 19, 23, 22, 24, 25, 17, 20, N, N, 12,
      RNC_BOARD_PMU_NONE, N, N, 1, 22,

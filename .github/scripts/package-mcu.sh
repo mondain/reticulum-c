@@ -53,6 +53,8 @@ describe() {
       SERIAL="The native USB serial port (CDC); the host must assert DTR." ;;
     heltec_t114) LORA=arduino; TITLE="Heltec Mesh Node T114 (nRF52840), Arduino/PlatformIO build"
       SERIAL="The native USB serial port (CDC); the host must assert DTR." ;;
+    seeed_xiao_nrf52840_wio) LORA=arduino; TITLE="Seeed XIAO nRF52840 with Wio-SX1262, Arduino/PlatformIO build"
+      SERIAL="The native USB serial port (CDC); the host must assert DTR." ;;
     lilygo_t_echo) LORA=arduino; TITLE="LilyGo T-Echo (nRF52840), Arduino/PlatformIO build"
       SERIAL="The native USB serial port (CDC); the host must assert DTR." ;;
     *) echo "package-mcu: unknown board '$1'" >&2; exit 2 ;;
@@ -173,7 +175,7 @@ Updating
   file system, bootloader and SoftDevice. An existing compatible bootloader is required.
 
 Browser install and setup
-  https://mondain.github.io/reticulum-c/ offers the eight exact PlatformIO board
+  https://mondain.github.io/reticulum-c/ offers the nine exact PlatformIO board
   images and the rnc-config setup console in desktop browsers with Web Serial.
   Main-commit builds there can be newer than this release archive. Generic
   ESP-IDF images are not offered by the browser installer.
@@ -267,7 +269,7 @@ then #include "rnc_mcu_app.h" (see mcu/app) or the core headers. The library is 
 mcu capacity profile and the portable crypto backend (no OpenSSL); the build flags and the
 include paths for your sources come from library.json and mcu/platformio/lib_extra.py.
 
-mcu/platformio is a complete project for eight boards (README.md there); with a Python 3
+mcu/platformio is a complete project for nine boards (README.md there); with a Python 3
 and network access, mcu/build-platformio.sh builds all of them with a pinned PlatformIO.
 
 This is a source archive: the firmware images are in the reticulum-c-$release-mcu-*.zip

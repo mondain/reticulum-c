@@ -30,6 +30,7 @@ and observed the T-Echo at three hops. This is not a range or sustained-load tes
 | lilygo_t3_s3 | LilyGo T3-S3 (also: other ESP32-S3 boards with USB) | ESP32-S3 | native USB (CDC) |
 | wiscore_rak4631 | RAKwireless WisCore RAK4631 | nRF52840 | native USB (CDC) |
 | heltec_t114 | Heltec Mesh Node T114 | nRF52840 | native USB (CDC) |
+| seeed_xiao_nrf52840_wio | Seeed XIAO nRF52840 with Wio-SX1262 | nRF52840 | native USB (CDC) |
 | lilygo_t_echo | LilyGo T-Echo | nRF52840 | native USB (CDC) |
 
 The LilyGo T-Deck is not an environment: PlatformIO 6.12 has no board definition for
@@ -101,9 +102,9 @@ clock policy uses (../README.md, "Unix time policy"); the default is the current
 
 ## LoRa radio
 
-All eight environments contain the LoRa driver for their board (the board table is
+All nine environments contain the LoRa driver for their board (the board table is
 mcu/radio/rnc_boards.c; the environment name selects the entry): SX1262 on heltec_wifi_lora_32_V3,
-lilygo_t3_s3, lilygo_t_beam_supreme, wiscore_rak4631, heltec_t114, lilygo_t_echo;
+lilygo_t3_s3, lilygo_t_beam_supreme, wiscore_rak4631, heltec_t114, seeed_xiao_nrf52840_wio, lilygo_t_echo;
 SX1276 on heltec_wifi_lora_32_V2 and
 ttgo_t_beam (v1.0/v1.1, its AXP192 radio rail is switched on over I2C). The radio is OFF, and the
 chip is not touched, until the mode and the frequency, bandwidth, spreading factor, coding rate
@@ -174,7 +175,7 @@ first with a debug probe (see the board vendor's instructions); that is not cove
 
 ## Browser install and setup
 
-https://mondain.github.io/reticulum-c/ publishes all eight board images with a
+https://mondain.github.io/reticulum-c/ publishes all nine board images with a
 version selector and SHA-256 downloads. Main builds are labeled `main-<commit>`;
 they are separate from tagged release archives. The catalog retains up to five
 versions as new builds are deployed, prioritizing tagged releases in its history.
