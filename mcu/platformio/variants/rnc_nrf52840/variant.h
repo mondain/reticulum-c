@@ -2,7 +2,7 @@
 #define RNC_NRF52840_VARIANT_H
 /*
  * Arduino variant for the reticulum-c firmware on nRF52840 boards (RAK4631, Heltec T114,
- * LilyGo T-Echo) with the Adafruit nRF52 core. Its one purpose is an identity pin map:
+ * Seeed XIAO nRF52840 Wio-SX1262, LilyGo T-Echo) with the Adafruit nRF52 core. Its one purpose is an identity pin map:
  * Arduino pin number n is the chip's GPIO n for n < 32 (port 0) and 32 + k for P1.k, so
  * the radio pin numbers of mcu/radio/rnc_boards.c (chip GPIO numbers) can be given to
  * pinMode, digitalWrite and the SPI library as they are. No board LEDs or buttons are

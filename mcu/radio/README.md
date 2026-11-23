@@ -257,6 +257,9 @@ entries have been exercised on hardware.
                            nRF52840                                  supply), DIO2 sw.      medium-low
  heltec_t114               SX1262    19   23   22  24  25   17  20  TCXO 1.8 V, DIO2 sw.  medium
                            nRF52840
+ seeed_xiao_nrf52840_wio   SX1262    45   46   47   4  28   29   3  RXEN 5, TCXO 1.8 V,   pins from the Meshtastic
+                           nRF52840                                  DIO2 sw.              variant; short bench exchange
+                                                                                            with a T-Echo passed
  lilygo_t_echo             SX1262    19   23   22  24  25   17  20  TCXO 1.8 V, VEXT P0.12 short hardware bench passed;
                            nRF52840                                  high, DIO2 sw.         RNode does not enable DIO2
                                                                                             here; this table does

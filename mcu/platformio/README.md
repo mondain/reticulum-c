@@ -30,6 +30,7 @@ and observed the T-Echo at three hops. This is not a range or sustained-load tes
 | lilygo_t3_s3 | LilyGo T3-S3 (also: other ESP32-S3 boards with USB) | ESP32-S3 | native USB (CDC) |
 | wiscore_rak4631 | RAKwireless WisCore RAK4631 | nRF52840 | native USB (CDC) |
 | heltec_t114 | Heltec Mesh Node T114 | nRF52840 | native USB (CDC) |
+| seeed_xiao_nrf52840_wio | Seeed XIAO nRF52840 with Wio-SX1262 | nRF52840 | native USB (CDC) |
 | lilygo_t_echo | LilyGo T-Echo | nRF52840 | native USB (CDC) |
 
 The LilyGo T-Deck is not an environment: PlatformIO 6.12 has no board definition for
