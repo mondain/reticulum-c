@@ -1,6 +1,6 @@
 {
   "name": "reticulum-c",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Reticulum protocol core (C11, sans-I/O) for ESP32 and nRF52840 with the portable crypto backend and the small mcu capacity profile, plus a portable example application",
   "keywords": "reticulum, mesh, lora, networking, cryptography, esp32, nrf52",
   "license": "MIT",
