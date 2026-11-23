@@ -31,6 +31,10 @@ BOARDS = {
     'lilygo_t_echo': ('LilyGo T-Echo', 'nrf52840', 'SX1262', True),
 }
 ESP_FILES = {'bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'reticulum-c-mcu.bin'}
+# (application start, DFU softdevice_req) of the bootloader on each nRF52840 board. The default is the
+# S140 6.1.1 layout of the Adafruit-style bootloaders; the Seeed XIAO bootloader carries S140 7.3.0.
+NRF_LAYOUT = {'seeed_xiao_nrf52840_wio': (0x27000, 0x0123)}
+NRF_LAYOUT_DEFAULT = (0x26000, 0x00B6)
 NRF_FILES = {'dfu': 'reticulum-c-mcu-dfu.zip', 'uf2': 'reticulum-c-mcu.uf2'}
 CHIPS = {'esp32': 'ESP32', 'esp32s3': 'ESP32-S3', 'nrf52840': 'nRF52840'}
 
@@ -130,8 +134,9 @@ def esp_parts(directory, metadata, chip):
     return files, sorted(parts, key=lambda p: p['offset'])
 
 
-def validate_nrf(files):
+def validate_nrf(files, key=None):
     """Only the app region may be updated; retain filesystem and bootloader."""
+    app_start, softdevice = NRF_LAYOUT.get(key, NRF_LAYOUT_DEFAULT)
     uf2 = files[NRF_FILES['uf2']]
     if len(uf2) % 512:
         raise ValueError('invalid UF2 block size')
@@ -143,14 +148,14 @@ def validate_nrf(files):
             raise ValueError('invalid UF2 magic')
         if flags != 0x2000 or family != 0xADA52840:
             raise ValueError('wrong UF2 chip family or flags')
-        if (size != 256 or address % 256 or address < 0x26000 or address + size > 0xED000 or
+        if (size != 256 or address % 256 or address < app_start or address + size > 0xED000 or
                 total != count or number >= count or number in blocks):
             raise ValueError('UF2 outside application region or incomplete blocks')
         blocks[number] = (address, uf2[start + 32:start + 32 + size])
     application = bytearray()
     for number in range(count):
         address, data = blocks[number]
-        if address != 0x26000 + len(application):
+        if address != app_start + len(application):
             raise ValueError('UF2 application is not contiguous')
         application.extend(data)
     try:
@@ -160,7 +165,7 @@ def validate_nrf(files):
                 raise ValueError('DFU must contain application only')
             app = manifest['application']
             init = app['init_packet_data']
-            if init['device_type'] != 82 or init['softdevice_req'] != [182]:
+            if init['device_type'] != 82 or init['softdevice_req'] != [softdevice]:
                 raise ValueError('DFU target disagrees with pinned nRF52 board bootloader')
             binary, dat = app['bin_file'], app['dat_file']
             if {binary, dat, 'manifest.json'} != set(archive.namelist()) or len(archive.namelist()) != 3:
@@ -332,7 +337,7 @@ def retain_history(output, current_version, previous_site, previous_site_dir, al
             else:
                 if parts or any(descriptors[role]['path'] != f'{version}/{key}/{filename}' for role, filename in NRF_FILES.items()):
                     raise ValueError('invalid previous nRF file roles')
-                validate_nrf(blobs)
+                validate_nrf(blobs, key)
             # Validate every old asset, including the oldest release dropped by
             # the bound, so corruption never silently discards established history.
             if keep:
@@ -390,7 +395,7 @@ def stage(firmware_root, site_dir, version, commit, allow_development=False, req
                 files, parts = esp_parts(directory, metadata, chip)
             else:
                 files = {file: checked_file(directory, metadata, file) for file in NRF_FILES.values()}
-                validate_nrf(files)
+                validate_nrf(files, key)
                 parts = []
             dest = output / version / key
             dest.mkdir(parents=True)

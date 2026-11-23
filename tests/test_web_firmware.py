@@ -78,12 +78,12 @@ class WebFirmwareTests(unittest.TestCase):
             self.assertEqual(part['size'], len(data))
         self.assertEqual({p.name for p in (base / 'v1-test' / self.board.name.lower()).iterdir()}, set(self.files) - {'merged.bin'})
 
-    def nrf_fixture(self, address=0x26000, family=0xADA52840):
+    def nrf_fixture(self, address=0x26000, family=0xADA52840, board='lilygo_t_echo', softdevice=182):
         import io
         import shutil
         import zipfile
         shutil.rmtree(self.board)
-        self.board = self.fw / 'lilygo_t_echo'
+        self.board = self.fw / board
         self.board.mkdir()
         app = bytes(range(250))
         uf2 = struct.pack('<8I', 0x0a324655, 0x9e5d5157, 0x2000, address,
@@ -92,13 +92,13 @@ class WebFirmwareTests(unittest.TestCase):
         with zipfile.ZipFile(archive, 'w') as z:
             z.writestr('manifest.json', json.dumps({'manifest': {'application': {
                 'bin_file': 'firmware.bin', 'dat_file': 'firmware.dat',
-                'init_packet_data': {'device_type': 82, 'softdevice_req': [182]}}}}))
+                'init_packet_data': {'device_type': 82, 'softdevice_req': [softdevice]}}}}))
             z.writestr('firmware.bin', app)
             z.writestr('firmware.dat', bytes(14))
         self.files = {'reticulum-c-mcu-dfu.zip': archive.getvalue(), 'reticulum-c-mcu.uf2': uf2}
         self.metadata = {'schema': 1, 'family': 'nrf52', 'chip': 'nrf52840'}
         self.save()
-        (self.board / 'build-info.txt').write_text(f'commit: {SHA}\ndev-wifi-defaults: no\nfirmware: platformio-lilygo_t_echo\n')
+        (self.board / 'build-info.txt').write_text(f'commit: {SHA}\ndev-wifi-defaults: no\nfirmware: platformio-{board}\n')
 
     def test_nrf52_publishes_dfu_and_uf2_only(self):
         self.nrf_fixture()
@@ -109,6 +109,17 @@ class WebFirmwareTests(unittest.TestCase):
         self.assertTrue(board['hardwareTested'])
         self.assertEqual(board['chip'], 'nRF52840')
         self.assertEqual(board['parts'], [])
+
+    def test_xiao_uses_the_s140_7_layout(self):
+        self.nrf_fixture(address=0x27000, board='seeed_xiao_nrf52840_wio', softdevice=0x0123)
+        self.stage()
+        catalog = json.loads((self.site / 'firmware/catalog.json').read_text())
+        self.assertEqual(catalog['releases'][0]['boards'][0]['id'], 'seeed_xiao_nrf52840_wio')
+
+    def test_xiao_rejects_the_s140_6_layout(self):
+        self.nrf_fixture(address=0x26000, board='seeed_xiao_nrf52840_wio', softdevice=182)
+        with self.assertRaisesRegex(ValueError, 'UF2|DFU|contiguous'):
+            self.stage()
 
     def test_rejects_nrf_uf2_that_overwrites_identity_storage(self):
         self.nrf_fixture(address=0xED000)
