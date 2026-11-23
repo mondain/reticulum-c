@@ -65,7 +65,7 @@ mcu/platformio/README.md. nRF52840 stores its identity in its internal file syst
 
 ## Browser install and setup
 
-https://mondain.github.io/reticulum-c/ provides the eight exact PlatformIO board
+https://mondain.github.io/reticulum-c/ provides the nine exact PlatformIO board
 images and a serial setup console. Select the board and catalog version; these
 can be main-commit builds as well as releases. Web Serial needs a supported
 Chromium browser on a desktop and a USB connection; downloads remain available

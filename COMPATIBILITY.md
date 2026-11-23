@@ -1134,7 +1134,7 @@ static RAM for the ESP-IDF examples, and 203 KB flash/13 KB static RAM on nRF52;
 these are historical build measurements, not current per-board runtime budgets. The
 firmware clock is a build-time epoch plus uptime with a persisted high-water mark
 so announces stay fresh across reboots (policy in `rnc_mcu_app.h`). The Pages
-workflow builds all eight PlatformIO environments; release packaging also
+workflow builds all nine PlatformIO environments; release packaging also
 defines firmware builds, but each release's board set depends on its tagged
 source. T-Deck has no PlatformIO environment. The T-Echo's Adafruit application
 DFU/boot path has run on hardware; equivalent bootloader/memory-map assumptions

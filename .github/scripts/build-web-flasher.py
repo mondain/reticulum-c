@@ -27,6 +27,7 @@ BOARDS = {
     'lilygo_t_beam_supreme': ('LilyGo T-Beam Supreme SX1262', 'esp32s3', 'SX1262', True),
     'wiscore_rak4631': ('RAKwireless RAK4631', 'nrf52840', 'SX1262', False),
     'heltec_t114': ('Heltec Mesh Node T114', 'nrf52840', 'SX1262', False),
+    'seeed_xiao_nrf52840_wio': ('Seeed XIAO nRF52840 Wio-SX1262', 'nrf52840', 'SX1262', True),
     'lilygo_t_echo': ('LilyGo T-Echo', 'nrf52840', 'SX1262', True),
 }
 ESP_FILES = {'bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'reticulum-c-mcu.bin'}
@@ -360,7 +361,7 @@ def stage(firmware_root, site_dir, version, commit, allow_development=False, req
     if len(set(ids)) != len(ids) or any(key not in BOARDS for key in ids):
         raise ValueError('unknown or duplicate board directory')
     if require_all and set(ids) != set(BOARDS):
-        raise ValueError('incomplete firmware set: all eight boards are required')
+        raise ValueError('incomplete firmware set: all nine boards are required')
     site_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.firmware-', dir=site_dir) as temp:
         output = Path(temp)
@@ -426,7 +427,7 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--commit', required=True)
     parser.add_argument('--allow-development', action='store_true', help='explicitly label local development staging')
-    parser.add_argument('--require-all', action='store_true', help='require all eight supported boards')
+    parser.add_argument('--require-all', action='store_true', help='require all nine supported boards')
     previous = parser.add_mutually_exclusive_group()
     previous.add_argument('--previous-site', help='trusted HTTPS Pages site URL to retain history from')
     previous.add_argument('--previous-site-dir', type=Path, help='previous site directory containing firmware/catalog.json')

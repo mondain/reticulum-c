@@ -14,7 +14,7 @@ async function serialMock(page){
 }
 const supreme=/LilyGo T-Beam Supreme SX1262, SX1262/;
 test('exact board selection requires confirmation and offers UF2 fallback',async({page})=>{
- await serialMock(page);await page.goto('/');await expect(page.locator('.board-card')).toHaveCount(8);
+ await serialMock(page);await page.goto('/');await expect(page.locator('.board-card')).toHaveCount(9);
  await page.getByRole('button',{name:supreme}).click();await expect(page.locator('#flash-button')).toBeDisabled();
  await page.locator('#confirm-board').check();await expect(page.locator('#flash-button')).toBeEnabled();
  await expect(page.getByRole('radio',{name:/Keep my identity/})).toBeChecked();
@@ -42,7 +42,7 @@ test('changing boards locks flashing while an old serial session closes',async({
  expect(await page.locator('#flash-button').isDisabled()).toBe(true);
 });
 test('mobile layout has no horizontal overflow',async({page},testInfo)=>{
- await page.setViewportSize({width:390,height:844});await page.goto('/');await expect(page.locator('.board-card')).toHaveCount(8);
+ await page.setViewportSize({width:390,height:844});await page.goto('/');await expect(page.locator('.board-card')).toHaveCount(9);
  expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);await page.screenshot({path:testInfo.outputPath('mobile.png'),fullPage:true});
 });
 
