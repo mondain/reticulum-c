@@ -18,7 +18,7 @@ test('exact board selection requires confirmation and offers UF2 fallback',async
  await page.getByRole('button',{name:supreme}).click();await expect(page.locator('#flash-button')).toBeDisabled();
  await page.locator('#confirm-board').check();await expect(page.locator('#flash-button')).toBeEnabled();
  await expect(page.getByRole('radio',{name:/Keep my identity/})).toBeChecked();
- await page.getByRole('button',{name:'nRF52840',exact:true}).click();await expect(page.locator('.board-card')).toHaveCount(3);
+ await page.getByRole('button',{name:'nRF52840',exact:true}).click();await expect(page.locator('.board-card')).toHaveCount(4);
  await page.getByRole('button',{name:/LilyGo T-Echo, SX1262/}).click();await expect(page.locator('#nrf-help')).toBeVisible();
  await page.getByText('Downloads & checksums',{exact:true}).click();await expect(page.getByRole('link',{name:/UF2/})).toHaveAttribute('href',/reticulum-c-mcu.uf2$/);
 });
