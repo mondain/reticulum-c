@@ -294,11 +294,17 @@ static void enter_bootloader(int usb) {
   }
 }
 static void hard_reset(int usb) {
+  /* The USB-Serial/JTAG reads DTR and RTS as a pair: both high is "nothing", so DTR goes low for the pulse (a port
+   * just opened has both asserted), and high again afterwards so the board's output keeps flowing. */
+  if (usb)
+    set_dtr(0);
   set_rts(1); /* EN low */
   sleep_ms(usb ? 200 : 100);
   set_rts(0);
-  if (usb)
+  if (usb) {
+    set_dtr(1);
     sleep_ms(200);
+  }
 }
 static int sync_loader(void) {
   uint8_t data[36];
