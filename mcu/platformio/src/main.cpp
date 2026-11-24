@@ -306,6 +306,7 @@ static void rnode_task(void *) {
 }
 
 // Prepares the radio (not started) and the module; the boot window feeds the module live.
+bool rnc_stamp_store(const uint8_t stamp[14]) { return platform_persist(NULL, RNC_MCU_KEY_STAMP, stamp, 14) == 0; }
 static void rnode_prepare(const rnc_mcu_cfg *cfg) {
   const rnc_board *board = rnc_board_find(RNC_MCU_FIRMWARE_BOARD);
   rnc_lora_if *li = NULL;
@@ -384,6 +385,7 @@ void setup() {
   // usable settings, or on request in a short window after boot.
   rnc_mcu_cfg cfg;
   bool compiled_in = rnc_settings_load(&cfg);
+  rnc_mcu_stamp_prepare(&cfg, &platform); // what the console shows about the destination stamp
   bool lora_leaf = cfg.lora.mode == RNC_LORA_MODE_LEAF && rnc_lora_cfg_ready(&cfg.lora);
   rnc_status_sources(&g_radio.li, &g_rnode, &cfg); // the screens, if this board has one
   (void)rnc_display_start();

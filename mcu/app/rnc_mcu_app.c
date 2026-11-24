@@ -3,6 +3,7 @@
 #include "rnc_mcu_app.h"
 #include <reticulum_c/rnc.h>
 #include <reticulum_c/rnc_ipc.h>
+#include <reticulum_c/rnc_netstamp.h>
 #include <reticulum_c/rnc_node.h>
 #include <reticulum_c/rnc_responder.h>
 #include "rnc_lora_cfg.h"
@@ -346,6 +347,22 @@ rnc_mcu_app *rnc_mcu_app_new(const rnc_mcu_platform *platform, const rnc_mcu_con
       rnc_node_add_destination(app->node, &app->identity, RNC_MCU_APP_NAME, NULL, 0,
                                app->destination) != RNC_OK)
     goto fail;
+  {
+    /* RNS 1.6: a destination stamp loaded through the console is verified and announced with; the board never searches.
+     * A stored stamp that does not fit this identity (a reflash made a new one) is ignored and reported. */
+    uint8_t stamp[RNC_NETSTAMP_SIZE], any = 0;
+    int got = platform->load(platform->context, RNC_MCU_KEY_STAMP, stamp, sizeof(stamp));
+    size_t k;
+    (void)rnc_node_set_stamp_emission(app->node, 0, app->config.stamp_value > 0 ? app->config.stamp_value : 25.0);
+    for (k = 0; got == (int)sizeof(stamp) && k < sizeof(stamp); k++)
+      any |= stamp[k];
+    if (any) {
+      if (rnc_node_set_destination_stamp(app->node, app->destination, stamp) == RNC_OK)
+        say(app, "destination stamp loaded");
+      else
+        say(app, "destination stamp ignored: it does not meet the required value for this board");
+    }
+  }
   app->responder = rnc_responder_new(app->node, MAX_REQUEST, random_adapter, app);
   if (!app->responder ||
       rnc_responder_add_destination(app->responder, &app->identity, app->destination) != RNC_OK ||

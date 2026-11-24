@@ -29,6 +29,8 @@
 // Loads the settings; returns true if they came from the compiled-in developer defaults.
 bool rnc_settings_load(rnc_mcu_cfg *cfg);
 bool rnc_settings_save(const rnc_mcu_cfg *cfg);
+// Stores a destination stamp taken by the console (all zero removes it), under RNC_MCU_KEY_STAMP; false on error.
+bool rnc_stamp_store(const uint8_t stamp[14]);
 
 // Waits up to window_ms for "rnc-config" on Serial or the BOOT button. With `window` and `rn`
 // (RNode mode, where a host may already be speaking KISS) every byte also goes to the RNode
