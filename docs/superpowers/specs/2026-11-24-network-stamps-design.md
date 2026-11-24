@@ -214,6 +214,7 @@ A board does no stamp search. The destination stamp depends only on public data
 ## Decisions made by the user
 
 - Approach 2 (host first), re-pin first, as above.
+- The browser flasher only displays material and accepts a stamp; computing happens in the CLI tool.
 - Board stamps are precomputed and loaded through the flasher or console, so a board does
   minimal processing.
 
@@ -243,13 +244,13 @@ A board does no stamp search. The destination stamp depends only on public data
   is no console enforcement option yet. The 96 KB footprint baseline is rechecked after Step 3
   and updated if the table and verifier need it.
 
-## Open for the user
+## Decided: where stamps are computed
 
-- Stamping from the web flasher: a browser needs a SHA-256 loop of about 2^25 trials, which is
-  practical only with a WASM or hand-written JavaScript SHA-256 (Web Crypto's per-call async
-  digest is far too slow), and the web build has no such code today. Either the first release
-  stamps through `reticulum-c-flash` and the console only, or the web flasher gets a worker with
-  its own SHA-256 as part of Step 5.
+The first release computes board stamps in `reticulum-c-flash` and the setup console tooling
+only. The browser flasher shows the board's stamp material and status and accepts a stamp
+computed elsewhere, but does not search in the browser. In-browser computation needs a WASM or
+hand-written JavaScript SHA-256 in a worker (Web Crypto's per-call digest is far too slow for
+about 2^25 trials) and is a follow-up.
 
 ## Left to the builder
 
