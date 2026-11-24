@@ -96,6 +96,28 @@ static void cli(const char *exe) {
     config_file(example, out);
     CHECK(run_check(exe, example) == 0);
     CHECK(!unlink(example));
+    /* RNS 1.6 stamping: the sample documents the section, and every option the reference reads is accepted */
+    CHECK(run_args(exe, sample, out, sizeof(out)) == 0 && strstr(out, "[stamps]") && strstr(out, "destination_cost"));
+    CHECK(snprintf(example, sizeof(example), "%s/stamps", dir) > 0);
+    config_file(example, "[stamps]\nenforce_stamps = Yes\nstamp_destinations = Yes\nstamp_prs = Yes\n"
+                         "always_stamp_lrs = No\ndestination_cost = 23.5\ndestination_value = 25.0\n"
+                         "pr_cost = 15.8\npr_value = 15.8\nlr_cost = 12.5\nlr_stamp_timeout = 15\n"
+                         "pr_stamp_timeout = 15\nmax_workers = 4\nworker_niceness = 10\n"
+                         "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n"
+                         "destination_cost = 8.5\npr_cost = 9\n");
+    CHECK(run_check(exe, example) == 0);
+    config_file(example, "[stamps]\ndestination_cost = 500\nlr_cost = 99\nmax_workers = 0\nworker_niceness = 99\n"
+                         "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n");
+    CHECK(run_check(exe, example) == 0); /* out of range values are clamped, as the reference does */
+    config_file(example, "[stamps]\ndestination_cost = abc\n" "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n");
+    CHECK(run_check(exe, example) != 0);
+    config_file(example, "[stamps]\nenforce_stamps = maybe\n" "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n");
+    CHECK(run_check(exe, example) != 0);
+    config_file(example, "[stamps]\nno_such_option = 1\n" "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n");
+    CHECK(run_check(exe, example) != 0);
+    config_file(example, "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\npr_cost = x\n");
+    CHECK(run_check(exe, example) != 0);
+    CHECK(!unlink(example));
     CHECK(run_args(exe, interactive, out, sizeof(out)) == 2);
     CHECK(run_args(exe, unknown, out, sizeof(out)) == 2);
   }

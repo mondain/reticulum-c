@@ -232,16 +232,18 @@ static const rate_sample *rate_update(const rnc_host_status *s) {
   }
   return r;
 }
-static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
+static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node,
                             const rnc_host_status *s) {
+  uint64_t filtered = 0;
   const rate_sample *rate = rate_update(s);
   static const char *zeros[] = {"txdrb", "packet_filter_hits", "burst_count", "pr_burst_count"};
   static const char *nils[] = {"announce_rate_target", "announce_rate_grace",
                                "announce_rate_penalty", "burst_activated",
                                "pr_burst_activated"};
   size_t i;
+  (void)rnc_node_interface_filtered(node, s->interface_id, &filtered);
   (void)rnc_rpc_write_map(w, 25u + 14u + sizeof(zeros) / sizeof(*zeros) +
-                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u);
+                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u);
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
   key_string(w, "type", kind_name(s));
@@ -269,6 +271,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
   key_uint(w, "txdrp", s->dropped_packets);
   key_uint(w, "txbuffered", s->queued_frames);
   key_uint(w, "held_announces", 0);
+  key_uint(w, "afrxc", filtered); /* announces dropped for a missing or insufficient stamp */
   key_uint(w, "protocol_violations", s->protocol_violations);
   key_uint(w, "ifac_violations", s->ifac_violations);
   (void)rnc_rpc_write_string(w, "ifac_signature");
@@ -318,7 +321,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h,
   key_int(w, "gravity", s->gravity);
   key_bool(w, "announces_to_internal", s->announces_to_internal);
 }
-static void all_stats(rnc_rpc_writer *w, rnc_host *h, const config *c,
+static void all_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node, const config *c,
                       const rnc_identity *id, uint64_t uptime) {
   static const char *zeros[] = {
       "rxs",        "txs",        "arxs",       "atxs",       "arxf",
@@ -344,7 +347,7 @@ static void all_stats(rnc_rpc_writer *w, rnc_host *h, const config *c,
   (void)rnc_rpc_write_array(w, count);
   for (i = 0; i < RNC_HOST_SLOTS; ++i)
     if (rnc_host_status_at(h, i, &s) == RNC_OK)
-      interface_stats(w, h, &s);
+      interface_stats(w, h, node, &s);
   key_uint(w, "rxb", rxb);
   key_uint(w, "txb", txb);
   key_uint(w, "arxb", arxb);
@@ -521,7 +524,7 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
   }
   switch (q.type) {
   case RNC_RPC_INTERFACE_STATS:
-    all_stats(&w, h, c, id, uptime);
+    all_stats(&w, h, node, c, id, uptime);
     break;
   case RNC_RPC_PATH_TABLE:
     write_path_table(&w, h, node, q.has_max_hops, q.max_hops, NULL, now);

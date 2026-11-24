@@ -388,9 +388,11 @@ int main(void) {
   status.mtu = 500;
   status.bitrate = 1200;
   rnc_rpc_writer_init(&w, out, sizeof(out));
-  interface_stats(&w, host, &status);
+  interface_stats(&w, host, node, &status);
   CHECK(rnc_rpc_writer_finish(&w, &size) == RNC_OK && size > 50);
   CHECK(has(out, size, "gravity", 7) && has(out, size, "announces_to_internal", 21));
+  /* RNS 1.6's rnstatus reads the count of filtered announces of every interface */
+  CHECK(has(out, size, "afrxc", 5));
   rnc_host_free(host);
   rnc_node_free(node);
   checkpoint_retry_test();
