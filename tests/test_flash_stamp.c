@@ -3,6 +3,9 @@
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 #define _DEFAULT_SOURCE 1 /* cfmakeraw */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <reticulum_c/rnc_netstamp.h>
