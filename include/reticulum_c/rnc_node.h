@@ -364,6 +364,7 @@ rnc_result rnc_node_blackhole_merge(rnc_node *node, const void *input,
 typedef struct rnc_stamp_policy {
   int enabled, enforce_announces, enforce_link_requests;
   double destination_cost, pr_cost;
+  double lr_cost; /* link request cost of a destination that has none of its own; default 12.5, at most 40 */
 } rnc_stamp_policy;
 rnc_result rnc_node_stamp_policy(const rnc_node *node, rnc_stamp_policy *policy);
 rnc_result rnc_node_set_stamp_policy(rnc_node *node, const rnc_stamp_policy *policy); /* RNC_INVALID for costs outside 0..100 */
@@ -372,6 +373,14 @@ rnc_result rnc_node_set_interface_stamp_costs(rnc_node *node, uint32_t interface
                                               double pr_cost);
 /* The link request cost the destination announced with a valid stamp; RNC_STATE when it is unknown or never did. */
 rnc_result rnc_node_recall_link_cost(const rnc_node *node, const uint8_t destination[16], double *link_cost);
+/* The link request cost a local destination announces and, with enforce_link_requests, requires (the policy's
+ * lr_cost until set; 0 means none, at most 40). RNC_STATE for a destination that is not local. */
+rnc_result rnc_node_set_destination_link_cost(rnc_node *node, const uint8_t destination[16], double cost);
+rnc_result rnc_node_destination_link_cost(const rnc_node *node, const uint8_t destination[16], double *cost);
+/* Before accepting a link request for `destination`: RNC_OK when stamps are not enforced for link requests,
+ * the destination is not local, its cost is 0, or the request's encryption key meets the cost as a stamped key
+ * over destination || signature key; RNC_AUTH when it does not; RNC_PROTOCOL when the request is too short. */
+rnc_result rnc_node_check_link_request(const rnc_node *node, const uint8_t destination[16], const rnc_packet *request);
 /* Announces, and path requests, dropped on an interface for a missing or insufficient stamp. */
 rnc_result rnc_node_interface_filtered(const rnc_node *node, uint32_t interface_id, uint64_t *announces);
 rnc_result rnc_node_interface_filtered_requests(const rnc_node *node, uint32_t interface_id, uint64_t *requests);

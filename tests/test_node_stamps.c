@@ -254,6 +254,73 @@ static void pr_unenforced(void) {
   CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK && answers(n, dest) >= 1);
   rnc_node_free(n);
 }
+/* ---- link requests ---- */
+/* A link request the way Link.__init__ builds it: encryption public key, signature public key, MTU signalling.
+ * With VALID the encryption key is a stamped key found at `cost` over destination || signature key. */
+static rnc_packet link_request(const uint8_t dest[16], kind k, double cost) {
+  rnc_packet p = {0};
+  uint8_t material[48], priv[32];
+  rnc_identity peer = fresh();
+  p.flags = 2; /* LINKREQUEST, header 1, broadcast */
+  memcpy(p.destination, dest, 16);
+  memcpy(p.data, peer.public_key, 32);
+  memcpy(p.data + 32, peer.public_key + 32, 32);
+  p.data[64] = 0x21; p.data[65] = 0xf4; p.data[66] = 0x00; /* signalling bytes, not interpreted here */
+  p.data_size = 67;
+  memcpy(material, dest, 16);
+  memcpy(material + 16, p.data + 32, 32);
+  if (k == VALID) {
+    CHECK(rnc_netstamp_find_key(material, 48, cost, rng, NULL, 0, priv, p.data, NULL) == RNC_OK);
+  } else if (k == WEAK) {
+    while (rnc_netstamp_valid(material, 48, p.data, 32, cost))
+      CHECK(rng(NULL, p.data, 32) == RNC_OK);
+  }
+  return p;
+}
+static void lr_unenforced(void) {
+  uint8_t dest[16];
+  rnc_node *n = owner(dest);
+  rnc_packet p = link_request(dest, UNSTAMPED, 0);
+  CHECK(rnc_node_check_link_request(n, dest, &p) == RNC_OK);
+  rnc_node_free(n);
+}
+static void lr_enforced(void) {
+  uint8_t dest[16], other[16];
+  rnc_node *n = owner(dest);
+  rnc_stamp_policy policy;
+  rnc_packet p;
+  double cost = 0;
+  CHECK(rnc_node_stamp_policy(n, &policy) == RNC_OK && policy.lr_cost == 12.5);
+  policy.enforce_link_requests = 1;
+  policy.lr_cost = 8.0;
+  CHECK(rnc_node_set_stamp_policy(n, &policy) == RNC_OK);
+  CHECK(rnc_node_destination_link_cost(n, dest, &cost) == RNC_OK && cost == 8.0); /* the policy's until set */
+  p = link_request(dest, UNSTAMPED, 0);
+  CHECK(rnc_node_check_link_request(n, dest, &p) == RNC_AUTH);
+  p = link_request(dest, WEAK, 8.0);
+  CHECK(rnc_node_check_link_request(n, dest, &p) == RNC_AUTH);
+  p = link_request(dest, VALID, 8.0);
+  CHECK(rnc_node_check_link_request(n, dest, &p) == RNC_OK);
+  p.data_size = 40; /* too short to hold both keys */
+  CHECK(rnc_node_check_link_request(n, dest, &p) == RNC_PROTOCOL);
+  /* a destination's own cost wins; zero turns the requirement off for it */
+  CHECK(rnc_node_set_destination_link_cost(n, dest, 0.0) == RNC_OK);
+  p = link_request(dest, UNSTAMPED, 0);
+  CHECK(rnc_node_check_link_request(n, dest, &p) == RNC_OK);
+  CHECK(rnc_node_set_destination_link_cost(n, dest, 10.0) == RNC_OK && rnc_node_destination_link_cost(n, dest, &cost) == RNC_OK && cost == 10.0);
+  p = link_request(dest, VALID, 8.0); /* 8.0 does not meet 10.0 (unless the search got lucky) */
+  {
+    uint8_t material[48];
+    memcpy(material, dest, 16);
+    memcpy(material + 16, p.data + 32, 32);
+    CHECK(rnc_node_check_link_request(n, dest, &p) == (rnc_netstamp_valid(material, 48, p.data, 32, 10.0) ? RNC_OK : RNC_AUTH));
+  }
+  CHECK(rnc_node_set_destination_link_cost(n, dest, 500.0) == RNC_INVALID);
+  memset(other, 0x42, 16);
+  CHECK(rnc_node_set_destination_link_cost(n, other, 5.0) == RNC_STATE);
+  CHECK(rnc_node_check_link_request(n, other, &p) == RNC_OK); /* not one of ours: nothing to enforce */
+  rnc_node_free(n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "unenforced"))
@@ -272,6 +339,10 @@ int main(int argc, char **argv) {
     pr_stamp();
   else if (!strcmp(argv[1], "pr_unenforced"))
     pr_unenforced();
+  else if (!strcmp(argv[1], "lr_unenforced"))
+    lr_unenforced();
+  else if (!strcmp(argv[1], "lr_enforced"))
+    lr_enforced();
   else
     CHECK(0);
   puts("node stamps test passed");

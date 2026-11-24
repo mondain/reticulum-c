@@ -281,6 +281,8 @@ static rnc_result accept_link(rnc_responder *r, responder_destination *d,
   }
   result = rnc_link_configure_mtu(
       s->link, rnc_node_link_mtu_on(r->node, event->interface_id));
+  if (result == RNC_OK) /* RNS 1.6 link request stamps, when enforced */
+    result = rnc_node_check_link_request(r->node, d->destination, &event->packet);
   if (result == RNC_OK)
     result = rnc_link_accept(s->link, &d->identity, d->destination,
                              &event->packet, now);

@@ -124,6 +124,7 @@ typedef struct node_tunnel {
 } node_tunnel;
 typedef struct node_destination {
   int used, type, has_ratchet, proof, no_links;
+  double link_cost; /* announced and required link request cost; negative means the policy's lr_cost */
   uint8_t ratchet[32];
   rnc_identity identity;
   char name[128];
@@ -473,6 +474,7 @@ rnc_node *rnc_node_new(const rnc_identity *identity, int transport,
     n->stamps.enabled = 1;
     n->stamps.destination_cost = 23.5;
     n->stamps.pr_cost = 15.8;
+    n->stamps.lr_cost = 12.5;
   }
   return n;
 }
@@ -663,6 +665,7 @@ rnc_result rnc_node_add_destination_ex(rnc_node *n,
   if (i == RNC_NODE_DESTINATIONS)
     return RNC_NO_SPACE;
   d.used = 1;
+  d.link_cost = -1.0;
   d.type = type;
   if (type == RNC_SINGLE)
     d.identity = *identity;
@@ -1014,7 +1017,8 @@ rnc_result rnc_node_stamp_policy(const rnc_node *n, rnc_stamp_policy *policy) {
 }
 static int cost_ok(double c) { return c >= 0 && c <= RNC_NETSTAMP_COST_CAP; }
 rnc_result rnc_node_set_stamp_policy(rnc_node *n, const rnc_stamp_policy *policy) {
-  if (!n || !policy || !cost_ok(policy->destination_cost) || !cost_ok(policy->pr_cost))
+  if (!n || !policy || !cost_ok(policy->destination_cost) || !cost_ok(policy->pr_cost) ||
+      !cost_ok(policy->lr_cost) || policy->lr_cost > RNC_NETSTAMP_LINK_COST_CAP)
     return RNC_INVALID;
   n->stamps = *policy;
   return RNC_OK;
@@ -1043,6 +1047,40 @@ rnc_result rnc_node_recall_link_cost(const rnc_node *n, const uint8_t destinatio
       return RNC_OK;
     }
   return RNC_STATE;
+}
+rnc_result rnc_node_set_destination_link_cost(rnc_node *n, const uint8_t destination[16], double cost) {
+  node_destination *d;
+  if (!n || !destination || !cost_ok(cost) || cost > RNC_NETSTAMP_LINK_COST_CAP)
+    return RNC_INVALID;
+  d = destination_find(n, destination);
+  if (!d)
+    return RNC_STATE;
+  d->link_cost = cost;
+  return RNC_OK;
+}
+rnc_result rnc_node_destination_link_cost(const rnc_node *n, const uint8_t destination[16], double *cost) {
+  const node_destination *d;
+  if (!n || !destination || !cost)
+    return RNC_INVALID;
+  d = destination_find((rnc_node *)n, destination);
+  if (!d)
+    return RNC_STATE;
+  *cost = d->link_cost >= 0 ? d->link_cost : n->stamps.lr_cost;
+  return RNC_OK;
+}
+rnc_result rnc_node_check_link_request(const rnc_node *n, const uint8_t destination[16], const rnc_packet *request) {
+  double cost;
+  uint8_t material[48];
+  if (!n || !destination || !request)
+    return RNC_INVALID;
+  if (!n->stamps.enabled || !n->stamps.enforce_link_requests ||
+      rnc_node_destination_link_cost(n, destination, &cost) != RNC_OK || cost <= 0)
+    return RNC_OK;
+  if (request->data_size < 64)
+    return RNC_PROTOCOL;
+  memcpy(material, destination, 16);
+  memcpy(material + 16, request->data + 32, 32);
+  return rnc_netstamp_valid(material, sizeof(material), request->data, 32, cost) ? RNC_OK : RNC_AUTH;
 }
 rnc_result rnc_node_interface_filtered_requests(const rnc_node *n, uint32_t interface_id, uint64_t *requests) {
   const node_interface *in;
