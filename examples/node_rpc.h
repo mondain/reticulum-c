@@ -395,7 +395,9 @@ static void write_path_table(rnc_rpc_writer *w, rnc_host *h, rnc_node *node,
   for (i = 0; rnc_node_route_at(node, i, now, &route) == RNC_OK; ++i)
     if ((!has_max_hops || route.hops <= max_hops) &&
         (!only || !memcmp(only, route.destination, 16))) {
-      (void)rnc_rpc_write_map(w, 6);
+      /* RNS 1.6 adds the path state, the last use, the announced destination value and link request
+       * cost to every entry (Reticulum.get_path_table); rnpath reads them. */
+      (void)rnc_rpc_write_map(w, 10);
       (void)rnc_rpc_write_string(w, "hash");
       (void)rnc_rpc_write_bin(w, route.destination, 16);
       key_real(w, "timestamp", (double)route.announced_at);
@@ -408,6 +410,10 @@ static void write_path_table(rnc_rpc_writer *w, rnc_host *h, rnc_node *node,
         key_string(w, "interface", s.name);
       else
         key_string(w, "interface", "unknown");
+      key_uint(w, "state", 0); /* Transport.STATE_UNKNOWN: no responsiveness tracking */
+      key_real(w, "used", 0.0);
+      key_nil(w, "value");
+      key_nil(w, "lr_cost");
     }
 }
 /* Announce rate table as Reticulum.get_rate_table reports it: a list of dicts with the
