@@ -460,7 +460,9 @@ static void reference(const char *python, const char *reference_dir) {
   snprintf(text, sizeof(text),
            "[reticulum]\nenable_transport = No\nshare_instance = No\n"
            "[interfaces]\n  [[Weave]]\n    type = WeaveInterface\n"
-           "    enabled = yes\n    port = %s\n",
+           "    enabled = yes\n    port = %s\n"
+           /* RNS 1.6 stamps its announces; at the default value the search can outlast the 2 s wait below */
+           "[stamps]\ndestination_value = 8\n",
            ptsname(r.e.master));
   f = fopen(path, "w");
   CHECK(f && fputs(text, f) >= 0 && !fclose(f));
