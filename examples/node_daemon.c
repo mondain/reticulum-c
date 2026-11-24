@@ -129,6 +129,10 @@ typedef struct config {
   size_t count;
   interface_config interfaces[CONFIG_INTERFACES];
 } config;
+/* destination stamps (node_stamper.h) */
+static void stamper_start(const config *c, rnc_node *node, const char *state);
+static void stamper_stop(void);
+static void stamper_step(void);
 static volatile sig_atomic_t stopping, reloading;
 static void signal_handler(int n) {
   if (n == SIGHUP)
@@ -1789,6 +1793,7 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
     fprintf(stderr, "Cannot start management destinations\n");
     goto fail;
   }
+  stamper_start(c, *node, state);
   return 1;
 fail:
   mgmt_stop();
@@ -2218,6 +2223,7 @@ static void log_apply(const config *c) {
   rnc_log_set_level(c->loglevel);
 }
 #include "node_rpc.h"
+#include "node_stamper.h"
 #include "node_mgmt.h"
 #include "node_discovery.h"
 
@@ -2437,6 +2443,7 @@ int main(int argc, char **argv) {
       }
     }
     mgmt_step((uint64_t)time(NULL), monotonic_ms());
+    stamper_step();
     admin_step(admin, clients, host, node, &id, state_path, monotonic_ms());
     rpc_step(&rpc, host, node, &current, &id, monotonic_ms());
     if (reloading) {

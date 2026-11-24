@@ -401,6 +401,9 @@ static void emit_rejects(void) {
   CHECK(rnc_node_set_destination_stamp(n, other, stamp) == RNC_STATE);
   CHECK(rnc_node_destination_stamp_material(n, other, material) == RNC_STATE);
   CHECK(rnc_node_set_stamp_emission(n, 0, 101.0) == RNC_INVALID);
+  /* the local SINGLE destinations can be listed, to find the ones that still need a stamp */
+  CHECK(rnc_node_destination_at(n, 0, other) == RNC_OK && !memcmp(other, dest, 16));
+  CHECK(rnc_node_destination_at(n, 1, other) == RNC_AGAIN);
   rnc_node_free(n);
 }
 /* Destination app data and the 18 byte extension share the 316 byte limit: when they do not fit, the announce

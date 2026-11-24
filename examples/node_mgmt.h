@@ -34,6 +34,7 @@ static int discovery_start(const config *c, const rnc_identity *transport,
                            const rnc_identity *network, rnc_node *node);
 static void discovery_step(uint64_t unix_seconds, uint64_t now);
 static void mgmt_stop(void) {
+  stamper_stop();
   discovery_stop();
   rnc_identity_clear(&mgmt.network);
   rnc_responder_free(mgmt.responder);

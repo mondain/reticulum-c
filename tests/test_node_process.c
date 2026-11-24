@@ -16,6 +16,7 @@
 #include <reticulum_c/rnc_discovery.h>
 #include <reticulum_c/rnc_ipc.h>
 #include <reticulum_c/rnc_link.h>
+#include <reticulum_c/rnc_netstamp.h>
 #include <reticulum_c/rnc_service.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -4305,6 +4306,122 @@ static void tunnel_persistence(const char *exe) {
   remove_tree(dir);
   puts("node tunnel persistence tests passed");
 }
+/* ---- destination stamps in the node daemon (RNS 1.6) ---------------------------------------------------- */
+/* Asks the daemon over TCP for a path to `dest` and returns the announce it answers with; *ext says whether it
+ * carries a stamp extension (and fills it). 0 when no answer arrives in `seconds`. */
+static int ask_path(unsigned port, const uint8_t dest[16], unsigned seconds, rnc_announce *answer, rnc_netstamp_ext *ext,
+                    int *stamped) {
+  rnc_packet request;
+  uint8_t tag[16], raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX], in[512], decoded[RNC_MAX_FRAME + 1u], command;
+  size_t n, m, k, got, written;
+  rnc_host_framer framer = {0};
+  unsigned tries;
+  int fd = tcp_connect(port), found = 0;
+  *stamped = 0;
+  CHECK(fd >= 0);
+  for (k = 0; k < sizeof(tag); ++k)
+    tag[k] = (uint8_t)(rand() >> 8);
+  CHECK(rnc_path_request_create(dest, NULL, tag, sizeof(tag), &request) == RNC_OK);
+  CHECK(rnc_packet_encode(&request, raw, sizeof(raw), &n) == RNC_OK &&
+        rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK);
+  CHECK(write(fd, framed, m) == (ssize_t)m);
+  for (tries = 0; tries < seconds * 20 && !found; ++tries) {
+    struct pollfd p = {fd, POLLIN, 0};
+    CHECK(poll(&p, 1, 50) >= 0);
+    if (!(p.revents & POLLIN))
+      continue;
+    {
+      ssize_t r = read(fd, in, sizeof(in));
+      if (r <= 0)
+        break;
+      for (got = 0; got < (size_t)r && !found; ++got)
+        if (rnc_host_frame_feed(&framer, RNC_HOST_HDLC, in[got], &command, decoded, sizeof(decoded), &written) == RNC_OK) {
+          rnc_packet p2;
+          if (rnc_packet_decode(decoded, written, &p2) == RNC_OK && (p2.flags & 3u) == RNC_ANNOUNCE &&
+              !memcmp(p2.destination, dest, 16) && rnc_announce_verify(&p2, answer) == RNC_OK) {
+            *stamped = rnc_netstamp_ext_parse(answer->app_data, answer->app_size, ext);
+            found = 1;
+          }
+        }
+    }
+  }
+  close(fd);
+  return found;
+}
+static void stamper_config(const char *cfg, unsigned port, unsigned value) {
+  write_config(cfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\nrespond_to_probes = Yes\n"
+               "[stamps]\ndestination_value = %u\nmax_workers = 2\n"
+               "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+               value, port);
+}
+static void load_probe_destination(const char *keyfile, uint8_t dest[16], uint8_t public_key[64], uint8_t name_hash[10]) {
+  uint8_t private_key[64];
+  rnc_identity id;
+  int fd = open(keyfile, O_RDONLY);
+  CHECK(fd >= 0 && read(fd, private_key, 64) == 64);
+  close(fd);
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.probe", &id, name_hash, dest) == RNC_OK);
+  memcpy(public_key, id.public_key, 64);
+}
+static void stamper(const char *exe) {
+  char dir[] = "/tmp/rnc-node-stp-XXXXXX", cfg[256], key[256], admin[256], state[256], id[33];
+  unsigned port = unused_port(), tries;
+  int fd, stamped = 0;
+  pid_t p;
+  uint8_t dest[16], pub[64], name_hash[10], material[90], first[14];
+  rnc_announce answer;
+  rnc_netstamp_ext ext;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(state, sizeof(state), "%s/state", dir) > 0);
+  stamper_config(cfg, port, 10);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  load_probe_destination(key, dest, pub, name_hash);
+  rnc_netstamp_announce_material(dest, pub, name_hash, material);
+  /* the search runs in the background; the path response carries the stamp once it is found */
+  for (tries = 0; tries < 8 && !stamped; ++tries)
+    CHECK(ask_path(port, dest, 5, &answer, &ext, &stamped) || tries < 7);
+  CHECK(stamped && ext.link_cost == 12.5);
+  CHECK(rnc_netstamp_valid(material, sizeof(material), ext.stamp, sizeof(ext.stamp), 10.0));
+  memcpy(first, ext.stamp, sizeof(first));
+  /* restarted, the same stamp is there at once: it was persisted, nothing is searched again */
+  stop(p, fd);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  CHECK(ask_path(port, dest, 5, &answer, &ext, &stamped) && stamped && !memcmp(ext.stamp, first, sizeof(first)));
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node stamper tests passed");
+}
+/* A search that cannot finish (cost 40) must not hold up shutdown. */
+static void stamper_shutdown(const char *exe) {
+  char dir[] = "/tmp/rnc-node-stps-XXXXXX", cfg[256], key[256], admin[256], id[33];
+  unsigned port = unused_port();
+  int fd, status;
+  pid_t p;
+  struct timespec t0, t1;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  stamper_config(cfg, port, 40);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  { struct timespec w = {1, 0}; nanosleep(&w, NULL); }
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  CHECK(!kill(p, SIGTERM));
+  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status) && !WEXITSTATUS(status));
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  CHECK(t1.tv_sec - t0.tv_sec < 3);
+  close(fd);
+  remove_tree(dir);
+  puts("node stamper shutdown test passed");
+}
 
 /* ---- reticulum-c-cp (rncp compatible file transfer) --------------------- */
 static pid_t spawn_cp(const char *cp, int *out, char *const *args) {
@@ -6102,6 +6219,10 @@ int main(int argc, char **argv) {
 
   else if (!strcmp(argv[2], "tunnel_persist") && argc == 3)
     tunnel_persistence(argv[1]);
+  else if (!strcmp(argv[2], "stamper") && argc == 3)
+    stamper(argv[1]);
+  else if (!strcmp(argv[2], "stamper_shutdown") && argc == 3)
+    stamper_shutdown(argv[1]);
 
   else if (!strcmp(argv[2], "logging") && argc == 3)
     logging_config(argv[1]);

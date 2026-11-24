@@ -382,6 +382,8 @@ rnc_result rnc_node_recall_link_cost(const rnc_node *node, const uint8_t destina
  * The extension counts against the 316 byte destination app data limit: when the data and the extension do not
  * fit, the announce goes out without it. Path responses are stamped when a stamp is loaded and never wait. */
 rnc_result rnc_node_set_stamp_emission(rnc_node *node, int required, double destination_value);
+/* The index'th local SINGLE destination (in the order they were added); RNC_AGAIN past the last. */
+rnc_result rnc_node_destination_at(const rnc_node *node, size_t index, uint8_t destination[16]);
 rnc_result rnc_node_destination_stamp_material(const rnc_node *node, const uint8_t destination[16], uint8_t out[90]);
 rnc_result rnc_node_set_destination_stamp(rnc_node *node, const uint8_t destination[16], const uint8_t stamp[14]);
 /* The link request cost a local destination announces and, with enforce_link_requests, requires (the policy's

@@ -1098,6 +1098,17 @@ rnc_result rnc_node_set_stamp_emission(rnc_node *n, int required, double destina
   n->stamp_value = destination_value;
   return RNC_OK;
 }
+rnc_result rnc_node_destination_at(const rnc_node *n, size_t index, uint8_t destination[16]) {
+  size_t i;
+  if (!n || !destination)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_DESTINATIONS; i++)
+    if (n->destinations[i].used && n->destinations[i].type == RNC_SINGLE && !index--) {
+      memcpy(destination, n->destinations[i].address, 16);
+      return RNC_OK;
+    }
+  return RNC_AGAIN;
+}
 rnc_result rnc_node_destination_stamp_material(const rnc_node *n, const uint8_t destination[16], uint8_t out[90]) {
   const node_destination *d;
   uint8_t name_hash[10], address[16];
