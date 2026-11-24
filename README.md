@@ -98,7 +98,7 @@ listen_port = 7778
 
 The optional `--state FILE` selects the checkpoint path. The daemon provides
 TCP/UDP/AutoInterface and serial/KISS/RNode adapters, signed route checkpoints
-and authenticated shared-instance RPC. RNS 1.5.5 RPC uses MessagePack.
+and authenticated shared-instance RPC. RNS 1.6.1 RPC uses MessagePack.
 SIGHUP reloads configuration; SIGINT/SIGTERM
 stop the daemon. Keep identity, checkpoint and admin paths in a private directory.
 Actual radio and multicast deployment require separate hardware/network checks.
@@ -281,7 +281,7 @@ they are not dependencies of the library or installed SDK. Builds never download
 an oracle automatically. Exact revisions and limitations are in
 [PROVENANCE.md](PROVENANCE.md).
 
-For upstream RNS 1.5.5, prepare its checkout and a Python environment containing
+For upstream RNS 1.6.1, prepare its checkout and a Python environment containing
 cryptography and pyserial 3.5, then:
 
 ```sh
