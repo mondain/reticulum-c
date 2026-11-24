@@ -180,6 +180,8 @@ struct rnc_node {
   node_tunnel tunnels[RNC_NODE_TUNNELS];
   rnc_stamp_policy stamps;
   int stamp_required;       /* announces wait for a loaded stamp */
+  rnc_stamp_provider_fn stamp_provider; /* stamps the path requests we send */
+  void *stamp_provider_context;
   double stamp_value;       /* the value a loaded destination stamp must have */
   int transport, explicit_proofs, no_mtu_discovery;
   rnc_random_fn random;
@@ -1096,6 +1098,13 @@ rnc_result rnc_node_set_stamp_emission(rnc_node *n, int required, double destina
     return RNC_INVALID;
   n->stamp_required = !!required;
   n->stamp_value = destination_value;
+  return RNC_OK;
+}
+rnc_result rnc_node_set_stamp_provider(rnc_node *n, rnc_stamp_provider_fn provider, void *context) {
+  if (!n)
+    return RNC_INVALID;
+  n->stamp_provider = provider;
+  n->stamp_provider_context = context;
   return RNC_OK;
 }
 rnc_result rnc_node_destination_at(const rnc_node *n, size_t index, uint8_t destination[16]) {
@@ -2024,8 +2033,19 @@ rnc_result rnc_node_request_path_ex(rnc_node *n, const uint8_t address[16],
     tag = random_tag;
     tag_size = 16;
   }
-  r = rnc_path_request_create(address, n->transport ? n->id : NULL, tag,
-                              tag_size, &p);
+  if (n->stamp_provider && tag_size == 16) {
+    uint8_t material[32], stamp[14];
+    memcpy(material, address, 16);
+    memcpy(material + 16, tag, 16);
+    if (!n->stamp_provider(n->stamp_provider_context, material, stamp)) {
+      rnc_logf(RNC_LOG_WARNING, "node", "path request cancelled: no stamp could be made for it");
+      return RNC_TIMEOUT;
+    }
+    r = rnc_path_request_create_stamped(address, n->id, tag, tag_size, stamp, &p);
+  } else {
+    r = rnc_path_request_create(address, n->transport ? n->id : NULL, tag,
+                                tag_size, &p);
+  }
   if (r != RNC_OK)
     return r;
   if (iface && recursive) {

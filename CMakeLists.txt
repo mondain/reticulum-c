@@ -219,7 +219,7 @@ if(BUILD_TESTING)
     endforeach()
     add_executable(test_node_stamps tests/test_node_stamps.c)
     target_link_libraries(test_node_stamps PRIVATE reticulum_c)
-    foreach(case unenforced valid enforced per_interface relayed_unchanged pr_lengths pr_stamp pr_unenforced lr_unenforced lr_enforced emit_with_stamp emit_required emit_rejects emit_overlong)
+    foreach(case unenforced valid enforced per_interface relayed_unchanged pr_lengths pr_stamp pr_unenforced lr_unenforced lr_enforced emit_with_stamp emit_required emit_rejects emit_overlong pr_emission)
         add_test(NAME reticulum_node_stamps_${case} COMMAND test_node_stamps ${case})
     endforeach()
     add_executable(test_discovery tests/test_discovery.c)
@@ -537,7 +537,7 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
         if(RNC_BUILD_EXAMPLES)
             add_executable(test_node_process tests/test_node_process.c)
             target_link_libraries(test_node_process PRIVATE reticulum_c_host OpenSSL::Crypto)
-            foreach(case cli panic mtu network shared blackhole management sources probe netid disc_announce disc_listen disc_autoconnect logging tunnel_persist stamper stamper_shutdown)
+            foreach(case cli panic mtu network shared blackhole management sources probe netid disc_announce disc_listen disc_autoconnect logging tunnel_persist stamper stamper_shutdown stamper_requests)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
@@ -576,7 +576,7 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
             set_tests_properties(reticulum_node_process_cli PROPERTIES TIMEOUT 20)
             set_tests_properties(reticulum_node_process_network reticulum_node_process_shared reticulum_node_process_management
-                reticulum_node_process_sources reticulum_node_process_probe reticulum_node_process_netid reticulum_node_process_disc_announce reticulum_node_process_disc_listen reticulum_node_process_disc_autoconnect reticulum_node_process_logging reticulum_node_process_tunnel_persist reticulum_node_process_stamper reticulum_node_process_stamper_shutdown
+                reticulum_node_process_sources reticulum_node_process_probe reticulum_node_process_netid reticulum_node_process_disc_announce reticulum_node_process_disc_listen reticulum_node_process_disc_autoconnect reticulum_node_process_logging reticulum_node_process_tunnel_persist reticulum_node_process_stamper reticulum_node_process_stamper_shutdown reticulum_node_process_stamper_requests
                 PROPERTIES LABELS network TIMEOUT 60)
             if(RNC_INTEROP_TESTS)
                 add_test(NAME reticulum_node_process_rns COMMAND ${CMAKE_COMMAND} -E env

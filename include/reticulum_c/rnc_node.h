@@ -382,6 +382,13 @@ rnc_result rnc_node_recall_link_cost(const rnc_node *node, const uint8_t destina
  * The extension counts against the 316 byte destination app data limit: when the data and the extension do not
  * fit, the announce goes out without it. Path responses are stamped when a stamp is loaded and never wait. */
 rnc_result rnc_node_set_stamp_emission(rnc_node *node, int required, double destination_value);
+/* Path requests we send are stamped through a provider the host sets: it is given the stamp material
+ * (destination || 16 byte tag) and fills the 14 byte stamp, returning 1, or 0 when it cannot (then the request is
+ * cancelled and RNC_TIMEOUT returned, as the reference does when stamping times out). A stamped request is the 64 byte
+ * form and always carries this node's id as transport id. Requests with a tag shorter than 16 bytes stay unstamped.
+ * NULL removes the provider. The provider runs inside rnc_node_request_path*, on the caller's thread. */
+typedef int (*rnc_stamp_provider_fn)(void *context, const uint8_t material[32], uint8_t stamp[14]);
+rnc_result rnc_node_set_stamp_provider(rnc_node *node, rnc_stamp_provider_fn provider, void *context);
 /* The index'th local SINGLE destination (in the order they were added); RNC_AGAIN past the last. */
 rnc_result rnc_node_destination_at(const rnc_node *node, size_t index, uint8_t destination[16]);
 rnc_result rnc_node_destination_stamp_material(const rnc_node *node, const uint8_t destination[16], uint8_t out[90]);

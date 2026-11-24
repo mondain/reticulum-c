@@ -4423,6 +4423,58 @@ static void stamper_shutdown(const char *exe) {
   puts("node stamper shutdown test passed");
 }
 
+/* The path requests the daemon sends are stamped at pr_value (here for a blackhole source it wants a path to). */
+static void stamper_requests(const char *exe) {
+  char dir[] = "/tmp/rnc-node-stpr-XXXXXX", cfg[256], key[256], admin[256], id[33];
+  unsigned port = unused_port(), tries;
+  int fd, peer, seen = 0;
+  pid_t p;
+  rnc_host_framer framer = {0};
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  write_config(cfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+               "blackhole_sources = 33333333333333333333333333333333\nblackhole_initial_wait = 1\n"
+               "[stamps]\npr_value = 8\n"
+               "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+               port);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  peer = tcp_connect(port);
+  CHECK(peer >= 0);
+  for (tries = 0; tries < 200 && !seen; ++tries) {
+    struct pollfd pf = {peer, POLLIN, 0};
+    uint8_t in[512], decoded[RNC_MAX_FRAME + 1u], command;
+    CHECK(poll(&pf, 1, 100) >= 0);
+    if (pf.revents & POLLIN) {
+      ssize_t r = read(peer, in, sizeof(in)), k;
+      CHECK(r > 0);
+      for (k = 0; k < r && !seen; ++k) {
+        size_t written;
+        if (rnc_host_frame_feed(&framer, RNC_HOST_HDLC, in[k], &command, decoded, sizeof(decoded), &written) == RNC_OK) {
+          rnc_packet pkt;
+          rnc_path_request q;
+          uint8_t material[32];
+          if (rnc_packet_decode(decoded, written, &pkt) == RNC_OK && rnc_path_request_decode(&pkt, &q) == RNC_OK &&
+              pkt.data_size == 64) {
+            memcpy(material, q.destination, 16);
+            memcpy(material + 16, q.tag, 16);
+            CHECK(q.has_stamp && q.has_transport && rnc_netstamp_valid(material, 32, q.stamp, 14, 8.0));
+            seen = 1;
+          }
+        }
+      }
+    }
+  }
+  CHECK(seen);
+  close(peer);
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node stamped path request tests passed");
+}
+
 /* ---- reticulum-c-cp (rncp compatible file transfer) --------------------- */
 static pid_t spawn_cp(const char *cp, int *out, char *const *args) {
   int fds[2];
@@ -6221,6 +6273,8 @@ int main(int argc, char **argv) {
     tunnel_persistence(argv[1]);
   else if (!strcmp(argv[2], "stamper") && argc == 3)
     stamper(argv[1]);
+  else if (!strcmp(argv[2], "stamper_requests") && argc == 3)
+    stamper_requests(argv[1]);
   else if (!strcmp(argv[2], "stamper_shutdown") && argc == 3)
     stamper_shutdown(argv[1]);
 

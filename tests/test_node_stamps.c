@@ -434,6 +434,57 @@ static void emit_overlong(void) {
         ext.app_size == 298);
   rnc_node_free(n);
 }
+/* ---- stamping the path requests we send ---- */
+static int provide_fail;
+static unsigned provided;
+static int pr_provider(void *context, const uint8_t material[32], uint8_t stamp[14]) {
+  (void)context;
+  ++provided;
+  if (provide_fail)
+    return 0;
+  return rnc_netstamp_find(material, 32, 8.0, rng, NULL, 0, stamp, NULL) == RNC_OK;
+}
+static rnc_packet sent_request(rnc_node *n, int *seen) {
+  rnc_node_event e;
+  rnc_packet none = {0};
+  CHECK(rnc_node_tick(n, 1000 + clock_ms / 1000, ++clock_ms) == RNC_OK);
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    if (e.type == RNC_NODE_SEND && e.packet.data_size >= 32 && (e.packet.flags & 3u) == RNC_DATA && ((e.packet.flags >> 2) & 3u) == RNC_PLAIN) {
+      *seen = 1;
+      return e.packet;
+    }
+  *seen = 0;
+  return none;
+}
+static void pr_emission(void) {
+  rnc_identity me = fresh();
+  rnc_node *n = rnc_node_new(&me, 0, rng, NULL); /* not a transport: its node id still rides in the request */
+  uint8_t dest[16], material[32];
+  rnc_packet p;
+  rnc_path_request q;
+  int seen;
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK);
+  memset(dest, 0x77, 16);
+  /* without a provider the request is what it always was */
+  CHECK(rnc_node_request_path(n, dest, ++clock_ms) == RNC_OK);
+  p = sent_request(n, &seen);
+  CHECK(seen && p.data_size == 32 && provided == 0); /* legacy form of a non-transport node */
+  CHECK(rnc_node_set_stamp_provider(n, pr_provider, NULL) == RNC_OK);
+  CHECK(rnc_node_request_path(n, dest, clock_ms += 5000) == RNC_OK);
+  p = sent_request(n, &seen);
+  CHECK(seen && p.data_size == 64 && provided == 1);
+  CHECK(rnc_path_request_decode(&p, &q) == RNC_OK && q.has_stamp && q.has_transport && !memcmp(q.transport_id, me.hash, 16));
+  memcpy(material, dest, 16);
+  memcpy(material + 16, q.tag, 16);
+  CHECK(rnc_netstamp_valid(material, 32, q.stamp, 14, 8.0));
+  /* a stamp that cannot be had cancels the request: nothing is sent */
+  provide_fail = 1;
+  CHECK(rnc_node_request_path(n, dest, clock_ms += 5000) == RNC_TIMEOUT);
+  (void)sent_request(n, &seen);
+  CHECK(!seen && provided == 2);
+  CHECK(rnc_node_set_stamp_provider(n, NULL, NULL) == RNC_OK);
+  rnc_node_free(n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "unenforced"))
@@ -464,6 +515,8 @@ int main(int argc, char **argv) {
     emit_rejects();
   else if (!strcmp(argv[1], "emit_overlong"))
     emit_overlong();
+  else if (!strcmp(argv[1], "pr_emission"))
+    pr_emission();
   else
     CHECK(0);
   puts("node stamps test passed");

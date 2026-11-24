@@ -23,7 +23,7 @@ static struct stamper {
   int enabled, searching, found, cancel;
   rnc_node *node;
   char path[1100]; /* <state>.stamps; empty without a state file */
-  double value;
+  double value, pr_value, pr_timeout;
   unsigned workers, niceness, started;
   pthread_t threads[STAMPER_MAX_WORKERS];
   pthread_mutex_t lock;
@@ -134,11 +134,29 @@ static void stamper_begin(const uint8_t destination[16]) {
     rnc_logf(RNC_LOG_VERBOSE, "stamps", "searching a destination stamp of value %.2f on %u worker(s)", stp.value,
              stp.started);
 }
+/* Path requests are stamped inline: at pr_value (15.8 by default) the search takes milliseconds. The slice
+ * loop gives up at pr_stamp_timeout, and the request is cancelled then. */
+static int stamper_pr_provider(void *context, const uint8_t material[32], uint8_t stamp[RNC_NETSTAMP_SIZE]) {
+  uint64_t deadline = monotonic_ms() + (uint64_t)(stp.pr_timeout * 1000.0);
+  (void)context;
+  do {
+    rnc_result r = rnc_netstamp_find(material, 32, stp.pr_value, secure_random, NULL, 1u << 14, stamp, NULL);
+    if (r == RNC_OK)
+      return 1;
+    if (r != RNC_TIMEOUT)
+      return 0;
+  } while (monotonic_ms() < deadline);
+  return 0;
+}
 static void stamper_start(const config *c, rnc_node *node, const char *state) {
   long cores;
   memset(&stp, 0, sizeof(stp));
   pthread_mutex_init(&stp.lock, NULL);
   stp.node = node;
+  stp.pr_value = c->pr_value;
+  stp.pr_timeout = c->pr_stamp_timeout;
+  if (c->stamp_prs)
+    (void)rnc_node_set_stamp_provider(node, stamper_pr_provider, NULL);
   stp.enabled = c->stamp_destinations;
   stp.value = c->destination_value;
   stp.niceness = c->worker_niceness;
