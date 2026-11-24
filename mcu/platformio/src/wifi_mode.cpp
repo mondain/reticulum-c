@@ -219,7 +219,10 @@ void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
       if (actions & RNC_MCU_CONSOLE_SAVE) {
         print(rnc_settings_save(cfg) ? "stored\n" : "error: cannot store\n");
         if (cfg->stamp_new_set) {
-          print(rnc_stamp_store(cfg->stamp_new) ? "stamp stored\n" : "error: cannot store the stamp\n");
+          bool stored = rnc_stamp_store(cfg->stamp_new);
+          print(stored ? "stamp stored\n" : "error: cannot store the stamp\n");
+          if (stored)
+            rnc_mcu_stamp_stored(cfg); // get stamp.status follows at once
           cfg->stamp_new_set = 0;
         }
       }

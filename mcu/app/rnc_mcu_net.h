@@ -273,9 +273,21 @@ static inline void rnc_mcu_stamp_prepare(rnc_mcu_cfg *cfg, const rnc_mcu_platfor
     return;
   n = platform->load(platform->context, RNC_MCU_KEY_IDENTITY, key, sizeof(key));
   if (n != (int)sizeof(key) || rnc_identity_from_private(&id, key) != RNC_OK ||
-      rnc_destination_hash(RNC_MCU_APP_NAME, &id, name_hash, address) != RNC_OK)
+      rnc_destination_hash(RNC_MCU_APP_NAME, &id, name_hash, address) != RNC_OK) {
+    {
+      volatile uint8_t *k = key;
+      for (i = 0; i < sizeof(key); i++)
+        k[i] = 0;
+    }
     return;
+  }
   rnc_netstamp_announce_material(address, id.public_key, name_hash, material);
+  { /* the private key was only needed to learn the public one */
+    volatile uint8_t *k = key;
+    for (i = 0; i < sizeof(key); i++)
+      k[i] = 0;
+    rnc_identity_clear(&id);
+  }
   for (i = 0; i < sizeof(material); i++)
     (void)snprintf(cfg->stamp_material + 2 * i, 3, "%02x", material[i]);
   n = platform->load(platform->context, RNC_MCU_KEY_STAMP, stamp, sizeof(stamp));
@@ -288,6 +300,15 @@ static inline void rnc_mcu_stamp_prepare(rnc_mcu_cfg *cfg, const rnc_mcu_platfor
              rnc_netstamp_valid(material, sizeof(material), stamp, sizeof(stamp), cfg->stamp_value) ? "valid" : "stale",
              6);
   }
+}
+/* After the port stored the stamp that "set stamp" took: the status the console reports follows at once. */
+static inline void rnc_mcu_stamp_stored(rnc_mcu_cfg *cfg) {
+  size_t i;
+  uint8_t any = 0;
+  for (i = 0; i < sizeof(cfg->stamp_new); i++)
+    any |= cfg->stamp_new[i];
+  memcpy(cfg->stamp_status, any ? "valid" : "none", any ? 6 : 5);
+  cfg->stamp_new_set = 0;
 }
 /* Stores a stamp taken by "set stamp" (all zero removes it); 0 on success. */
 static inline int rnc_mcu_stamp_store(const rnc_mcu_platform *platform, const uint8_t stamp[14]) {

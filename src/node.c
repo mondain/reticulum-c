@@ -1760,6 +1760,19 @@ static int announce_stamp_check(const rnc_node *n, const node_interface *in, rnc
   *link_cost = ext.link_cost;
   return 1;
 }
+/* The stamp test of announce_stamp_check, on the raw packet: destination, public key and name hash are all in its
+ * first bytes and the extension is its last 18, so with enforcement on an announce can be refused for its stamp before
+ * the signature is verified (the reference does the same: one hash against an Ed25519 verification). */
+static int announce_stamp_prefilter(const rnc_node *n, const node_interface *in, const rnc_packet *p) {
+  rnc_netstamp_ext ext;
+  uint8_t material[90];
+  double cost;
+  if (p->data_size < 148u + RNC_NETSTAMP_EXT_SIZE || !rnc_netstamp_ext_parse(p->data, p->data_size, &ext))
+    return 0;
+  cost = in && in->dst_cost >= 0 ? in->dst_cost : n->stamps.destination_cost;
+  rnc_netstamp_announce_material(p->destination, p->data, p->data + 64, material);
+  return rnc_netstamp_valid(material, sizeof(material), ext.stamp, sizeof(ext.stamp), cost);
+}
 static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
                             uint64_t unix_seconds, uint64_t now) {
   rnc_announce a;
@@ -1772,6 +1785,12 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   uint8_t jitter[2];
   int update, stamped;
   double link_cost;
+  if (n->stamps.enabled && n->stamps.enforce_announces && !announce_stamp_prefilter(n, interface(n, ingress), p)) {
+    node_interface *in = interface(n, ingress);
+    if (in)
+      in->filtered_announces++;
+    return RNC_OK;
+  }
   r = rnc_announce_verify(p, &a);
   if (r != RNC_OK)
     return r;
@@ -2900,7 +2919,7 @@ rnc_result rnc_node_state_import(rnc_node *n, const rnc_identity *owner,
       goto done;
     {
       double ignored;
-      (void)announce_stamp_check(n, NULL, &entry.route.announce, &ignored);
+      (void)announce_stamp_check(n, interface(n, iface), &entry.route.announce, &ignored);
     }
     if (expires <= unix_seconds || !interface(n, iface))
       continue;
