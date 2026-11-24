@@ -4,7 +4,7 @@
 ## Where the version lives
 
 The version is the VERSION in the project() line of CMakeLists.txt (today
-0.5.3); the library and package version, the shared library version and the CMake
+0.6.0); the library and package version, the shared library version and the CMake
 package compatibility all read it, and so do the firmware build scripts. SOVERSION
 (the ABI number) is separate, also in CMakeLists.txt; raise it only for an
 incompatible ABI change.
