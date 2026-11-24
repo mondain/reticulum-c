@@ -621,10 +621,11 @@ Set the board name in menuconfig so /info reports it.
 ## Limits
 
 - The LoRa radio (SX126x/SX127x) is optional and OFF until configured. The bench
-  evidence above covers T-Echo and Supreme SX1262 using PlatformIO firmware;
+  evidence above covers T-Echo, Supreme and XIAO SX1262 using PlatformIO firmware;
   ESP-IDF board ports and other boards retain build/model coverage only.
-  The firmware is not an RNode (it does not speak KISS to a host); it
-  is a Reticulum node with a LoRa interface. Bluetooth is not part of this firmware. Wi-Fi
+  By default the firmware is a Reticulum node with a LoRa interface; in rnode mode it
+  speaks the stock RNode KISS protocol to a host instead (see "RNode mode"). Bluetooth LE
+  is available on the PlatformIO boards in rnode mode once a PIN is set. Wi-Fi
   is a TCP client only (no access point mode, no Reticulum AutoInterface, no UDP, no TLS,
   no IFAC).
 - Wi-Fi mode needs more memory: the firmware image grows from about 251 KB to
