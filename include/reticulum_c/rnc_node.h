@@ -346,6 +346,26 @@ rnc_result rnc_node_blackhole_import(rnc_node *node, const void *input,
 rnc_result rnc_node_blackhole_merge(rnc_node *node, const void *input,
                                     size_t size, const uint8_t source[16],
                                     uint64_t unix_seconds, size_t *added);
+/* Network stamps (RNS 1.6). With `enabled`, an announce whose app data ends in a stamp extension is checked
+ * against the cost the ingress interface requires (its own, set below, else destination_cost): a stamp that
+ * meets it is removed from the app data kept and delivered, and the destination's announced link request cost
+ * is recorded. With enforce_announces, an announce without a sufficient stamp is dropped and counted on its
+ * interface; otherwise it is accepted either way, as RNS 1.6.1 does by default. Announces are always passed on
+ * unchanged. enforce_link_requests and pr_cost take effect with link and path request stamps. Defaults: enabled,
+ * nothing enforced, destination_cost 23.5, pr_cost 15.8. */
+typedef struct rnc_stamp_policy {
+  int enabled, enforce_announces, enforce_link_requests;
+  double destination_cost, pr_cost;
+} rnc_stamp_policy;
+rnc_result rnc_node_stamp_policy(const rnc_node *node, rnc_stamp_policy *policy);
+rnc_result rnc_node_set_stamp_policy(rnc_node *node, const rnc_stamp_policy *policy); /* RNC_INVALID for costs outside 0..100 */
+/* Per interface costs; a negative value means the policy's. RNC_STATE for an unknown interface. */
+rnc_result rnc_node_set_interface_stamp_costs(rnc_node *node, uint32_t interface_id, double destination_cost,
+                                              double pr_cost);
+/* The link request cost the destination announced with a valid stamp; RNC_STATE when it is unknown or never did. */
+rnc_result rnc_node_recall_link_cost(const rnc_node *node, const uint8_t destination[16], double *link_cost);
+/* Announces dropped on an interface for a missing or insufficient stamp. */
+rnc_result rnc_node_interface_filtered(const rnc_node *node, uint32_t interface_id, uint64_t *announces);
 /* Known-destination store (Identity.recall). Every valid, fresh announce for
  * a non-local destination is remembered independently of path lifetime, in a
  * table bounded to RNC_NODE_KNOWN entries (least recently heard is evicted).

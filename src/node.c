@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include "service_msgpack.h"
 #include <reticulum_c/rnc_ipc.h>
+#include <reticulum_c/rnc_netstamp.h>
 #include <reticulum_c/rnc_node.h>
 #include <reticulum_c/rnc_security.h>
 #include <stdlib.h>
@@ -68,11 +69,14 @@ typedef struct node_interface {
       pr_sustained;
   int has_tunnel;
   uint8_t tunnel_id[32];
+  double dst_cost, pr_cost; /* required stamp costs; negative means the node's policy */
+  uint64_t filtered_announces;
 } node_interface;
 typedef struct node_known {
   int used;
   rnc_announce announce;
   uint64_t heard, stamp;
+  double link_cost; /* announced with a valid stamp, else negative */
 } node_known;
 typedef struct node_blackhole {
   int used;
@@ -171,6 +175,7 @@ struct rnc_node {
   rnc_identity identity; /* kept for tunnel synthesis when it has a key */
   int has_identity;
   node_tunnel tunnels[RNC_NODE_TUNNELS];
+  rnc_stamp_policy stamps;
   int transport, explicit_proofs, no_mtu_discovery;
   rnc_random_fn random;
   void *random_context;
@@ -444,6 +449,9 @@ rnc_node *rnc_node_new(const rnc_identity *identity, int transport,
     n->transport = !!transport;
     n->random = random;
     n->random_context = context;
+    n->stamps.enabled = 1;
+    n->stamps.destination_cost = 23.5;
+    n->stamps.pr_cost = 15.8;
   }
   return n;
 }
@@ -475,6 +483,8 @@ rnc_result rnc_node_add_interface(rnc_node *n, uint32_t id, uint32_t bitrate) {
       memset(&n->interfaces[i].ip, 0, sizeof(node_freq));
       memset(&n->interfaces[i].op, 0, sizeof(node_freq));
       n->interfaces[i].ic_active = n->interfaces[i].pr_active = 0;
+      n->interfaces[i].dst_cost = n->interfaces[i].pr_cost = -1.0;
+      n->interfaces[i].filtered_announces = 0;
       return RNC_OK;
     }
   return RNC_NO_SPACE;
@@ -950,7 +960,7 @@ static int path_request_pending(const rnc_node *n, const uint8_t d[16],
 }
 /* Known-destination store: independent of path lifetime and bounded. */
 static void known_remember(rnc_node *n, const rnc_announce *a, uint64_t stamp,
-                           uint64_t now) {
+                           uint64_t now, double link_cost) {
   node_known *slot = NULL, *oldest = &n->known[0];
   size_t i;
   for (i = 0; i < RNC_NODE_KNOWN; i++) {
@@ -973,6 +983,55 @@ static void known_remember(rnc_node *n, const rnc_announce *a, uint64_t stamp,
   slot->announce = *a;
   slot->stamp = stamp;
   slot->heard = now;
+  slot->link_cost = link_cost;
+}
+rnc_result rnc_node_stamp_policy(const rnc_node *n, rnc_stamp_policy *policy) {
+  if (!n || !policy)
+    return RNC_INVALID;
+  *policy = n->stamps;
+  return RNC_OK;
+}
+static int cost_ok(double c) { return c >= 0 && c <= RNC_NETSTAMP_COST_CAP; }
+rnc_result rnc_node_set_stamp_policy(rnc_node *n, const rnc_stamp_policy *policy) {
+  if (!n || !policy || !cost_ok(policy->destination_cost) || !cost_ok(policy->pr_cost))
+    return RNC_INVALID;
+  n->stamps = *policy;
+  return RNC_OK;
+}
+rnc_result rnc_node_set_interface_stamp_costs(rnc_node *n, uint32_t interface_id, double destination_cost,
+                                              double pr_cost) {
+  node_interface *in;
+  if (!n || (destination_cost >= 0 && !cost_ok(destination_cost)) || (pr_cost >= 0 && !cost_ok(pr_cost)))
+    return RNC_INVALID;
+  in = interface(n, interface_id);
+  if (!in)
+    return RNC_STATE;
+  in->dst_cost = destination_cost < 0 ? -1.0 : destination_cost;
+  in->pr_cost = pr_cost < 0 ? -1.0 : pr_cost;
+  return RNC_OK;
+}
+rnc_result rnc_node_recall_link_cost(const rnc_node *n, const uint8_t destination[16], double *link_cost) {
+  size_t i;
+  if (!n || !destination || !link_cost)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_KNOWN; i++)
+    if (n->known[i].used && same(n->known[i].announce.destination, destination)) {
+      if (n->known[i].link_cost < 0)
+        return RNC_STATE;
+      *link_cost = n->known[i].link_cost;
+      return RNC_OK;
+    }
+  return RNC_STATE;
+}
+rnc_result rnc_node_interface_filtered(const rnc_node *n, uint32_t interface_id, uint64_t *announces) {
+  const node_interface *in;
+  if (!n || !announces)
+    return RNC_INVALID;
+  in = interface((rnc_node *)n, interface_id);
+  if (!in)
+    return RNC_STATE;
+  *announces = in->filtered_announces;
+  return RNC_OK;
 }
 #define KNOWN_MAGIC "RNCK"
 #define KNOWN_ENTRY_MAX (16 + 10 + 64 + 10 + 1 + 32 + 2 + sizeof(((rnc_announce *)0)->app_data))
@@ -1081,7 +1140,7 @@ rnc_result rnc_node_known_import(rnc_node *n, const void *input, size_t size) {
     size_t k;
     for (k = 5; k < 10; k++)
       stamp = (stamp << 8) | items[i].random_hash[k];
-    known_remember(n, &items[i], stamp, n->now);
+    known_remember(n, &items[i], stamp, n->now, -1.0);
   }
   free(items);
   return r;
@@ -1501,6 +1560,25 @@ static size_t route_victim(rnc_node *n, uint32_t ingress) {
   }
   return best;
 }
+/* RNS 1.6 announce stamps: when the app data ends in the stamp extension and the stamp meets the cost the
+ * ingress interface requires, the extension is taken out of `a` and 1 returned with the announced link
+ * request cost; otherwise `a` is left alone, 0 returned and *link_cost is negative. */
+static int announce_stamp_check(const rnc_node *n, const node_interface *in, rnc_announce *a,
+                                double *link_cost) {
+  rnc_netstamp_ext ext;
+  uint8_t material[90];
+  double cost;
+  *link_cost = -1.0;
+  if (!n->stamps.enabled || !rnc_netstamp_ext_parse(a->app_data, a->app_size, &ext))
+    return 0;
+  cost = in && in->dst_cost >= 0 ? in->dst_cost : n->stamps.destination_cost;
+  rnc_netstamp_announce_material(a->destination, a->identity.public_key, a->name_hash, material);
+  if (!rnc_netstamp_valid(material, sizeof(material), ext.stamp, sizeof(ext.stamp), cost))
+    return 0;
+  a->app_size = ext.app_size;
+  *link_cost = ext.link_cost;
+  return 1;
+}
 static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
                             uint64_t unix_seconds, uint64_t now) {
   rnc_announce a;
@@ -1511,10 +1589,18 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   size_t i, slot = RNC_NODE_ROUTES, answers = 0,
             targets = relay_count(n, ingress);
   uint8_t jitter[2];
-  int update;
+  int update, stamped;
+  double link_cost;
   r = rnc_announce_verify(p, &a);
   if (r != RNC_OK)
     return r;
+  stamped = announce_stamp_check(n, interface(n, ingress), &a, &link_cost);
+  if (n->stamps.enabled && n->stamps.enforce_announces && !stamped) {
+    node_interface *in = interface(n, ingress);
+    if (in)
+      in->filtered_announces++;
+    return RNC_OK;
+  }
   if (rnc_node_is_blackholed(n, a.identity.hash, unix_seconds)) {
     char label[33];
     rnc_logf(RNC_LOG_DEBUG, "node", "dropped announce from blackholed identity %s",
@@ -1540,7 +1626,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
   stamp = announce_time(&a);
   if (stamp > unix_seconds && stamp - unix_seconds > 300)
     return RNC_PROTOCOL;
-  known_remember(n, &a, stamp, now);
+  known_remember(n, &a, stamp, now, link_cost);
   route = route_find(n, p->destination, now);
   update = !route || stamp > route->route.announced_at;
   if (route && !memcmp(a.random_hash, route->route.announce.random_hash, 10)) {
@@ -2601,6 +2687,10 @@ rnc_result rnc_node_state_import(rnc_node *n, const rnc_identity *owner,
     r = rnc_announce_verify(&entry.packet, &entry.route.announce);
     if (r != RNC_OK)
       goto done;
+    {
+      double ignored;
+      (void)announce_stamp_check(n, NULL, &entry.route.announce, &ignored);
+    }
     if (expires <= unix_seconds || !interface(n, iface))
       continue;
     remaining = expires - unix_seconds;
@@ -3060,6 +3150,10 @@ rnc_result rnc_node_tunnels_import(rnc_node *n, const rnc_identity *owner,
       r = rnc_packet_decode(state + at, wire, &p->entry.packet);
       if (r == RNC_OK)
         r = rnc_announce_verify(&p->entry.packet, &p->entry.route.announce);
+      if (r == RNC_OK) {
+        double ignored;
+        (void)announce_stamp_check(n, NULL, &p->entry.route.announce, &ignored);
+      }
       if (r != RNC_OK || p->entry.packet.hops > 128) {
         r = r == RNC_OK ? RNC_PROTOCOL : r;
         goto done;
