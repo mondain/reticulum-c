@@ -1688,7 +1688,10 @@ static void live_peer_config(char *dir, size_t size, const char *base, const cha
   CHECK(snprintf(path, sizeof(path), "%s/config", dir) < (int)sizeof(path));
   CHECK(snprintf(text, sizeof(text),
                  "[reticulum]\nenable_transport = No\nshare_instance = No\n[interfaces]\n[[T]]\n"
-                 "type = TCPClientInterface\nenabled = Yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n", port) > 0);
+                 "type = TCPClientInterface\nenabled = Yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n"
+                 /* RNS 1.6 stamps every announce and path request it emits; at the default value the search
+                  * takes seconds, longer than these scenarios wait, so the reference peers stamp cheaply */
+                 "[stamps]\ndestination_value = 8\npr_value = 8\n", port) > 0);
   config_file(path, text);
 }
 typedef struct live_node {
