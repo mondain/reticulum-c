@@ -591,6 +591,18 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_shared_unix_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 60)
+                add_test(NAME reticulum_node_process_stamps_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> stamps_ref
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_stamps_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 240)
+                add_test(NAME reticulum_node_process_stamps_enforcing_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> stamps_enforcing_ref
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_stamps_enforcing_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 240)
                 add_test(NAME reticulum_node_process_live_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> live_ref

@@ -4475,6 +4475,120 @@ static void stamper_requests(const char *exe) {
   puts("node stamped path request tests passed");
 }
 
+/* ---- stamps on an enforcing network (RNS 1.6.1 as the oracle) ------------------------------------------- */
+static void stamps_peer_config(char *dir, size_t size, const char *base, const char *name, unsigned port, unsigned value) {
+  char path[600], text[700];
+  CHECK(snprintf(dir, size, "%s/%s", base, name) < (int)size);
+  CHECK(!mkdir(dir, 0700));
+  CHECK(snprintf(path, sizeof(path), "%s/config", dir) < (int)sizeof(path));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n[interfaces]\n[[T]]\n"
+                 "type = TCPClientInterface\nenabled = Yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n"
+                 "[stamps]\ndestination_value = %u\npr_value = 8\n", port, value) > 0);
+  config_file(path, text);
+}
+/* One of our daemons answers path requests for its probe destination on an enforcing reference transport node
+ * (enforce_stamps, destination_cost 12): `stamping` says whether the daemon stamps. A reference peer behind the
+ * node asks for the path; it gets one only if the daemon's answer carried a sufficient stamp. */
+static int enforcing_reference_path(const char *exe, const char *python, const char *ref_dir, const char *base,
+                                    const char *tag, int stamping) {
+  unsigned port = unused_port(), tries;
+  char dir[500], cfg[700], key[600], admin[600], line[512], id[33], text[1024];
+  uint8_t dest[16], pub[64], name_hash[10];
+  char hex[33];
+  live_proc node, peer;
+  pid_t daemon;
+  int fd, got = 0;
+  size_t k;
+  CHECK(snprintf(dir, sizeof(dir), "%s/%s-r", base, tag) < (int)sizeof(dir) && !mkdir(dir, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) < (int)sizeof(cfg));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[stamps]\nenforce_stamps = Yes\n"
+                 "destination_cost = 12\npr_cost = 8\n[interfaces]\n[[Server]]\ntype = TCPServerInterface\nenabled = Yes\n"
+                 "mode = gateway\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+  config_file(cfg, text);
+  live_spawn(&node, python, ref_dir, live_transport, dir);
+  CHECK(live_expect(&node, "READY", 20000, line, sizeof(line)));
+  CHECK(snprintf(dir, sizeof(dir), "%s/%s-d", base, tag) < (int)sizeof(dir) && !mkdir(dir, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) < (int)sizeof(cfg));
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) < (int)sizeof(key));
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) < (int)sizeof(admin));
+  write_config(cfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\nrespond_to_probes = Yes\n"
+               "[stamps]\nstamp_destinations = %s\ndestination_value = 14\n"
+               "[interfaces]\n[[Up]]\ntype = TCPClientInterface\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+               stamping ? "Yes" : "No", port);
+  daemon = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  load_probe_destination(key, dest, pub, name_hash);
+  for (k = 0; k < 16; ++k)
+    CHECK(snprintf(hex + 2 * k, 3, "%02x", dest[k]) == 2);
+  { char pd[500]; stamps_peer_config(pd, sizeof(pd), base, tag, port, 8);
+    live_spawn(&peer, python, ref_dir, live_peer, pd); }
+  CHECK(live_expect(&peer, "HASH", 20000, line, sizeof(line)));
+  live_sleep(3000); /* connected, and the daemon's stamp (value 14) is found */
+  for (tries = 0; tries < 3 && !got; ++tries) {
+    char req[64];
+    long hops = -1, w;
+    char h[40];
+    CHECK(snprintf(req, sizeof(req), "request %s\n", hex) > 0);
+    live_send(&peer, req);
+    CHECK(live_expect(&peer, "PATH", 12000, line, sizeof(line)));
+    CHECK(sscanf(line, "PATH %39s %ld %ld", h, &hops, &w) == 3);
+    got = hops > 0;
+  }
+  live_end(&peer);
+  stop(daemon, fd);
+  live_end(&node);
+  return got;
+}
+static void stamps_reference(const char *exe, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-stamps-XXXXXX";
+  CHECK(mkdtemp(base));
+  /* a stamped answer is accepted by an enforcing node, an unstamped one is dropped */
+  CHECK(enforcing_reference_path(exe, python, reference, base, "on", 1));
+  CHECK(!enforcing_reference_path(exe, python, reference, base, "off", 0));
+  puts("node stamps against an enforcing reference passed");
+}
+/* The other direction: our daemon enforces; a reference peer whose announce is stamped enough is learned, one
+ * stamped at value 0 is not. */
+static void stamps_enforcing_daemon(const char *exe, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-stamps-XXXXXX", dir[500], cfg[700], key[600], admin[600], line[512], id[33], hash[40], pd[500];
+  unsigned port = unused_port();
+  live_proc good, weak;
+  pid_t daemon;
+  int fd;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(dir, sizeof(dir), "%s/d", base) < (int)sizeof(dir) && !mkdir(dir, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) < (int)sizeof(cfg));
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) < (int)sizeof(key));
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) < (int)sizeof(admin));
+  write_config(cfg,
+               "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[stamps]\nenforce_stamps = Yes\n"
+               "destination_cost = 12\n[interfaces]\n[[Server]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+               "listen_port = %u\n", port);
+  daemon = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  stamps_peer_config(pd, sizeof(pd), base, "good", port, 14);
+  live_spawn(&good, python, reference, live_peer, pd);
+  CHECK(live_expect(&good, "HASH", 20000, line, sizeof(line)));
+  CHECK(snprintf(hash, sizeof(hash), "%s", line + 5) < (int)sizeof(hash));
+  live_sleep(1500);
+  live_send(&good, "announce\n");
+  CHECK(path_within(admin, hash, 40)); /* stamped at 14, required 12 */
+  stamps_peer_config(pd, sizeof(pd), base, "weak", port, 0);
+  live_spawn(&weak, python, reference, live_peer, pd);
+  CHECK(live_expect(&weak, "HASH", 20000, line, sizeof(line)));
+  CHECK(snprintf(hash, sizeof(hash), "%s", line + 5) < (int)sizeof(hash));
+  live_sleep(1500);
+  live_send(&weak, "announce\n");
+  CHECK(!path_within(admin, hash, 8)); /* stamped at 0: filtered */
+  live_end(&weak);
+  live_end(&good);
+  stop(daemon, fd);
+  puts("node enforcing stamps against reference peers passed");
+}
+
 /* ---- reticulum-c-cp (rncp compatible file transfer) --------------------- */
 static pid_t spawn_cp(const char *cp, int *out, char *const *args) {
   int fds[2];
@@ -6298,6 +6412,10 @@ int main(int argc, char **argv) {
     blackhole(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
+  else if (!strcmp(argv[2], "stamps_ref") && argc == 5)
+    stamps_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "stamps_enforcing_ref") && argc == 5)
+    stamps_enforcing_daemon(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "live_ref") && argc == 5)
     live_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "disc_list") && argc == 4)
