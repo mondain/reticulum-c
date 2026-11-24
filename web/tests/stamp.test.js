@@ -6,6 +6,7 @@ import { Worker } from 'node:worker_threads';
 import { TAB } from '../src/stamp-table.js';
 import { costToFp, targetFromFp, sha256, stampValid, searchSlice, findStamp, fromHex, hex } from '../src/stamp.js';
 import { run } from '../src/stamp-worker.js';
+import { setStamp } from '../src/stamp-ui.js';
 
 test('the mantissa table is the one in src/netstamp_tab.h', () => {
   const header = readFileSync(new URL('../../src/netstamp_tab.h', import.meta.url), 'utf8');
@@ -100,4 +101,15 @@ test('the worker module reports progress and finds a stamp in a single thread to
   const found = messages.at(-1);
   assert.equal(found.type, 'found');
   assert.equal(stampValid(material, Uint8Array.from(found.stamp), 12), true);
+});
+
+test('a stamp the board refuses is never followed by a save (which would write other pending settings)', async () => {
+  const sent = [];
+  const session = { async command(line) { sent.push(line); if (line.startsWith('set stamp')) throw new Error('error: refused (see help)'); return 'saving\r\nstored\r\nstamp stored'; } };
+  await assert.rejects(setStamp({ session, hexText: '00112233445566778899aabbccdd' }), /refused/);
+  assert.deepEqual(sent, ['set stamp 00112233445566778899aabbccdd']);
+  sent.length = 0;
+  const good = { async command(line) { sent.push(line); return line === 'save' ? 'saving\r\nstored\r\nstamp stored' : 'ok'; } };
+  await setStamp({ session: good, hexText: '00112233445566778899AABBCCDD' });
+  assert.deepEqual(sent, ['set stamp 00112233445566778899aabbccdd', 'save']);
 });

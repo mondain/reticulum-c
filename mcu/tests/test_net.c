@@ -270,6 +270,16 @@ int main(void) {
     CHECK(strstr(reply, "error") != NULL); /* needs a value; the explicit way is "set stamp clear" */
     type(&con, &cfg, "set stamp clear", reply, sizeof(reply));
     CHECK(!strstr(reply, "error") && cfg.stamp_new_set && !memcmp(cfg.stamp_new, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 14));
+    /* once the port has stored the new stamp the status follows at once (not only after the next boot) */
+    memcpy(cfg.stamp_status, "none", 5);
+    cfg.stamp_new_set = 1;
+    memset(cfg.stamp_new, 0x5a, 14);
+    rnc_mcu_stamp_stored(&cfg);
+    CHECK(!cfg.stamp_new_set && !strcmp(cfg.stamp_status, "valid"));
+    cfg.stamp_new_set = 1;
+    memset(cfg.stamp_new, 0, 14);
+    rnc_mcu_stamp_stored(&cfg);
+    CHECK(!cfg.stamp_new_set && !strcmp(cfg.stamp_status, "none")); /* all zero removed it */
     /* "clear" restores the defaults but not what the platform reported about the identity */
     type(&con, &cfg, "clear", reply, sizeof(reply));
     CHECK(!strcmp(cfg.stamp_material, hexmat) && !cfg.stamp_new_set);

@@ -266,6 +266,23 @@ static void full_table(void) {
   CHECK(rnc_responder_set_evict_oldest(NULL, 1) == RNC_INVALID);
   teardown(&n);
 }
+/* A link request refused for its missing stamp must not cost a live session its place (RNS 1.6 link request stamps). */
+static void enforced_keeps_sessions(void) {
+  net n;
+  size_t i;
+  rnc_stamp_policy policy;
+  setup(&n);
+  CHECK(rnc_responder_set_evict_oldest(n.responder, 1) == RNC_OK);
+  for (i = 1; i < RNC_RESPONDER_LINKS; i++)
+    CHECK(extra_link(&n) == RNC_OK);
+  CHECK(rnc_responder_link_count(n.responder) == RNC_RESPONDER_LINKS);
+  CHECK(rnc_node_stamp_policy(n.server, &policy) == RNC_OK);
+  policy.enforce_link_requests = 1;
+  CHECK(rnc_node_set_stamp_policy(n.server, &policy) == RNC_OK);
+  CHECK(extra_link(&n) == RNC_AUTH); /* its destination announced no cost, so the request has no stamp... */
+  CHECK(rnc_responder_link_count(n.responder) == RNC_RESPONDER_LINKS); /* ...and nobody was evicted for it */
+  teardown(&n);
+}
 static void arguments(void) {
   net n;
   uint8_t other[16] = {9};
@@ -337,6 +354,8 @@ int main(int argc, char **argv) {
     drop_links_frees_slots();
   else if (!strcmp(argv[1], "full_table"))
     full_table();
+  else if (!strcmp(argv[1], "enforced_keeps_sessions"))
+    enforced_keeps_sessions();
   else if (!strcmp(argv[1], "arguments"))
     arguments();
   else if (!strcmp(argv[1], "max_request"))

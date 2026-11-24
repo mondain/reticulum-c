@@ -600,6 +600,49 @@ static void pr_forwarded(void) {
         !memcmp(sent.tag, got.tag, 16) && !memcmp(sent.destination, dest, 16));
   rnc_node_free(n);
 }
+/* With enforcement on, the stamp is looked at before the signature (one hash, not a verification): an unstamped
+ * flood is dropped and counted whatever its signature, as the reference does. */
+static void enforced_prefilter(void) {
+  rnc_node *n = transport_node();
+  rnc_identity a = fresh(), b = fresh();
+  rnc_packet none, good;
+  rnc_stamp_policy policy;
+  uint64_t filtered = 0;
+  CHECK(rnc_node_stamp_policy(n, &policy) == RNC_OK);
+  policy.enforce_announces = 1;
+  policy.destination_cost = 8.0;
+  CHECK(rnc_node_set_stamp_policy(n, &policy) == RNC_OK);
+  none = announce(&a, "stamp.flood", NULL, UNSTAMPED, 0, 0, 1000);
+  none.data[none.data_size - 1] ^= 1; /* a broken signature */
+  none.data[100] ^= 1;
+  CHECK(rnc_node_input(n, 1, &none, 1000, ++clock_ms) == RNC_OK);
+  CHECK(rnc_node_interface_filtered(n, 1, &filtered) == RNC_OK && filtered == 1);
+  /* a stamped announce with a broken signature still fails verification */
+  good = announce(&b, "stamp.forged", NULL, VALID, 8.0, 12.5, 1000);
+  good.data[110] ^= 1;
+  CHECK(rnc_node_input(n, 1, &good, 1000, ++clock_ms) != RNC_OK);
+  CHECK(rnc_node_interface_filtered(n, 1, &filtered) == RNC_OK && filtered == 1);
+  rnc_node_free(n);
+}
+/* A route restored from a checkpoint is judged against the cost of its own interface, as it was when it was learned. */
+static void restored_route(void) {
+  rnc_identity me = fresh(), peer = fresh();
+  rnc_node *a = rnc_node_new(&me, 1, rng, NULL), *b = rnc_node_new(&me, 1, rng, NULL);
+  rnc_packet p;
+  rnc_route route;
+  uint8_t state[2048];
+  size_t written;
+  CHECK(a && b && rnc_node_add_interface(a, 1, 1000000) == RNC_OK && rnc_node_add_interface(b, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_set_interface_stamp_costs(a, 1, 8.0, -1) == RNC_OK && rnc_node_set_interface_stamp_costs(b, 1, 8.0, -1) == RNC_OK);
+  p = announce(&peer, "stamp.restore", "hi", VALID, 9.0, 12.5, 1000);
+  CHECK(rnc_node_input(a, 1, &p, 1000, 10) == RNC_OK);
+  CHECK(rnc_node_lookup(a, p.destination, 10, &route) == RNC_OK && route.announce.app_size == 2);
+  CHECK(rnc_node_state_export(a, &me, 1000, 10, state, sizeof(state), &written) == RNC_OK);
+  CHECK(rnc_node_state_import(b, &me, 1010, 20, state, written) == RNC_OK);
+  CHECK(rnc_node_lookup(b, p.destination, 20, &route) == RNC_OK && route.announce.app_size == 2); /* still stripped */
+  rnc_node_free(a);
+  rnc_node_free(b);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "unenforced"))
@@ -638,6 +681,10 @@ int main(int argc, char **argv) {
     lr_emission_unannounced();
   else if (!strcmp(argv[1], "pr_forwarded"))
     pr_forwarded();
+  else if (!strcmp(argv[1], "enforced_prefilter"))
+    enforced_prefilter();
+  else if (!strcmp(argv[1], "restored_route"))
+    restored_route();
   else
     CHECK(0);
   puts("node stamps test passed");

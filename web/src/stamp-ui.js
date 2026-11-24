@@ -1,7 +1,7 @@
 // The console side of stamping a board from the page: read the material, search, set, save.
 import { findStamp, fromHex, hex, MATERIAL_SIZE, STAMP_SIZE } from './stamp.js';
 
-export const STAMP_VALUE = 25; // what the firmware requires (RNC_MCU_STAMP_VALUE)
+export const STAMP_VALUE = 25; // what the firmware requires (rnc_mcu_cfg.stamp_value in mcu/app/rnc_mcu_net.h)
 
 // The 90 byte material the board reports, as hex, or '' when it has no identity yet.
 export async function readMaterial(session) {

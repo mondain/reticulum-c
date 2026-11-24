@@ -24,17 +24,22 @@ static struct stamper {
   rnc_node *node;
   char path[1100]; /* <state>.stamps; empty without a state file */
   double value, pr_value, pr_timeout;
-  unsigned workers, niceness, started;
+  unsigned workers, niceness, started, live; /* live: workers still searching */
   pthread_t threads[STAMPER_MAX_WORKERS];
   pthread_mutex_t lock;
   uint8_t job_destination[16], job_material[90], job_stamp[RNC_NETSTAMP_SIZE];
   stamper_entry done[STAMPER_MAX_DESTINATIONS];
   size_t done_count;
+  uint8_t gave_up[STAMPER_MAX_DESTINATIONS][16]; /* destinations whose search failed; not retried in this run */
+  size_t gave_up_count;
 } stp;
 static int stamper_has(const uint8_t destination[16]) {
   size_t i;
   for (i = 0; i < stp.done_count; ++i)
     if (!memcmp(stp.done[i].destination, destination, 16))
+      return 1;
+  for (i = 0; i < stp.gave_up_count; ++i)
+    if (!memcmp(stp.gave_up[i], destination, 16))
       return 1;
   return 0;
 }
@@ -80,7 +85,16 @@ static void stamper_load(void) {
     }
   }
 }
+static void *stamper_worker_run(void *unused);
 static void *stamper_worker(void *unused) {
+  void *r = stamper_worker_run(unused);
+  pthread_mutex_lock(&stp.lock);
+  if (stp.live)
+    --stp.live;
+  pthread_mutex_unlock(&stp.lock);
+  return r;
+}
+static void *stamper_worker_run(void *unused) {
   uint8_t stamp[RNC_NETSTAMP_SIZE];
   (void)unused;
 #ifdef __linux__
@@ -126,9 +140,15 @@ static void stamper_begin(const uint8_t destination[16]) {
   memcpy(stp.job_destination, destination, 16);
   stp.found = 0;
   stp.cancel = 0;
+  stp.live = stp.workers; /* counted down by each worker as it leaves; a thread that cannot start leaves at once */
   for (i = 0; i < stp.workers; ++i)
     if (pthread_create(&stp.threads[stp.started], NULL, stamper_worker, NULL) == 0)
       ++stp.started;
+    else {
+      pthread_mutex_lock(&stp.lock);
+      --stp.live;
+      pthread_mutex_unlock(&stp.lock);
+    }
   stp.searching = stp.started != 0;
   if (stp.searching)
     rnc_logf(RNC_LOG_VERBOSE, "stamps", "searching a destination stamp of value %.2f on %u worker(s)", stp.value,
@@ -187,11 +207,20 @@ static void stamper_step(void) {
   if (!stp.enabled || !stp.node)
     return;
   if (stp.searching) {
+    unsigned live;
     pthread_mutex_lock(&stp.lock);
     found = stp.found;
+    live = stp.live;
     pthread_mutex_unlock(&stp.lock);
-    if (!found)
+    if (!found && live) /* still searching */
       return;
+    if (!found) { /* every worker left on an error: give this destination up for the run instead of waiting for ever */
+      stamper_join();
+      if (stp.gave_up_count < STAMPER_MAX_DESTINATIONS)
+        memcpy(stp.gave_up[stp.gave_up_count++], stp.job_destination, 16);
+      rnc_logf(RNC_LOG_ERROR, "stamps", "the destination stamp search failed; destination left unstamped");
+      return;
+    }
     stamper_join();
     if (rnc_node_set_destination_stamp(stp.node, stp.job_destination, stp.job_stamp) == RNC_OK &&
         stp.done_count < STAMPER_MAX_DESTINATIONS) {

@@ -628,9 +628,16 @@ static int stamp_board(double value, unsigned wait_s, int reset, int usb) {
             reset ? "." : ": press its reset button now, or drop --no-reset.");
     return 1;
   }
-  sleep_ms(100);
-  buf[0] = 0;
-  (void)console_read(buf, sizeof(buf), 100, NULL); /* the rest of the prompt */
+  /* Extra "rnc-config" lines may still be in flight: each is answered with an error and a prompt. Read until the
+   * board has been silent for 300 ms, so those replies are not taken for the answer to the next command. */
+  for (;;) {
+    size_t before;
+    buf[0] = 0;
+    (void)console_read(buf, sizeof(buf), 300, NULL);
+    before = strlen(buf);
+    if (!before)
+      break;
+  }
   if (!console_command("get stamp.material", buf, sizeof(buf), 3000) || !(at = strstr(buf, "stamp.material="))) {
     fprintf(stderr, "The board does not answer 'get stamp.material' (firmware without stamp support?)\n");
     return 1;
