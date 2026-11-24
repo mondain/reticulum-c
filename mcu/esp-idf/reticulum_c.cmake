@@ -11,7 +11,7 @@ endif()
 set(RNC_CORE_SRCS
     crypto.c crypto_portable.c packet.c framing.c announce.c link.c channel.c node.c
     ifac.c ratchet.c group.c stream.c resource.c service.c ipc.c responder.c requester.c
-    transfer.c stamp.c discovery.c log.c i2p.c)
+    transfer.c stamp.c netstamp.c discovery.c log.c i2p.c)
 set(RNC_SRC_LIST "")
 foreach(s ${RNC_CORE_SRCS})
     list(APPEND RNC_SRC_LIST "${RNC_ROOT}/src/${s}")
