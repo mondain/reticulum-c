@@ -640,6 +640,13 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
                 add_executable(test_ratchet_reference tests/test_ratchet_reference.c)
                 target_link_libraries(test_ratchet_reference PRIVATE reticulum_c OpenSSL::Crypto)
+                add_executable(test_netstamp_reference tests/test_netstamp_reference.c)
+                target_link_libraries(test_netstamp_reference PRIVATE reticulum_c)
+                add_test(NAME reticulum_netstamp_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_netstamp_reference> ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/netstamp_reference.py)
+                set_tests_properties(reticulum_netstamp_rns PROPERTIES LABELS "reticulum_interop" TIMEOUT 120)
                 add_test(NAME reticulum_ratchet_file_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_ratchet_reference> ${Python3_EXECUTABLE})
