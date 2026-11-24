@@ -385,7 +385,14 @@ void setup() {
   // usable settings, or on request in a short window after boot.
   rnc_mcu_cfg cfg;
   bool compiled_in = rnc_settings_load(&cfg);
-  rnc_mcu_stamp_prepare(&cfg, &platform); // what the console shows about the destination stamp
+  {
+    // what the console shows about the destination stamp: only the persistent store is needed for it
+    rnc_mcu_platform store;
+    memset(&store, 0, sizeof(store));
+    store.persist = platform_persist;
+    store.load = platform_load;
+    rnc_mcu_stamp_prepare(&cfg, &store);
+  }
   bool lora_leaf = cfg.lora.mode == RNC_LORA_MODE_LEAF && rnc_lora_cfg_ready(&cfg.lora);
   rnc_status_sources(&g_radio.li, &g_rnode, &cfg); // the screens, if this board has one
   (void)rnc_display_start();
