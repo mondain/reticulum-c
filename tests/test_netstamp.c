@@ -59,6 +59,57 @@ static void value_and_valid(void) {
   }
   CHECK(hits > 0 && hits < 200); /* a spread of values, not a constant */
 }
+static uint32_t seed = 11;
+static rnc_result rng(void *ctx, uint8_t *p, size_t n) {
+  size_t i;
+  (void)ctx;
+  for (i = 0; i < n; i++) {
+    seed = seed * 1664525u + 1013904223u;
+    p[i] = (uint8_t)(seed >> 24);
+  }
+  return RNC_OK;
+}
+/* A search at a low cost ends with a stamp the validator accepts at that cost, and reports its work. */
+static void find_low_cost(void) {
+  const uint8_t material[6] = {9, 8, 7, 6, 5, 4};
+  uint8_t stamp[RNC_NETSTAMP_SIZE];
+  uint64_t attempts = 0;
+  CHECK(rnc_netstamp_find(material, sizeof(material), 8.0, rng, NULL, 0, stamp, &attempts) == RNC_OK);
+  CHECK(attempts >= 1 && attempts < 100000);
+  CHECK(rnc_netstamp_valid(material, sizeof(material), stamp, sizeof(stamp), 8.0));
+  CHECK(rnc_netstamp_value(material, sizeof(material), stamp, sizeof(stamp)) >= 8.0);
+  /* fractional costs work the same way */
+  CHECK(rnc_netstamp_find(material, sizeof(material), 9.5, rng, NULL, 0, stamp, NULL) == RNC_OK);
+  CHECK(rnc_netstamp_valid(material, sizeof(material), stamp, sizeof(stamp), 9.5));
+}
+/* A stamped key is an X25519 key pair whose public key meets the cost over the material. */
+static void find_key_low_cost(void) {
+  const uint8_t material[8] = {1, 1, 2, 3, 5, 8, 13, 21};
+  uint8_t priv[32], pub[32], seed64[64] = {0};
+  rnc_identity id;
+  CHECK(rnc_netstamp_find_key(material, sizeof(material), 8.0, rng, NULL, 0, priv, pub, NULL) == RNC_OK);
+  CHECK(rnc_netstamp_valid(material, sizeof(material), pub, 32, 8.0));
+  /* the private half loads as the encryption key of an identity whose public key is the stamped one */
+  memcpy(seed64, priv, 32);
+  CHECK(rnc_identity_from_private(&id, seed64) == RNC_OK && !memcmp(id.public_key, pub, 32));
+}
+/* A search that runs out of attempts reports RNC_TIMEOUT and leaves the outputs alone; bad arguments are refused. */
+static void find_exhausted(void) {
+  const uint8_t material[2] = {1, 2};
+  uint8_t stamp[RNC_NETSTAMP_SIZE], priv[32], pub[32], blank[32];
+  memset(stamp, 0xa5, sizeof(stamp));
+  memset(priv, 0xa5, sizeof(priv));
+  memset(pub, 0xa5, sizeof(pub));
+  memset(blank, 0xa5, sizeof(blank));
+  CHECK(rnc_netstamp_find(material, sizeof(material), 40.0, rng, NULL, 1, stamp, NULL) == RNC_TIMEOUT);
+  CHECK(!memcmp(stamp, blank, sizeof(stamp)));
+  CHECK(rnc_netstamp_find_key(material, sizeof(material), 40.0, rng, NULL, 1, priv, pub, NULL) == RNC_TIMEOUT);
+  CHECK(!memcmp(priv, blank, 32) && !memcmp(pub, blank, 32));
+  CHECK(rnc_netstamp_find(NULL, 2, 8.0, rng, NULL, 0, stamp, NULL) == RNC_INVALID);
+  CHECK(rnc_netstamp_find(material, 2, 8.0, NULL, NULL, 0, stamp, NULL) == RNC_INVALID);
+  CHECK(rnc_netstamp_find(material, 2, 100.5, rng, NULL, 0, stamp, NULL) == RNC_INVALID);
+  CHECK(rnc_netstamp_find_key(material, 2, 8.0, rng, NULL, 0, NULL, pub, NULL) == RNC_INVALID);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "cost_encoding"))
@@ -67,6 +118,12 @@ int main(int argc, char **argv) {
     table();
   else if (!strcmp(argv[1], "value_and_valid"))
     value_and_valid();
+  else if (!strcmp(argv[1], "find_low_cost"))
+    find_low_cost();
+  else if (!strcmp(argv[1], "find_key_low_cost"))
+    find_key_low_cost();
+  else if (!strcmp(argv[1], "find_exhausted"))
+    find_exhausted();
   else
     CHECK(0);
   puts("netstamp test passed");

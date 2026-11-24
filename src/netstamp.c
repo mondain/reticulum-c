@@ -115,3 +115,93 @@ double rnc_netstamp_value(const void *material, size_t material_size, const void
   }
   return (double)(((256u - bl + 1u) << 8) - lo) / 256.0;
 }
+
+static int search_args_ok(const void *material, size_t size, double cost, rnc_random_fn random) {
+  return (material || !size) && random && cost >= 0 && cost <= RNC_NETSTAMP_COST_CAP;
+}
+rnc_result rnc_netstamp_find(const void *material, size_t material_size, double cost, rnc_random_fn random,
+                             void *random_context, uint64_t max_attempts, uint8_t stamp[RNC_NETSTAMP_SIZE],
+                             uint64_t *attempts) {
+  rnc_sha256_ctx base, c;
+  uint8_t cursor[RNC_NETSTAMP_SIZE], hash[32], target[32];
+  uint64_t tried = 0;
+  rnc_result r = RNC_TIMEOUT;
+  int k;
+  if (!search_args_ok(material, material_size, cost, random) || !stamp)
+    return RNC_INVALID;
+  if (!max_attempts)
+    max_attempts = UINT64_C(1) << 32;
+  target_of(rnc_netstamp_cost_to_fp(cost), target);
+  r = random(random_context, cursor, sizeof(cursor));
+  if (r != RNC_OK)
+    return r;
+  if (!rnc_sha256_init(&base) || (material_size && !rnc_sha256_update(&base, material, material_size))) {
+    rnc_sha256_discard(&base);
+    return RNC_CRYPTO;
+  }
+  r = RNC_TIMEOUT;
+  while (tried < max_attempts) {
+    int ok = rnc_sha256_copy(&c, &base) && rnc_sha256_update(&c, cursor, sizeof(cursor)) &&
+             rnc_sha256_final(&c, hash);
+    if (!ok) {
+      rnc_sha256_discard(&c);
+      r = RNC_CRYPTO;
+      break;
+    }
+    tried++;
+    if (memcmp(hash, target, 32) <= 0) {
+      memcpy(stamp, cursor, sizeof(cursor));
+      r = RNC_OK;
+      break;
+    }
+    for (k = RNC_NETSTAMP_SIZE - 1; k >= 0 && ++cursor[k] == 0; k--)
+      ;
+  }
+  rnc_sha256_discard(&base);
+  if (attempts)
+    *attempts = tried;
+  return r;
+}
+rnc_result rnc_netstamp_find_key(const void *material, size_t material_size, double cost,
+                                 rnc_random_fn random, void *random_context, uint64_t max_attempts,
+                                 uint8_t private_key[32], uint8_t public_key[32], uint64_t *attempts) {
+  rnc_sha256_ctx base, c;
+  uint8_t priv[32], pub[32], hash[32], target[32];
+  uint64_t tried = 0;
+  rnc_result r = RNC_TIMEOUT;
+  if (!search_args_ok(material, material_size, cost, random) || !private_key || !public_key)
+    return RNC_INVALID;
+  if (!max_attempts)
+    max_attempts = UINT64_C(1) << 32;
+  target_of(rnc_netstamp_cost_to_fp(cost), target);
+  if (!rnc_sha256_init(&base) || (material_size && !rnc_sha256_update(&base, material, material_size))) {
+    rnc_sha256_discard(&base);
+    return RNC_CRYPTO;
+  }
+  while (tried < max_attempts) {
+    int ok;
+    r = random(random_context, priv, sizeof(priv));
+    if (r != RNC_OK)
+      break;
+    ok = rnc_x25519_public(priv, pub) && rnc_sha256_copy(&c, &base) && rnc_sha256_update(&c, pub, 32) &&
+         rnc_sha256_final(&c, hash);
+    if (!ok) {
+      rnc_sha256_discard(&c);
+      r = RNC_CRYPTO;
+      break;
+    }
+    tried++;
+    r = RNC_TIMEOUT;
+    if (memcmp(hash, target, 32) <= 0) {
+      memcpy(private_key, priv, 32);
+      memcpy(public_key, pub, 32);
+      r = RNC_OK;
+      break;
+    }
+  }
+  rnc_cleanse(priv, sizeof(priv));
+  rnc_sha256_discard(&base);
+  if (attempts)
+    *attempts = tried;
+  return r;
+}

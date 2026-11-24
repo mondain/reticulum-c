@@ -28,6 +28,18 @@ int rnc_netstamp_valid(const void *material, size_t material_size, const void *s
 /* The stamp's value on the cost grid (RNS.Stamps.stamp_value); 0 on error. */
 double rnc_netstamp_value(const void *material, size_t material_size, const void *stamp,
                           size_t stamp_size);
+/* Searches for a detached stamp that meets `cost` over `material`: a random 14 byte start, counted up.
+ * max_attempts bounds the work (0 means 2^32); RNC_TIMEOUT when it runs out, with `stamp` untouched, so a
+ * caller can search in slices. *attempts (optional) receives the number of trials made. */
+rnc_result rnc_netstamp_find(const void *material, size_t material_size, double cost, rnc_random_fn random,
+                             void *random_context, uint64_t max_attempts, uint8_t stamp[RNC_NETSTAMP_SIZE],
+                             uint64_t *attempts);
+/* The same for a stamped X25519 key (RNS.Stamps.generate_stamped_key): fresh private keys are drawn until
+ * the public key meets `cost` over `material`. Only for X25519 encryption keys, never for signature keys.
+ * Outputs are written only on success. */
+rnc_result rnc_netstamp_find_key(const void *material, size_t material_size, double cost,
+                                 rnc_random_fn random, void *random_context, uint64_t max_attempts,
+                                 uint8_t private_key[32], uint8_t public_key[32], uint64_t *attempts);
 #ifdef __cplusplus
 }
 #endif
