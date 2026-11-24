@@ -20,6 +20,15 @@
  * first opens the port at 1200 baud, which makes the bootloader restart in DFU mode, and uses the port the
  * board comes back on; without it the board must already be in DFU mode (double-tap reset).
  *
+ * A third mode stamps a board for an RNS 1.6 network without any flashing:
+ *
+ *   reticulum-c-flash --port DEVICE --stamp [--stamp-value 25] [--stamp-wait 15] [--no-reset] [--usb | --no-usb]
+ *
+ * It opens the board's setup console (resetting the board first, unless --no-reset: an nRF52840 board needs its
+ * reset button pressed), reads `stamp.material`, searches a stamp over it that meets the value, sets it, saves it
+ * and restarts the board. The search is plain hashing: seconds to a few minutes at the default value of 25. The
+ * board must have run once so that it has an identity.
+ *
  * This writes flash. A wrong offset overwrites whatever lives there; a merged image written at 0x0
  * replaces the bootloader, partition table, application and NVS (identity and settings). A DFU package
  * replaces only the application. */
@@ -29,12 +38,14 @@
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
+#include <ctype.h>
 #include <errno.h>
 #include "nrf_dfu.h"
 #include <fcntl.h>
 #include <glob.h>
 #include <openssl/evp.h>
 #include <poll.h>
+#include <reticulum_c/rnc_netstamp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -550,12 +561,124 @@ static int enter_dfu(const char *port, char *out, size_t cap) {
   fprintf(stderr, "The board did not reappear in DFU mode. Double-tap its reset button and give the new port.\n");
   return 0;
 }
+/* ---- stamping a board through its setup console ---------------------------------------------------------- */
+static rnc_result urandom_fill(void *context, uint8_t *out, size_t size) {
+  FILE *f = fopen("/dev/urandom", "rb");
+  size_t got;
+  (void)context;
+  if (!f)
+    return RNC_CRYPTO;
+  got = fread(out, 1, size, f);
+  fclose(f);
+  return got == size ? RNC_OK : RNC_CRYPTO;
+}
+/* Reads what the board says for up to timeout_ms, appending to buf (NUL terminated) until `needle` shows up. */
+static int console_read(char *buf, size_t cap, unsigned timeout_ms, const char *needle) {
+  uint64_t end = now_ms() + timeout_ms;
+  size_t used = strlen(buf);
+  while (now_ms() < end) {
+    struct pollfd p = {fd, POLLIN, 0};
+    if (needle && strstr(buf, needle))
+      return 1;
+    if (poll(&p, 1, 50) > 0 && (p.revents & POLLIN) && used + 1 < cap) {
+      ssize_t r = read(fd, buf + used, cap - 1 - used);
+      if (r > 0) {
+        used += (size_t)r;
+        buf[used] = 0;
+      }
+    }
+  }
+  return needle && strstr(buf, needle) != NULL;
+}
+static int console_command(const char *command, char *reply, size_t cap, unsigned timeout_ms) {
+  char line[256];
+  int n = snprintf(line, sizeof(line), "%s\r\n", command);
+  reply[0] = 0;
+  if (n <= 0 || (size_t)n >= sizeof(line) || !write_all((const uint8_t *)line, (size_t)n))
+    return 0;
+  return console_read(reply, cap, timeout_ms, "rnc> ");
+}
+static int stamp_board(double value, unsigned wait_s, int reset, int usb) {
+  char buf[1024];
+  uint8_t material[90], stamp[RNC_NETSTAMP_SIZE];
+  char cmd[64], hex[29];
+  const char *at;
+  uint64_t tried = 0, last = 0, start;
+  size_t i;
+  int entered = 0;
+  if (reset) {
+    hard_reset(usb);
+    sleep_ms(100);
+  }
+  /* the console opens when "rnc-config" arrives within about two seconds of a reset */
+  for (start = now_ms(); !entered && now_ms() < start + (uint64_t)wait_s * 1000u;) {
+    static const char entry[] = "rnc-config\r\n";
+    buf[0] = 0;
+    (void)write_all((const uint8_t *)entry, sizeof(entry) - 1u);
+    entered = console_read(buf, sizeof(buf), 100, "rnc> ");
+  }
+  if (!entered) {
+    fprintf(stderr, "The board did not open its setup console%s\n",
+            reset ? "." : ": press its reset button now, or drop --no-reset.");
+    return 1;
+  }
+  sleep_ms(100);
+  buf[0] = 0;
+  (void)console_read(buf, sizeof(buf), 100, NULL); /* the rest of the prompt */
+  if (!console_command("get stamp.material", buf, sizeof(buf), 3000) || !(at = strstr(buf, "stamp.material="))) {
+    fprintf(stderr, "The board does not answer 'get stamp.material' (firmware without stamp support?)\n");
+    return 1;
+  }
+  at += strlen("stamp.material=");
+  for (i = 0; i < sizeof(material); i++) {
+    unsigned v;
+    if (!isxdigit((unsigned char)at[2 * i]) || !isxdigit((unsigned char)at[2 * i + 1]) ||
+        sscanf(at + 2 * i, "%2x", &v) != 1) {
+      fprintf(stderr, "The board has no identity yet: let it run once, then stamp it again.\n");
+      return 1;
+    }
+    material[i] = (uint8_t)v;
+  }
+  printf("Searching a stamp of value %.2f (about 2^%.0f hashes)...\n", value, value);
+  for (start = now_ms();;) {
+    uint64_t attempts = 0;
+    rnc_result r = rnc_netstamp_find(material, sizeof(material), value, urandom_fill, NULL, 1u << 22, stamp, &attempts);
+    tried += attempts;
+    if (r == RNC_OK)
+      break;
+    if (r != RNC_TIMEOUT) {
+      fprintf(stderr, "The stamp search failed\n");
+      return 1;
+    }
+    if (now_ms() - last > 2000) {
+      last = now_ms();
+      fprintf(stderr, "  %llu million hashes in %.0f s\n", (unsigned long long)(tried >> 20),
+              (double)(now_ms() - start) / 1000.0);
+    }
+  }
+  printf("Found after %llu hashes.\n", (unsigned long long)tried);
+  for (i = 0; i < sizeof(stamp); i++)
+    (void)snprintf(hex + 2 * i, 3, "%02x", stamp[i]);
+  (void)snprintf(cmd, sizeof(cmd), "set stamp %s", hex);
+  if (!console_command(cmd, buf, sizeof(buf), 3000) || strstr(buf, "error")) {
+    fprintf(stderr, "The board refused the stamp: %s\n", buf);
+    return 1;
+  }
+  if (!console_command("save", buf, sizeof(buf), 5000) || !strstr(buf, "stamp stored")) {
+    fprintf(stderr, "The board did not store the stamp: %s\n", buf);
+    return 1;
+  }
+  puts("Stamp stored; restarting the board.");
+  (void)console_command("reboot", buf, sizeof(buf), 300);
+  return 0;
+}
 static void usage(void) {
   fputs("usage: reticulum-c-flash --port DEVICE [--flash-size 4MB] [--no-reset] [--no-verify] [--usb | --no-usb] "
         "[-v] OFFSET FILE [OFFSET FILE ...]\n"
         "       reticulum-c-flash --port DEVICE --nrf-dfu PACKAGE.zip [--enter-dfu]\n"
         "       reticulum-c-flash --port DEVICE --verify-only [--flash-size 4MB] OFFSET FILE [...]\n"
         "       reticulum-c-flash --port DEVICE --reset-only\n"
+        "       reticulum-c-flash --port DEVICE --stamp [--stamp-value 25] [--stamp-wait 15] [--no-reset]\n"
         "  --usb / --no-usb: the port is the chip's native USB Serial/JTAG (default when the device name is\n"
         "  /dev/ttyACM*) or an external UART bridge\n",
         stderr);
@@ -571,6 +694,9 @@ int main(int argc, char **argv) {
   uint32_t pending_offset = 0;
   int have_offset = 0, want_enter_dfu = 0;
   const char *dfu_package_path = NULL;
+  int want_stamp = 0;
+  double stamp_value = 25.0;
+  unsigned stamp_wait = 15;
   for (i = 1; i < (size_t)argc; ++i) {
     const char *a = argv[i];
     if ((!strcmp(a, "--port") || !strcmp(a, "-p")) && i + 1 < (size_t)argc)
@@ -590,6 +716,15 @@ int main(int argc, char **argv) {
       want_enter_dfu = 1;
     else if (!strcmp(a, "--no-verify"))
       no_verify = 1;
+    else if (!strcmp(a, "--stamp"))
+      want_stamp = 1;
+    else if (!strcmp(a, "--stamp-value") && i + 1 < (size_t)argc) {
+      char *end;
+      stamp_value = strtod(argv[++i], &end);
+      if (*end || !(stamp_value >= 0 && stamp_value <= RNC_NETSTAMP_COST_CAP))
+        return usage(), 2;
+    } else if (!strcmp(a, "--stamp-wait") && i + 1 < (size_t)argc)
+      stamp_wait = (unsigned)strtoul(argv[++i], NULL, 10);
     else if (!strcmp(a, "--usb"))
       usb = 1;
     else if (!strcmp(a, "--no-usb"))
@@ -659,6 +794,17 @@ int main(int argc, char **argv) {
     free(zip);
     if (!rc)
       puts("Done. The board restarts into the new application; check it by looking at the board.");
+    return rc;
+  }
+  if (want_stamp) {
+    if (!port || job_count || have_offset)
+      return usage(), 2;
+    if (usb < 0)
+      usb = strstr(port, "ttyACM") != NULL;
+    if (!open_port(port))
+      return 1;
+    rc = stamp_board(stamp_value, stamp_wait, !no_reset, usb);
+    close(fd);
     return rc;
   }
   if (!port || have_offset || (reset_only ? job_count : !job_count))
