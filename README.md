@@ -108,6 +108,9 @@ checks the stamps on announces, path requests and link requests, searches stamps
 its own destinations on background threads (saved beside the state file), and stamps
 the path requests and link requests it sends. Nothing is enforced unless the
 `[stamps]` section says `enforce_stamps = Yes`; `--exampleconfig` lists every option.
+The tools (`reticulum-c-cp`, `-x`, `-sh`, `-git`, `-ctl`) stamp the link requests they send but do not
+stamp their own announces or path requests, so against a daemon or network that enforces stamps they are
+filtered; point them at a daemon that does not enforce.
 
 ## Tools
 

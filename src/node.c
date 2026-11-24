@@ -726,7 +726,8 @@ static rnc_result destination_announce(rnc_node *n, node_destination *d,
   const uint8_t *data = d->app;
   size_t size = d->size;
   if (d->has_stamp) { /* the RNS 1.6 stamp extension, after the application's own data */
-    if (size + RNC_NETSTAMP_EXT_SIZE <= sizeof(app)) {
+    /* a ratcheted announce carries 32 bytes more, so its app data is limited to 284 (rnc_announce_create_ratchet) */
+    if (size + RNC_NETSTAMP_EXT_SIZE <= (d->has_ratchet ? 284u : sizeof(app))) {
       memcpy(app, d->app, size);
       if (rnc_netstamp_ext_build(d->stamp, d->link_cost >= 0 ? d->link_cost : n->stamps.lr_cost,
                                  app + size) == RNC_OK) {
@@ -2011,8 +2012,12 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
     }
     queue(n, ingress, &reply, due);
   } else {
-    r = rnc_path_request_create(request.destination, n->transport ? n->id : NULL, request.tag,
-                                request.tag_size, &reply);
+    if (request.has_stamp && request.tag_size == 16) /* the extension we received goes on with the request */
+      r = rnc_path_request_create_stamped(request.destination, n->id, request.tag, request.tag_size, request.stamp,
+                                          &reply);
+    else
+      r = rnc_path_request_create(request.destination, n->transport ? n->id : NULL, request.tag,
+                                  request.tag_size, &reply);
     if (r != RNC_OK)
       return r;
     entry.pending = 1;

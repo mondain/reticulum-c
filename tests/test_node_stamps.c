@@ -433,6 +433,19 @@ static void emit_overlong(void) {
   p = sent_announce(n, 0);
   CHECK(rnc_announce_verify(&p, &a) == RNC_OK && rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext) == 1 &&
         ext.app_size == 298);
+  /* a ratcheted announce carries 32 bytes more, so its app data limit is 284: 270 bytes and an extension do not fit */
+  {
+    uint8_t ratchet[32], big2[270];
+    memset(ratchet, 0x33, sizeof(ratchet));
+    memset(big2, 'z', sizeof(big2));
+    CHECK(rnc_node_add_destination(n, &me, "stamp.ratchet", big2, sizeof(big2), dest) == RNC_OK);
+    CHECK(rnc_node_set_ratchet(n, dest, ratchet) == RNC_OK);
+    find_for(n, dest, 8.0, stamp);
+    CHECK(rnc_node_set_destination_stamp(n, dest, stamp) == RNC_OK);
+    CHECK(rnc_node_announce(n, dest, 1002, ++clock_ms) == RNC_OK); /* sent, unstamped, not refused */
+    p = sent_announce(n, 0);
+    CHECK(rnc_announce_verify(&p, &a) == RNC_OK && a.app_size == 270 && !rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext));
+  }
   rnc_node_free(n);
 }
 /* ---- stamping the path requests we send ---- */
@@ -562,6 +575,31 @@ static void lr_emission_unannounced(void) {
   CHECK(rnc_netstamp_valid(material, 48, req.data, 32, 12.5)); /* the policy's default lr_cost */
   rnc_node_free(n);
 }
+/* A transport node passes a path request for a destination it does not know on to its other interfaces, and the
+ * stamp rides along: the reference forwards the extension it received, and an enforcing neighbour needs it. */
+static void pr_forwarded(void) {
+  rnc_node *n = transport_node();
+  uint8_t dest[16];
+  rnc_packet p, out;
+  rnc_path_request got, sent;
+  rnc_node_event e;
+  int seen = 0;
+  memset(dest, 0x5a, 16);
+  CHECK(rnc_node_local_interface(n, 1, 1) == RNC_OK); /* a client of ours asks: such requests are passed on */
+  p = request(dest, VALID, 8.0, 64);
+  CHECK(rnc_path_request_decode(&p, &got) == RNC_OK && got.has_stamp);
+  CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK);
+  CHECK(rnc_node_tick(n, 1000 + clock_ms / 1000, clock_ms += 3000) == RNC_OK);
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    if (e.type == RNC_NODE_SEND && e.interface_id == 2 && ((e.packet.flags >> 2) & 3u) == RNC_PLAIN) {
+      out = e.packet;
+      seen = 1;
+    }
+  CHECK(seen && out.data_size == 64);
+  CHECK(rnc_path_request_decode(&out, &sent) == RNC_OK && sent.has_stamp && !memcmp(sent.stamp, got.stamp, 14) &&
+        !memcmp(sent.tag, got.tag, 16) && !memcmp(sent.destination, dest, 16));
+  rnc_node_free(n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "unenforced"))
@@ -598,6 +636,8 @@ int main(int argc, char **argv) {
     lr_emission();
   else if (!strcmp(argv[1], "lr_emission_unannounced"))
     lr_emission_unannounced();
+  else if (!strcmp(argv[1], "pr_forwarded"))
+    pr_forwarded();
   else
     CHECK(0);
   puts("node stamps test passed");
