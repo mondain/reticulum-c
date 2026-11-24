@@ -1,5 +1,6 @@
 #include "internal.h"
 #include "crypto_backend.h"
+#include <ctype.h>
 #include "service_msgpack.h"
 #include <reticulum_c/rnc_ipc.h>
 #include <reticulum_c/rnc_node.h>
@@ -1302,15 +1303,78 @@ static rnc_result tunnel_handle(rnc_node *n, const uint8_t id[32],
   memcpy(in->tunnel_id, id, 32);
   return RNC_OK;
 }
+/* The map RNS 1.6 appends to a tunnel synthesis packet (Transport.synthesize_tunnel): implementation
+ * name (0xFD), version (0xFC), transport status (0x01), destination cost (0xFB) and path request
+ * cost (0xFA), all required, nothing after the map. Mirrors tunnel_synthesize_handler. */
+static int ext_name_ok(const uint8_t *s, size_t n) {
+  size_t i;
+  if (!n || !isalnum(s[0]) || !(isalnum(s[n - 1]) || s[n - 1] == ')'))
+    return 0;
+  for (i = 0; i < n; i++)
+    if (s[i] < 0x20 || s[i] > 0x7e || (s[i] == ' ' && i + 1 < n && s[i + 1] == ' '))
+      return 0;
+  return 1;
+}
+static int tunnel_ext_valid(const uint8_t *ext, size_t size) {
+  rmp r = {ext, size, 0};
+  const uint8_t *b, *str;
+  uint64_t entries, key, seen = 0;
+  size_t len;
+  if (!rmp_take(&r, 1, &b))
+    return 0;
+  if ((*b & 0xf0) == 0x80)
+    entries = *b & 0x0f;
+  else if (*b == 0xde && rmp_num(&r, 2, &entries))
+    ;
+  else if (*b == 0xdf && rmp_num(&r, 4, &entries))
+    ;
+  else
+    return 0;
+  while (entries--) {
+    if (!rmp_uint(&r, &key))
+      return 0;
+    if (key == 0xfd || key == 0xfc) {
+      if (!rmp_len(&r, 1, &len) || !rmp_take(&r, len, &str))
+        return 0;
+      if (key == 0xfd ? !ext_name_ok(str, len) : (len == 0 || !isdigit(str[0])))
+        return 0;
+    } else if (key == 0x01) {
+      if (!rmp_take(&r, 1, &b) || (*b != 0xc2 && *b != 0xc3))
+        return 0;
+    } else if (key == 0xfb || key == 0xfa) {
+      if (!rmp_take(&r, 1, &b) || (*b != 0xca && *b != 0xcb) ||
+          !rmp_take(&r, *b == 0xca ? 4 : 8, NULL))
+        return 0;
+    } else if (!rmp_skip_depth(&r, 0)) {
+      return 0;
+    }
+    if (key <= 0xfd && key >= 0xfa)
+      seen |= 1u << (key - 0xfa);
+    else if (key == 0x01)
+      seen |= 1u << 4;
+  }
+  return seen == 0x1f && r.i == r.n;
+}
 static rnc_result tunnel_synthesized(rnc_node *n, uint32_t ingress,
                                      const rnc_packet *p, uint64_t now) {
   rnc_identity remote;
   uint8_t id[32], material[96];
-  if ((p->flags & 3u) != RNC_DATA || p->data_size != 176)
+  /* public key, interface hash, random hash, signature; since RNS 1.6 also a signed extension map */
+  if ((p->flags & 3u) != RNC_DATA || p->data_size < 176 || p->data_size > 464)
     return RNC_PROTOCOL;
-  if (rnc_identity_from_public(&remote, p->data) != RNC_OK ||
-      rnc_identity_verify(&remote, p->data, 112, p->data + 112) != RNC_OK)
+  if (rnc_identity_from_public(&remote, p->data) != RNC_OK)
     return RNC_PROTOCOL;
+  if (p->data_size > 176) {
+    uint8_t signed_data[464 - 64];
+    size_t ext_size = p->data_size - 176;
+    memcpy(signed_data, p->data, 112);
+    memcpy(signed_data + 112, p->data + 176, ext_size);
+    if (rnc_identity_verify(&remote, signed_data, 112 + ext_size, p->data + 112) != RNC_OK ||
+        !tunnel_ext_valid(p->data + 176, ext_size))
+      return RNC_PROTOCOL;
+  } else if (rnc_identity_verify(&remote, p->data, 112, p->data + 112) != RNC_OK) {
+    return RNC_PROTOCOL;
+  }
   memcpy(material, p->data, 96); /* public key and interface hash */
   if (rnc_hash(material, sizeof(material), id) != RNC_OK)
     return RNC_CRYPTO;
