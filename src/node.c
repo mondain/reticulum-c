@@ -180,6 +180,10 @@ struct rnc_node {
   node_tunnel tunnels[RNC_NODE_TUNNELS];
   rnc_stamp_policy stamps;
   int stamp_required;       /* announces wait for a loaded stamp */
+  rnc_netstamp_link_stamper default_stamper; /* used when the host sets none, with the node's own random source */
+  rnc_link_stamper_fn link_stamper;     /* stamps the link requests we send */
+  void *link_stamper_context;
+  int always_stamp_links;
   rnc_stamp_provider_fn stamp_provider; /* stamps the path requests we send */
   void *stamp_provider_context;
   double stamp_value;       /* the value a loaded destination stamp must have */
@@ -482,6 +486,9 @@ rnc_node *rnc_node_new(const rnc_identity *identity, int transport,
     n->stamps.pr_cost = 15.8;
     n->stamps.lr_cost = 12.5;
     n->stamp_value = 25.0;
+    n->default_stamper.random = random;
+    n->default_stamper.random_context = context;
+    n->default_stamper.max_attempts = UINT64_C(1) << 20; /* a few seconds of key generation at most */
   }
   return n;
 }
@@ -1099,6 +1106,29 @@ rnc_result rnc_node_set_stamp_emission(rnc_node *n, int required, double destina
   n->stamp_required = !!required;
   n->stamp_value = destination_value;
   return RNC_OK;
+}
+rnc_result rnc_node_set_link_stamper(rnc_node *n, rnc_link_stamper_fn stamper, void *context, int always) {
+  if (!n)
+    return RNC_INVALID;
+  n->link_stamper = stamper;
+  n->link_stamper_context = context;
+  n->always_stamp_links = !!always;
+  return RNC_OK;
+}
+rnc_result rnc_node_stamp_link(const rnc_node *n, rnc_link *link, const uint8_t destination[16]) {
+  double cost = 0;
+  if (!n || !link || !destination)
+    return RNC_INVALID;
+  if (!n->stamps.enabled)
+    return RNC_OK;
+  if (rnc_node_recall_link_cost(n, destination, &cost) != RNC_OK)
+    cost = n->always_stamp_links ? n->stamps.lr_cost : 0;
+  if (cost > RNC_NETSTAMP_LINK_COST_CAP)
+    cost = RNC_NETSTAMP_LINK_COST_CAP;
+  if (n->link_stamper)
+    return rnc_link_set_stamper(link, n->link_stamper, n->link_stamper_context, cost);
+  /* no stamper of the host's: like the reference, stamp when the destination asks, with the node's own randomness */
+  return rnc_link_set_stamper(link, rnc_netstamp_link_stamper_run, (void *)&n->default_stamper, cost);
 }
 rnc_result rnc_node_set_stamp_provider(rnc_node *n, rnc_stamp_provider_fn provider, void *context) {
   if (!n)

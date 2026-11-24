@@ -56,6 +56,15 @@ typedef struct rnc_netstamp_ext {
 /* 1 and *ext filled when the data ends in a well formed extension (marker, reserved bit clear, cost within the
  * cap); 0 otherwise, *ext untouched. The flags byte is reserved and not checked. The stamp is not verified. */
 int rnc_netstamp_ext_parse(const uint8_t *app_data, size_t size, rnc_netstamp_ext *ext);
+/* A ready made link stamper (see rnc_link_set_stamper): searches a stamped key with rnc_netstamp_find_key, up to
+ * max_attempts trials (0 means 2^32) in one blocking call, and returns 0 when that runs out. */
+typedef struct rnc_netstamp_link_stamper {
+  rnc_random_fn random;
+  void *random_context;
+  uint64_t max_attempts;
+} rnc_netstamp_link_stamper;
+int rnc_netstamp_link_stamper_run(void *context, const uint8_t material[48], double cost, uint8_t private_key[32],
+                                  uint8_t public_key[32]);
 #ifdef __cplusplus
 }
 #endif

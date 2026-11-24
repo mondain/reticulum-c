@@ -244,3 +244,11 @@ int rnc_netstamp_ext_parse(const uint8_t *app_data, size_t size, rnc_netstamp_ex
   ext->app_size = size - RNC_NETSTAMP_EXT_SIZE;
   return 1;
 }
+int rnc_netstamp_link_stamper_run(void *context, const uint8_t material[48], double cost, uint8_t private_key[32],
+                                  uint8_t public_key[32]) {
+  const rnc_netstamp_link_stamper *c = context;
+  if (!c || !c->random)
+    return 0;
+  return rnc_netstamp_find_key(material, 48, cost, c->random, c->random_context, c->max_attempts, private_key,
+                               public_key, NULL) == RNC_OK;
+}

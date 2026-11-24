@@ -32,6 +32,9 @@ struct rnc_link {
     uint64_t outbound, activated, est_timeout, stale_since, data_at;
     size_t est_cost;
     int stale, teardown, est_set;
+    int (*stamper)(void *, const uint8_t[48], double, uint8_t[32], uint8_t[32]);
+    void *stamper_context;
+    double stamper_cost;
     size_t last_resource_window;
     uint64_t last_resource_eifr;
     size_t local_mtu, mtu, mdu;

@@ -1,5 +1,6 @@
 /* Network stamps on announces as seen by the node (RNS 1.6): verification against the interface's required
  * cost, the announced link request cost, stripping the extension from delivered app data, enforcement. */
+#include <reticulum_c/rnc_link.h>
 #include <reticulum_c/rnc_netstamp.h>
 #include <reticulum_c/rnc_node.h>
 #include <stdio.h>
@@ -485,6 +486,82 @@ static void pr_emission(void) {
   CHECK(rnc_node_set_stamp_provider(n, NULL, NULL) == RNC_OK);
   rnc_node_free(n);
 }
+/* ---- stamping the link requests we send ---- */
+static rnc_packet open_link(rnc_node *n, const rnc_packet *announce_packet, int *refused) {
+  rnc_link *link = rnc_link_new(rng, NULL);
+  rnc_announce peer;
+  rnc_link_event e;
+  rnc_packet none = {0};
+  CHECK(link && rnc_announce_verify(announce_packet, &peer) == RNC_OK);
+  CHECK(rnc_node_stamp_link(n, link, peer.destination) == RNC_OK);
+  *refused = rnc_link_open(link, &peer, ++clock_ms);
+  if (*refused == RNC_OK) {
+    while (rnc_link_poll(link, &e) == RNC_OK)
+      if (e.type == RNC_LINK_SEND) {
+        rnc_link_free(link);
+        return e.packet;
+      }
+  } else {
+    CHECK(rnc_link_teardown_reason(link) == RNC_TEARDOWN_STAMP_FAILURE);
+  }
+  rnc_link_free(link);
+  return none;
+}
+static int refusing_stamper(void *context, const uint8_t material[48], double cost, uint8_t priv[32], uint8_t pub[32]) {
+  (void)context; (void)material; (void)cost; (void)priv; (void)pub;
+  return 0;
+}
+static void lr_emission(void) {
+  rnc_node *n = transport_node();
+  rnc_identity peer_id = fresh();
+  rnc_packet announce_packet, req;
+  rnc_netstamp_link_stamper stamper = {rng, NULL, 0};
+  uint8_t material[48];
+  int refused;
+  CHECK(rnc_node_set_interface_stamp_costs(n, 1, 8.0, -1) == RNC_OK);
+  /* the peer announces a link request cost of 8 with its (valid) destination stamp */
+  announce_packet = announce(&peer_id, "stamp.linkpeer", NULL, VALID, 8.0, 8.0, 1000);
+  CHECK(rnc_node_input(n, 1, &announce_packet, 1000, ++clock_ms) == RNC_OK);
+  /* no stamper set by the host: the node's default one stamps what the announce asked for */
+  req = open_link(n, &announce_packet, &refused);
+  CHECK(refused == RNC_OK && req.data_size == 67);
+  memcpy(material, announce_packet.destination, 16);
+  memcpy(material + 16, req.data + 32, 32);
+  CHECK(rnc_netstamp_valid(material, 48, req.data, 32, 8.0));
+  CHECK(rnc_node_set_link_stamper(n, rnc_netstamp_link_stamper_run, &stamper, 0) == RNC_OK);
+  req = open_link(n, &announce_packet, &refused);
+  CHECK(refused == RNC_OK && req.data_size == 67);
+  memcpy(material, announce_packet.destination, 16);
+  memcpy(material + 16, req.data + 32, 32); /* destination || the request's own signature key */
+  CHECK(rnc_netstamp_valid(material, 48, req.data, 32, 8.0)); /* the encryption key is a stamped key */
+  /* a stamper that cannot deliver ends the attempt with the stamp failure reason */
+  CHECK(rnc_node_set_link_stamper(n, refusing_stamper, NULL, 0) == RNC_OK);
+  (void)open_link(n, &announce_packet, &refused);
+  CHECK(refused == RNC_TIMEOUT);
+  rnc_node_free(n);
+}
+static void lr_emission_unannounced(void) {
+  rnc_node *n = transport_node();
+  rnc_identity peer_id = fresh();
+  rnc_packet plain, req;
+  rnc_netstamp_link_stamper stamper = {rng, NULL, 0};
+  uint8_t material[48];
+  int refused;
+  /* a peer that announced no cost is not stamped for, unless always_stamp_lrs asks for the default cost */
+  plain = announce(&peer_id, "stamp.nocost", NULL, UNSTAMPED, 0, 0, 1000);
+  CHECK(rnc_node_input(n, 1, &plain, 1000, ++clock_ms) == RNC_OK);
+  CHECK(rnc_node_set_link_stamper(n, rnc_netstamp_link_stamper_run, &stamper, 0) == RNC_OK);
+  req = open_link(n, &plain, &refused);
+  CHECK(refused == RNC_OK);
+  memcpy(material, plain.destination, 16);
+  memcpy(material + 16, req.data + 32, 32);
+  CHECK(rnc_node_set_link_stamper(n, rnc_netstamp_link_stamper_run, &stamper, 1) == RNC_OK);
+  req = open_link(n, &plain, &refused);
+  CHECK(refused == RNC_OK);
+  memcpy(material + 16, req.data + 32, 32);
+  CHECK(rnc_netstamp_valid(material, 48, req.data, 32, 12.5)); /* the policy's default lr_cost */
+  rnc_node_free(n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "unenforced"))
@@ -517,6 +594,10 @@ int main(int argc, char **argv) {
     emit_overlong();
   else if (!strcmp(argv[1], "pr_emission"))
     pr_emission();
+  else if (!strcmp(argv[1], "lr_emission"))
+    lr_emission();
+  else if (!strcmp(argv[1], "lr_emission_unannounced"))
+    lr_emission_unannounced();
   else
     CHECK(0);
   puts("node stamps test passed");

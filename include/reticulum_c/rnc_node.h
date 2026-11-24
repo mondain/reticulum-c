@@ -1,6 +1,7 @@
 #ifndef RETICULUM_C_NODE_H
 #define RETICULUM_C_NODE_H
 #include <reticulum_c/rnc.h>
+#include <reticulum_c/rnc_link.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -389,6 +390,13 @@ rnc_result rnc_node_set_stamp_emission(rnc_node *node, int required, double dest
  * NULL removes the provider. The provider runs inside rnc_node_request_path*, on the caller's thread. */
 typedef int (*rnc_stamp_provider_fn)(void *context, const uint8_t material[32], uint8_t stamp[14]);
 rnc_result rnc_node_set_stamp_provider(rnc_node *node, rnc_stamp_provider_fn provider, void *context);
+/* Link requests we send: a host calls rnc_node_stamp_link on each new link before rnc_link_open. The link then asks
+ * for a stamped key when the destination announced a link request cost above 0 (see rnc_node_recall_link_cost), or,
+ * with `always`, at the policy's lr_cost when it announced none. Unless the host sets its own stamper (for example
+ * rnc_netstamp_link_stamper_run with a larger attempt budget), the node searches with its own random source for
+ * up to 2^20 trials, as the reference stamps by default. A NULL stamper restores that default. */
+rnc_result rnc_node_set_link_stamper(rnc_node *node, rnc_link_stamper_fn stamper, void *context, int always);
+rnc_result rnc_node_stamp_link(const rnc_node *node, rnc_link *link, const uint8_t destination[16]);
 /* The index'th local SINGLE destination (in the order they were added); RNC_AGAIN past the last. */
 rnc_result rnc_node_destination_at(const rnc_node *node, size_t index, uint8_t destination[16]);
 rnc_result rnc_node_destination_stamp_material(const rnc_node *node, const uint8_t destination[16], uint8_t out[90]);

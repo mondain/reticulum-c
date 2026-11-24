@@ -920,6 +920,7 @@ static int run_initiator(rnc_identity *id, app *a, const uint8_t destination[16]
   if (!link ||
       rnc_link_configure_mtu(link, rnc_node_link_mtu_to(a->node, destination,
                                                         monotonic_ms())) != RNC_OK ||
+      rnc_node_stamp_link(a->node, link, destination) != RNC_OK ||
       rnc_link_open(link, &route.announce, monotonic_ms()) != RNC_OK ||
       rnc_link_address(link, link_id) != RNC_OK ||
       rnc_node_bind_link_on(a->node, link_id, route.interface_id) != RNC_OK) {

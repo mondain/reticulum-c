@@ -634,6 +634,8 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
   result = rnc_link_configure_mtu(
       j->c.link, rnc_node_link_mtu_to(c->node, destination, now));
   if (result == RNC_OK)
+    result = rnc_node_stamp_link(c->node, j->c.link, destination); /* RNS 1.6 link request stamp */
+  if (result == RNC_OK)
     result = rnc_link_open(j->c.link, &route.announce, now);
   if (result == RNC_OK)
     result = rnc_link_address(j->c.link, j->c.id);
