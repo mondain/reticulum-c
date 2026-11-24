@@ -189,7 +189,7 @@ A board does no stamp search. The destination stamp depends only on public data
   reboot; erased with the identity).
 - Tool: `reticulum-c-flash` and the browser flasher gain a "stamp this board" action: read the
   material from the console, compute the stamp on the host at the configured value, set it. The
-  web flasher computes in a worker thread (SHA-256 via Web Crypto or a small script).
+  web flasher computes in workers with its own SHA-256 (see "Decided: where stamps are computed").
 - Board behavior: with a valid stamp, announces carry the extension (adding 18 bytes) and the
   announced link request cost; without one, announces are unstamped as today. If the identity is
   regenerated, the stored stamp no longer verifies and is dropped on boot with a console notice.
@@ -214,7 +214,7 @@ A board does no stamp search. The destination stamp depends only on public data
 ## Decisions made by the user
 
 - Approach 2 (host first), re-pin first, as above.
-- The browser flasher only displays material and accepts a stamp; computing happens in the CLI tool.
+- The browser flasher also computes stamps (workers, JavaScript SHA-256), not only the CLI; stamps cannot be precomputed because they are bound to each board's public key.
 - Board stamps are precomputed and loaded through the flasher or console, so a board does
   minimal processing.
 
@@ -246,11 +246,23 @@ A board does no stamp search. The destination stamp depends only on public data
 
 ## Decided: where stamps are computed
 
-The first release computes board stamps in `reticulum-c-flash` and the setup console tooling
-only. The browser flasher shows the board's stamp material and status and accepts a stamp
-computed elsewhere, but does not search in the browser. In-browser computation needs a WASM or
-hand-written JavaScript SHA-256 in a worker (Web Crypto's per-call digest is far too slow for
-about 2^25 trials) and is a follow-up.
+Revised after approval, at the user's request. Board stamps are computed in two places, with
+the same result: `reticulum-c-flash` (native, the reference implementation for testing) and the
+browser flasher. A stamp cannot be shipped precomputed, because it is bound to the board's own
+public key (each board generates its identity on first boot); pre-generated identities would
+mean the distributor knows the private keys, so that approach is rejected.
+
+The browser flasher runs the search in Web Workers (one per available core, capped at 8) with a
+hand-written JavaScript SHA-256 over typed arrays (Web Crypto's per-call async digest is far too
+slow for about 2^25 trials). It needs no new toolchain; a WASM build is a later optimization.
+The flow is one action, "Stamp this board": read `stamp.material` from the console, search at
+the board's destination value (25.0 by default) with progress shown, set the stamp, and display
+`stamp.status`. The search is cancellable. The cost arithmetic (fixed-point costs and the
+256-entry table, with 256-bit comparison via BigInt) is ported to JavaScript and must agree
+with the C library, checked by test: the table is compared with `src/netstamp_tab.h`, and
+stamps are cross-validated in both directions (C-found stamps pass the JavaScript check and
+the reverse). Speed is unmeasured; if a search proves impractically slow on common hardware,
+the page shows the CLI command instead of failing silently.
 
 ## Left to the builder
 
