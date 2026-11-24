@@ -2069,7 +2069,19 @@ static const char *example_config =
     "    type = TCPClientInterface\n"
     "    enabled = No\n"
     "    target_host = reticulum.example.org\n"
-    "    target_port = 4242\n";
+    "    target_port = 4242\n"
+    "\n"
+    "  # A LoRa radio running RNode firmware (reticulum-c in RNode mode, or the reference RNode firmware)\n"
+    "  # on a serial port. Frequency in Hz, bandwidth in Hz, transmit power in dBm.\n"
+    "  [[RNode LoRa]]\n"
+    "    type = RNodeInterface\n"
+    "    enabled = No\n"
+    "    port = /dev/ttyACM0\n"
+    "    frequency = 915000000\n"
+    "    bandwidth = 125000\n"
+    "    txpower = 10\n"
+    "    spreadingfactor = 8\n"
+    "    codingrate = 5\n";
 static void log_apply(const config *c) {
   memset(&logsink, 0, sizeof(logsink));
   logsink.to_stdout = !strcmp(c->logdestination, "stdout");
