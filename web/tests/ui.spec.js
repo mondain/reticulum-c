@@ -5,7 +5,8 @@ async function serialMock(page){
   const port={
    async open(){this.readable=new ReadableStream({start:c=>this.controller=c});this.writable=new WritableStream({write:bytes=>{
     const c=new TextDecoder().decode(bytes).trim();window.sentCommands.push(c);
-    const answer=c==='get'?'mode=serial\r\npassword=(set)\r\nlora.mode=gateway\r\nlora.freq=915000000\r\nlora.bw=125000\r\nlora.sf=8\r\nlora.cr=5\r\nlora.txp=0\r\nlora.airtime=1.00\r\n':c==='save'?'saving\r\nstored\r\n':c==='reboot'?'rebooting\r\n':'ok\r\n';
+    if(c.startsWith('set stamp '))window.stampPending=true;
+    const answer=c==='get stamp.material'?'stamp.material='+'ab'.repeat(90)+'\r\n':c==='save'&&window.stampPending?'saving\r\nstored\r\nstamp stored\r\n':c==='get'?'mode=serial\r\npassword=(set)\r\nlora.mode=gateway\r\nlora.freq=915000000\r\nlora.bw=125000\r\nlora.sf=8\r\nlora.cr=5\r\nlora.txp=0\r\nlora.airtime=1.00\r\n':c==='save'?'saving\r\nstored\r\n':c==='reboot'?'rebooting\r\n':'ok\r\n';
     this.controller.enqueue(new TextEncoder().encode(answer+(c==='reboot'?'':'rnc> ')));
    }});},async setSignals(){},async close(){await new Promise(r=>setTimeout(r,window.delayClose));this.readable=null;this.writable=null;},getInfo(){return{};}
   };
@@ -65,4 +66,21 @@ test('Wi-Fi host changes do not clear a saved password implicitly',async({page})
  expect((await page.evaluate(()=>window.sentCommands)).some(c=>c.startsWith('set password'))).toBe(false);
  await page.locator('#open-network').check();await page.locator('#save-settings').click();await expect(page.locator('#config-status')).toContainText('Settings saved');
  expect(await page.evaluate(()=>window.sentCommands)).toContain('set password');
+});
+test('stamp panel finds a stamp, sets it and stores it, and can be cancelled',async({page})=>{
+ await serialMock(page);
+ // the search itself is tested in tests/stamp.test.js; here the workers are stand-ins so the page flow is quick
+ await page.addInitScript(()=>{window.stampWorkers=0;window.Worker=class{constructor(){window.stampWorkers++;}postMessage(){if(window.neverFinish)return;setTimeout(()=>{this.onmessage({data:{type:'progress',tried:1000000}});this.onmessage({data:{type:'found',stamp:[1,2,3,4,5,6,7,8,9,10,11,12,13,14],tried:1000000}});},20);}terminate(){}};});
+ await page.goto('/');await page.locator('.board-card').first().click();await expect(page.locator('#stamp-board')).toBeDisabled();
+ await page.getByRole('button',{name:'Connect to settings',exact:true}).click();await expect(page.locator('#settings-state')).toHaveText('Setup console ready');
+ await expect(page.locator('#stamp-material')).toContainText('ab'.repeat(90));
+ await expect(page.locator('#stamp-board')).toBeEnabled();await page.locator('#stamp-board').click();
+ await expect(page.locator('#stamp-status')).toContainText('Stamp found');
+ const commands=await page.evaluate(()=>window.sentCommands);expect(commands).toContain('set stamp 0102030405060708090a0b0c0d0e');expect(commands.at(-1)).toBe('save');
+ expect(await page.evaluate(()=>window.stampWorkers)).toBeGreaterThan(0);
+ // a pasted stamp must be 28 hexadecimal digits
+ await page.locator('summary',{hasText:'Use a stamp found elsewhere'}).click();await page.locator('#stamp-hex').fill('zz');await page.locator('#stamp-set').click();await expect(page.locator('#stamp-status')).toContainText('refused');
+ await page.locator('#stamp-hex').fill('00112233445566778899aabbccdd');await page.locator('#stamp-set').click();await expect(page.locator('#stamp-status')).toContainText('Stamp stored');
+ // cancel while searching
+ await page.evaluate(()=>{window.neverFinish=true;});await page.locator('#stamp-board').click();await expect(page.locator('#stamp-cancel')).toBeVisible();await page.locator('#stamp-cancel').click();await expect(page.locator('#stamp-status')).toContainText('cancelled');
 });

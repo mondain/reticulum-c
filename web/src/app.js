@@ -3,6 +3,7 @@ import { flashEsp, flashNrf, enterDfu } from './flash.js';
 import { buildCommands, parseSettings, modeAfterSave } from './config.js';
 import { waitForPort, deviceWarning } from './ports.js';
 import { connectConsole } from './provision.js';
+import { stampBoard, setStamp, readMaterial } from './stamp-ui.js';
 const $=id=>document.getElementById(id), catalogueUrl=new URL('./firmware/catalog.json',document.baseURI);
 let currentMode='serial',catalogue,release,selected,filter='all',busy=false,settings,applicationPort,applicationInfo,currentPasswordSet=false,flashAbort,settingsAbort;
 window.addEventListener('beforeunload',e=>{if(flashAbort){e.preventDefault();e.returnValue='';}});
@@ -18,7 +19,7 @@ function syncActions(){
  $('connect-settings').disabled=!enabled;$('enter-dfu').disabled=!enabled;
  $('version').disabled=busy||!catalogue?.releases?.length;
  document.querySelectorAll('.board-card,.filter').forEach(b=>b.disabled=busy);
- $('install-mode').disabled=busy;$('confirm-board').disabled=busy;$('config-fields').disabled=busy||!settings?.inConsole;
+ $('stamp-board').disabled=busy||!settings?.inConsole;$('stamp-set').disabled=busy||!settings?.inConsole;$('install-mode').disabled=busy;$('confirm-board').disabled=busy;$('config-fields').disabled=busy||!settings?.inConsole;
 }
 function drawBoards(){
  const grid=$('board-grid');grid.replaceChildren();
@@ -80,6 +81,7 @@ async function openSettings(port,freshBoot=false){
   throw e;
  }finally{clearInterval(timer);settingsAbort=undefined;if(!flashAbort)$('cancel-flash').hidden=true;}
  loadReportedSettings(await settings.command('get'));
+ readMaterial(settings).then(m=>{$('stamp-material').textContent=m?`Stamp material: ${m}`:'This board has no identity yet: start it once, then connect again.';},()=>{}).finally(syncActions); // the command holds the console for a moment
  configStatus('Saved settings loaded. Change the fields, save, then reboot to run.','success');
 }
 $('open-network').addEventListener('change',()=>{const p=$('config-form').elements.namedItem('password');p.disabled=$('open-network').checked;if(p.disabled)p.value='';});
@@ -142,6 +144,23 @@ $('config-form').addEventListener('submit',async event=>{
  event.preventDefault();if(!settings?.inConsole||busy)return;
  try{const f=new FormData(event.currentTarget),values=Object.fromEntries(f);values.applyWifi=f.has('applyWifi');values.openNetwork=f.has('openNetwork');values.keepExistingPassword=currentPasswordSet;values.currentMode=currentMode;const commands=buildCommands(values,selected);busy=true;syncActions();configStatus('Writing validated settings…');for(const c of commands)await settings.command(c);if(values.applyWifi&&values.transport==='wifi')currentPasswordSet=!!values.password||(!values.openNetwork&&currentPasswordSet);$('config-form').elements.namedItem('password').value='';currentMode=modeAfterSave(values,currentMode);configStatus('Settings saved. Press Reboot & run to apply them.','success');}
  catch(e){configStatus(`Settings were not confirmed saved: ${e.message||String(e)}. Read them again before retrying.`,'error');log(e.message||e);}finally{busy=false;syncActions();}
+});
+let stampAbort;
+function stampStatus(text,kind=''){const el=$('stamp-status');el.textContent=text;el.className=`status${kind?` ${kind}`:''}`;}
+$('stamp-board').addEventListener('click',async()=>{
+ if(!settings?.inConsole||busy)return;busy=true;syncActions();stampAbort=new AbortController();$('stamp-cancel').hidden=false;
+ try{
+  stampStatus('Reading the board identity…');
+  const result=await stampBoard({session:settings,signal:stampAbort.signal,makeWorker:()=>new Worker(new URL('./stamp-worker.js',import.meta.url),{type:'module'}),workers:Math.max(1,Math.min(8,navigator.hardwareConcurrency||2)),onProgress:p=>stampStatus(`Searching… ${(p.tried/1e6).toFixed(1)} million hashes in ${p.seconds.toFixed(0)} s`)});
+  stampStatus(`Stamp found after ${(result.tried/1e6).toFixed(1)} million hashes and stored on the board. Press Reboot & run to use it.`,'success');
+ }catch(e){stampStatus(e.name==='AbortError'?'Stamping cancelled.':`Stamping failed: ${e.message||String(e)}`,'error');log(e.message||e);}
+ finally{stampAbort=undefined;$('stamp-cancel').hidden=true;busy=false;syncActions();}
+});
+$('stamp-cancel').addEventListener('click',()=>stampAbort?.abort());
+$('stamp-set').addEventListener('click',async()=>{
+ if(!settings?.inConsole||busy)return;busy=true;syncActions();
+ try{await setStamp({session:settings,hexText:$('stamp-hex').value.trim()});$('stamp-hex').value='';stampStatus('Stamp stored on the board. Press Reboot & run to use it.','success');}
+ catch(e){stampStatus(`The board refused the stamp: ${e.message||String(e)}`,'error');}finally{busy=false;syncActions();}
 });
 $('reboot').addEventListener('click',async()=>{
  if(!settings?.inConsole||busy)return;busy=true;syncActions();try{await settings.reboot();settings=undefined;configStatus('Reboot requested. The board is starting with the saved settings.','success');}catch(e){configStatus(e.message,'error');}finally{busy=false;syncActions();}
