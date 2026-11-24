@@ -205,3 +205,42 @@ rnc_result rnc_netstamp_find_key(const void *material, size_t material_size, dou
     *attempts = tried;
   return r;
 }
+
+void rnc_netstamp_announce_material(const uint8_t destination[16], const uint8_t public_key[64],
+                                    const uint8_t name_hash[10], uint8_t out[90]) {
+  memcpy(out, destination, 16);
+  memcpy(out + 16, public_key, 64);
+  memcpy(out + 80, name_hash, 10);
+}
+rnc_result rnc_netstamp_ext_build(const uint8_t stamp[RNC_NETSTAMP_SIZE], double link_cost,
+                                  uint8_t out[RNC_NETSTAMP_EXT_SIZE]) {
+  uint8_t cost[2];
+  if (!stamp || !out)
+    return RNC_INVALID;
+  rnc_netstamp_cost_to_bytes(link_cost, cost);
+  out[0] = 0xc1;
+  out[1] = 0x00;
+  memcpy(out + 2, stamp, RNC_NETSTAMP_SIZE);
+  out[16] = cost[1]; /* fraction first, as Destination._announce writes it */
+  out[17] = cost[0];
+  return RNC_OK;
+}
+int rnc_netstamp_ext_parse(const uint8_t *app_data, size_t size, rnc_netstamp_ext *ext) {
+  const uint8_t *e;
+  uint8_t cost[2];
+  double link_cost;
+  if (!app_data || !ext || size < RNC_NETSTAMP_EXT_SIZE)
+    return 0;
+  e = app_data + size - RNC_NETSTAMP_EXT_SIZE;
+  if (e[0] != 0xc1 || (e[17] & 0x80))
+    return 0;
+  cost[0] = e[17];
+  cost[1] = e[16];
+  link_cost = rnc_netstamp_cost_from_bytes(cost);
+  if (link_cost > RNC_NETSTAMP_COST_CAP)
+    return 0;
+  memcpy(ext->stamp, e + 2, RNC_NETSTAMP_SIZE);
+  ext->link_cost = link_cost;
+  ext->app_size = size - RNC_NETSTAMP_EXT_SIZE;
+  return 1;
+}

@@ -40,6 +40,22 @@ rnc_result rnc_netstamp_find(const void *material, size_t material_size, double 
 rnc_result rnc_netstamp_find_key(const void *material, size_t material_size, double cost,
                                  rnc_random_fn random, void *random_context, uint64_t max_attempts,
                                  uint8_t private_key[32], uint8_t public_key[32], uint64_t *attempts);
+/* The announce extension: the last RNC_NETSTAMP_EXT_SIZE bytes of the announce app data (inside the signed
+ * data): 0xC1, a reserved flags byte, the stamp, and the destination's link request cost (fraction byte, then
+ * integer byte whose top bit is reserved). The stamp material is destination || public key || name hash. */
+#define RNC_NETSTAMP_EXT_SIZE 18u
+void rnc_netstamp_announce_material(const uint8_t destination[16], const uint8_t public_key[64],
+                                    const uint8_t name_hash[10], uint8_t out[90]);
+rnc_result rnc_netstamp_ext_build(const uint8_t stamp[RNC_NETSTAMP_SIZE], double link_cost,
+                                  uint8_t out[RNC_NETSTAMP_EXT_SIZE]);
+typedef struct rnc_netstamp_ext {
+  uint8_t stamp[RNC_NETSTAMP_SIZE];
+  double link_cost;
+  size_t app_size; /* the app data length without the extension */
+} rnc_netstamp_ext;
+/* 1 and *ext filled when the data ends in a well formed extension (marker, reserved bit clear, cost within the
+ * cap); 0 otherwise, *ext untouched. The flags byte is reserved and not checked. The stamp is not verified. */
+int rnc_netstamp_ext_parse(const uint8_t *app_data, size_t size, rnc_netstamp_ext *ext);
 #ifdef __cplusplus
 }
 #endif

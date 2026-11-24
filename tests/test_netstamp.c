@@ -110,6 +110,56 @@ static void find_exhausted(void) {
   CHECK(rnc_netstamp_find(material, 2, 100.5, rng, NULL, 0, stamp, NULL) == RNC_INVALID);
   CHECK(rnc_netstamp_find_key(material, 2, 8.0, rng, NULL, 0, NULL, pub, NULL) == RNC_INVALID);
 }
+/* The 18 byte extension at the end of announce app data (Destination._announce): marker 0xC1, a reserved flags
+ * byte, the 14 byte stamp, then the announced link request cost as its fraction byte and its integer byte. */
+static void ext_roundtrip(void) {
+  uint8_t stamp[14], ext[RNC_NETSTAMP_EXT_SIZE], app[40];
+  rnc_netstamp_ext got;
+  size_t i;
+  for (i = 0; i < 14; i++)
+    stamp[i] = (uint8_t)(0x10 + i);
+  CHECK(rnc_netstamp_ext_build(stamp, 12.5, ext) == RNC_OK);
+  CHECK(ext[0] == 0xc1 && ext[1] == 0x00 && !memcmp(ext + 2, stamp, 14) && ext[16] == 0x80 && ext[17] == 12);
+  CHECK(rnc_netstamp_ext_parse(ext, sizeof(ext), &got) == 1);
+  CHECK(!memcmp(got.stamp, stamp, 14) && got.link_cost == 12.5 && got.app_size == 0);
+  /* app data in front of it stays, and is what app_size counts */
+  memset(app, 0x55, 22);
+  memcpy(app + 22, ext, sizeof(ext));
+  CHECK(rnc_netstamp_ext_parse(app, 22 + sizeof(ext), &got) == 1 && got.app_size == 22);
+  CHECK(rnc_netstamp_ext_build(stamp, 500.0, ext) == RNC_OK && ext[16] == 0 && ext[17] == 100); /* capped */
+}
+static void ext_rejects(void) {
+  uint8_t stamp[14] = {0}, ext[RNC_NETSTAMP_EXT_SIZE], bad[RNC_NETSTAMP_EXT_SIZE];
+  rnc_netstamp_ext got;
+  memset(&got, 0x77, sizeof(got));
+  CHECK(rnc_netstamp_ext_build(stamp, 12.5, ext) == RNC_OK);
+  memcpy(bad, ext, sizeof(ext));
+  bad[0] = 0xc0; /* wrong marker */
+  CHECK(rnc_netstamp_ext_parse(bad, sizeof(bad), &got) == 0);
+  memcpy(bad, ext, sizeof(ext));
+  bad[17] |= 0x80; /* reserved extension bit set */
+  CHECK(rnc_netstamp_ext_parse(bad, sizeof(bad), &got) == 0);
+  memcpy(bad, ext, sizeof(ext));
+  bad[17] = 101; /* a cost above the cap */
+  bad[16] = 0;
+  CHECK(rnc_netstamp_ext_parse(bad, sizeof(bad), &got) == 0);
+  CHECK(rnc_netstamp_ext_parse(ext, sizeof(ext) - 1, &got) == 0); /* too short */
+  CHECK(rnc_netstamp_ext_parse(NULL, 0, &got) == 0);
+  CHECK(got.app_size == 0x7777777777777777ull); /* untouched on every refusal */
+  memcpy(bad, ext, sizeof(ext));
+  bad[1] = 0x42; /* the flags byte is reserved for the future and not checked, as in the reference */
+  CHECK(rnc_netstamp_ext_parse(bad, sizeof(bad), &got) == 1);
+}
+/* The announce stamp material is destination hash, public key and name hash, in that order. */
+static void announce_material(void) {
+  uint8_t dest[16], pub[64], name[10], out[90];
+  size_t i;
+  for (i = 0; i < 16; i++) dest[i] = (uint8_t)i;
+  for (i = 0; i < 64; i++) pub[i] = (uint8_t)(0x20 + i);
+  for (i = 0; i < 10; i++) name[i] = (uint8_t)(0xa0 + i);
+  rnc_netstamp_announce_material(dest, pub, name, out);
+  CHECK(!memcmp(out, dest, 16) && !memcmp(out + 16, pub, 64) && !memcmp(out + 80, name, 10));
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "cost_encoding"))
@@ -124,6 +174,12 @@ int main(int argc, char **argv) {
     find_key_low_cost();
   else if (!strcmp(argv[1], "find_exhausted"))
     find_exhausted();
+  else if (!strcmp(argv[1], "ext_roundtrip"))
+    ext_roundtrip();
+  else if (!strcmp(argv[1], "ext_rejects"))
+    ext_rejects();
+  else if (!strcmp(argv[1], "announce_material"))
+    announce_material();
   else
     CHECK(0);
   puts("netstamp test passed");
