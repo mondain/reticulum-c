@@ -125,6 +125,8 @@ typedef struct node_tunnel {
 typedef struct node_destination {
   int used, type, has_ratchet, proof, no_links;
   double link_cost; /* announced and required link request cost; negative means the policy's lr_cost */
+  int has_stamp;    /* a loaded destination stamp, announced with the extension */
+  uint8_t stamp[14];
   uint8_t ratchet[32];
   rnc_identity identity;
   char name[128];
@@ -177,6 +179,8 @@ struct rnc_node {
   int has_identity;
   node_tunnel tunnels[RNC_NODE_TUNNELS];
   rnc_stamp_policy stamps;
+  int stamp_required;       /* announces wait for a loaded stamp */
+  double stamp_value;       /* the value a loaded destination stamp must have */
   int transport, explicit_proofs, no_mtu_discovery;
   rnc_random_fn random;
   void *random_context;
@@ -475,6 +479,7 @@ rnc_node *rnc_node_new(const rnc_identity *identity, int transport,
     n->stamps.destination_cost = 23.5;
     n->stamps.pr_cost = 15.8;
     n->stamps.lr_cost = 12.5;
+    n->stamp_value = 25.0;
   }
   return n;
 }
@@ -708,11 +713,27 @@ rnc_result rnc_node_set_ratchet(rnc_node *n, const uint8_t address[16],
 }
 static rnc_result destination_announce(rnc_node *n, node_destination *d,
                                        uint64_t unix_seconds, rnc_packet *p) {
+  uint8_t app[sizeof(d->app)];
+  const uint8_t *data = d->app;
+  size_t size = d->size;
+  if (d->has_stamp) { /* the RNS 1.6 stamp extension, after the application's own data */
+    if (size + RNC_NETSTAMP_EXT_SIZE <= sizeof(app)) {
+      memcpy(app, d->app, size);
+      if (rnc_netstamp_ext_build(d->stamp, d->link_cost >= 0 ? d->link_cost : n->stamps.lr_cost,
+                                 app + size) == RNC_OK) {
+        data = app;
+        size += RNC_NETSTAMP_EXT_SIZE;
+      }
+    } else {
+      rnc_logf(RNC_LOG_WARNING, "node", "announce of %s goes out unstamped: %u bytes of app data leave no room",
+               d->name, (unsigned)size);
+    }
+  }
   if (d->has_ratchet)
     return rnc_announce_create_ratchet(&d->identity, d->name, d->ratchet,
-                                       d->app, d->size, unix_seconds, n->random,
+                                       data, size, unix_seconds, n->random,
                                        n->random_context, p);
-  return rnc_announce_create(&d->identity, d->name, d->app, d->size,
+  return rnc_announce_create(&d->identity, d->name, data, size,
                              unix_seconds, n->random, n->random_context, p);
 }
 rnc_result rnc_node_announce(rnc_node *n, const uint8_t destination[16],
@@ -726,6 +747,8 @@ rnc_result rnc_node_announce(rnc_node *n, const uint8_t destination[16],
   d = destination_find(n, destination);
   if (!d || d->type != RNC_SINGLE)
     return RNC_STATE;
+  if (n->stamp_required && !d->has_stamp)
+    return RNC_AGAIN;
   if (queue_free(n) < interface_count(n))
     return RNC_AGAIN;
   r = destination_announce(n, d, unix_seconds, &p);
@@ -1066,6 +1089,44 @@ rnc_result rnc_node_destination_link_cost(const rnc_node *n, const uint8_t desti
   if (!d)
     return RNC_STATE;
   *cost = d->link_cost >= 0 ? d->link_cost : n->stamps.lr_cost;
+  return RNC_OK;
+}
+rnc_result rnc_node_set_stamp_emission(rnc_node *n, int required, double destination_value) {
+  if (!n || !cost_ok(destination_value))
+    return RNC_INVALID;
+  n->stamp_required = !!required;
+  n->stamp_value = destination_value;
+  return RNC_OK;
+}
+rnc_result rnc_node_destination_stamp_material(const rnc_node *n, const uint8_t destination[16], uint8_t out[90]) {
+  const node_destination *d;
+  uint8_t name_hash[10], address[16];
+  rnc_result r;
+  if (!n || !destination || !out)
+    return RNC_INVALID;
+  d = destination_find((rnc_node *)n, destination);
+  if (!d || d->type != RNC_SINGLE)
+    return RNC_STATE;
+  r = rnc_destination_hash(d->name, &d->identity, name_hash, address);
+  if (r != RNC_OK)
+    return r;
+  rnc_netstamp_announce_material(address, d->identity.public_key, name_hash, out);
+  return RNC_OK;
+}
+rnc_result rnc_node_set_destination_stamp(rnc_node *n, const uint8_t destination[16], const uint8_t stamp[14]) {
+  node_destination *d;
+  uint8_t material[90];
+  rnc_result r;
+  if (!n || !destination || !stamp)
+    return RNC_INVALID;
+  r = rnc_node_destination_stamp_material(n, destination, material);
+  if (r != RNC_OK)
+    return r;
+  if (!rnc_netstamp_valid(material, sizeof(material), stamp, RNC_NETSTAMP_SIZE, n->stamp_value))
+    return RNC_AUTH;
+  d = destination_find(n, destination);
+  memcpy(d->stamp, stamp, RNC_NETSTAMP_SIZE);
+  d->has_stamp = 1;
   return RNC_OK;
 }
 rnc_result rnc_node_check_link_request(const rnc_node *n, const uint8_t destination[16], const rnc_packet *request) {

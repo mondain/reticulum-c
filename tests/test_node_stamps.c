@@ -321,6 +321,116 @@ static void lr_enforced(void) {
   CHECK(rnc_node_check_link_request(n, other, &p) == RNC_OK); /* not one of ours: nothing to enforce */
   rnc_node_free(n);
 }
+/* ---- emitting a stamp on our own announces ---- */
+static rnc_packet sent_announce(rnc_node *n, uint16_t context) {
+  rnc_node_event e;
+  rnc_packet none = {0};
+  clock_ms += 3000;
+  CHECK(rnc_node_tick(n, 1000 + clock_ms / 1000, clock_ms) == RNC_OK);
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    if (e.type == RNC_NODE_SEND && e.interface_id == 1 && (e.packet.flags & 3u) == RNC_ANNOUNCE &&
+        e.packet.context == context)
+      return e.packet;
+  CHECK(0);
+  return none;
+}
+static void find_for(rnc_node *n, const uint8_t dest[16], double cost, uint8_t stamp[RNC_NETSTAMP_SIZE]) {
+  uint8_t material[90];
+  CHECK(rnc_node_destination_stamp_material(n, dest, material) == RNC_OK);
+  CHECK(rnc_netstamp_find(material, sizeof(material), cost, rng, NULL, 0, stamp, NULL) == RNC_OK);
+}
+static void emit_with_stamp(void) {
+  uint8_t dest[16], stamp[RNC_NETSTAMP_SIZE], material[90];
+  rnc_node *n = owner(dest);
+  rnc_packet p;
+  rnc_announce a;
+  rnc_netstamp_ext ext;
+  CHECK(rnc_node_set_stamp_emission(n, 0, 8.0) == RNC_OK);
+  find_for(n, dest, 8.0, stamp);
+  CHECK(rnc_node_set_destination_stamp(n, dest, stamp) == RNC_OK);
+  CHECK(rnc_node_announce(n, dest, 1000, ++clock_ms) == RNC_OK);
+  p = sent_announce(n, 0);
+  CHECK(rnc_announce_verify(&p, &a) == RNC_OK); /* the signature covers the extension */
+  CHECK(rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext) == 1 && ext.app_size == 0 && ext.link_cost == 12.5);
+  rnc_netstamp_announce_material(a.destination, a.identity.public_key, a.name_hash, material);
+  CHECK(rnc_netstamp_valid(material, sizeof(material), ext.stamp, sizeof(ext.stamp), 8.0));
+  /* the destination's own link cost is what is announced */
+  CHECK(rnc_node_set_destination_link_cost(n, dest, 20.0) == RNC_OK);
+  CHECK(rnc_node_announce(n, dest, 1001, ++clock_ms) == RNC_OK);
+  p = sent_announce(n, 0);
+  CHECK(rnc_announce_verify(&p, &a) == RNC_OK && rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext) == 1 &&
+        ext.link_cost == 20.0);
+  /* so is the answer to a path request */
+  {
+    rnc_packet pr = request(dest, UNSTAMPED, 0, 48);
+    CHECK(rnc_node_input(n, 1, &pr, 1000, ++clock_ms) == RNC_OK);
+    p = sent_announce(n, 0x0b);
+    CHECK(rnc_announce_verify(&p, &a) == RNC_OK && rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext) == 1);
+  }
+  rnc_node_free(n);
+}
+static void emit_required(void) {
+  uint8_t dest[16], stamp[RNC_NETSTAMP_SIZE];
+  rnc_node *n = owner(dest);
+  rnc_packet p;
+  rnc_announce a;
+  rnc_netstamp_ext ext;
+  /* not required (the default): announces go out unstamped, as before */
+  CHECK(rnc_node_announce(n, dest, 1000, ++clock_ms) == RNC_OK);
+  p = sent_announce(n, 0);
+  CHECK(rnc_announce_verify(&p, &a) == RNC_OK && !rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext));
+  /* required and no stamp yet: the host is told to come back */
+  CHECK(rnc_node_set_stamp_emission(n, 1, 8.0) == RNC_OK);
+  CHECK(rnc_node_announce(n, dest, 1001, ++clock_ms) == RNC_AGAIN);
+  find_for(n, dest, 8.0, stamp);
+  CHECK(rnc_node_set_destination_stamp(n, dest, stamp) == RNC_OK);
+  CHECK(rnc_node_announce(n, dest, 1002, ++clock_ms) == RNC_OK);
+  p = sent_announce(n, 0);
+  CHECK(rnc_announce_verify(&p, &a) == RNC_OK && rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext) == 1);
+  rnc_node_free(n);
+}
+static void emit_rejects(void) {
+  uint8_t dest[16], other[16], stamp[RNC_NETSTAMP_SIZE], material[90];
+  rnc_node *n = owner(dest);
+  CHECK(rnc_node_set_stamp_emission(n, 0, 8.0) == RNC_OK);
+  CHECK(rnc_node_destination_stamp_material(n, dest, material) == RNC_OK);
+  do CHECK(rng(NULL, stamp, sizeof(stamp)) == RNC_OK);
+  while (rnc_netstamp_valid(material, sizeof(material), stamp, sizeof(stamp), 8.0));
+  CHECK(rnc_node_set_destination_stamp(n, dest, stamp) == RNC_AUTH);
+  memset(other, 0x42, 16);
+  CHECK(rnc_node_set_destination_stamp(n, other, stamp) == RNC_STATE);
+  CHECK(rnc_node_destination_stamp_material(n, other, material) == RNC_STATE);
+  CHECK(rnc_node_set_stamp_emission(n, 0, 101.0) == RNC_INVALID);
+  rnc_node_free(n);
+}
+/* Destination app data and the 18 byte extension share the 316 byte limit: when they do not fit, the announce
+ * goes out without the stamp (and with all of its app data). */
+static void emit_overlong(void) {
+  rnc_identity me = fresh();
+  rnc_node *n = rnc_node_new(&me, 1, rng, NULL);
+  uint8_t dest[16], stamp[RNC_NETSTAMP_SIZE], big[300], fits[298];
+  rnc_packet p;
+  rnc_announce a;
+  rnc_netstamp_ext ext;
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK);
+  memset(big, 'x', sizeof(big));
+  memset(fits, 'y', sizeof(fits));
+  CHECK(rnc_node_set_stamp_emission(n, 0, 8.0) == RNC_OK);
+  CHECK(rnc_node_add_destination(n, &me, "stamp.big", big, sizeof(big), dest) == RNC_OK);
+  find_for(n, dest, 8.0, stamp);
+  CHECK(rnc_node_set_destination_stamp(n, dest, stamp) == RNC_OK);
+  CHECK(rnc_node_announce(n, dest, 1000, ++clock_ms) == RNC_OK);
+  p = sent_announce(n, 0);
+  CHECK(rnc_announce_verify(&p, &a) == RNC_OK && a.app_size == 300 && !rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext));
+  CHECK(rnc_node_add_destination(n, &me, "stamp.fits", fits, sizeof(fits), dest) == RNC_OK); /* 298 + 18 = 316 */
+  find_for(n, dest, 8.0, stamp);
+  CHECK(rnc_node_set_destination_stamp(n, dest, stamp) == RNC_OK);
+  CHECK(rnc_node_announce(n, dest, 1001, ++clock_ms) == RNC_OK);
+  p = sent_announce(n, 0);
+  CHECK(rnc_announce_verify(&p, &a) == RNC_OK && rnc_netstamp_ext_parse(a.app_data, a.app_size, &ext) == 1 &&
+        ext.app_size == 298);
+  rnc_node_free(n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "unenforced"))
@@ -343,6 +453,14 @@ int main(int argc, char **argv) {
     lr_unenforced();
   else if (!strcmp(argv[1], "lr_enforced"))
     lr_enforced();
+  else if (!strcmp(argv[1], "emit_with_stamp"))
+    emit_with_stamp();
+  else if (!strcmp(argv[1], "emit_required"))
+    emit_required();
+  else if (!strcmp(argv[1], "emit_rejects"))
+    emit_rejects();
+  else if (!strcmp(argv[1], "emit_overlong"))
+    emit_overlong();
   else
     CHECK(0);
   puts("node stamps test passed");
