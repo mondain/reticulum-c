@@ -70,7 +70,7 @@ typedef struct node_interface {
   int has_tunnel;
   uint8_t tunnel_id[32];
   double dst_cost, pr_cost; /* required stamp costs; negative means the node's policy */
-  uint64_t filtered_announces;
+  uint64_t filtered_announces, filtered_requests;
 } node_interface;
 typedef struct node_known {
   int used;
@@ -265,7 +265,28 @@ rnc_result rnc_path_request_decode(const rnc_packet *packet,
   if (q.tag_size > 16)
     q.tag_size = 16;
   memcpy(q.tag, packet->data + offset, q.tag_size);
+  if (packet->data_size == 64 && packet->data[48] == 0xc1) { /* marker; the flags byte is reserved */
+    q.has_stamp = 1;
+    memcpy(q.stamp, packet->data + 50, sizeof(q.stamp));
+  }
   *request = q;
+  return RNC_OK;
+}
+rnc_result rnc_path_request_create_stamped(const uint8_t destination[16], const uint8_t transport_id[16],
+                                           const uint8_t *tag, size_t tag_size, const uint8_t stamp[14],
+                                           rnc_packet *packet) {
+  rnc_packet p;
+  rnc_result r;
+  if (!destination || !transport_id || !tag || tag_size != 16 || !stamp || !packet)
+    return RNC_INVALID;
+  r = rnc_path_request_create(destination, transport_id, tag, tag_size, &p);
+  if (r != RNC_OK)
+    return r;
+  p.data[48] = 0xc1;
+  p.data[49] = 0x00;
+  memcpy(p.data + 50, stamp, 14);
+  p.data_size = 64;
+  *packet = p;
   return RNC_OK;
 }
 static node_interface *interface(rnc_node *n, uint32_t id) {
@@ -484,7 +505,7 @@ rnc_result rnc_node_add_interface(rnc_node *n, uint32_t id, uint32_t bitrate) {
       memset(&n->interfaces[i].op, 0, sizeof(node_freq));
       n->interfaces[i].ic_active = n->interfaces[i].pr_active = 0;
       n->interfaces[i].dst_cost = n->interfaces[i].pr_cost = -1.0;
-      n->interfaces[i].filtered_announces = 0;
+      n->interfaces[i].filtered_announces = n->interfaces[i].filtered_requests = 0;
       return RNC_OK;
     }
   return RNC_NO_SPACE;
@@ -1022,6 +1043,16 @@ rnc_result rnc_node_recall_link_cost(const rnc_node *n, const uint8_t destinatio
       return RNC_OK;
     }
   return RNC_STATE;
+}
+rnc_result rnc_node_interface_filtered_requests(const rnc_node *n, uint32_t interface_id, uint64_t *requests) {
+  const node_interface *in;
+  if (!n || !requests)
+    return RNC_INVALID;
+  in = interface((rnc_node *)n, interface_id);
+  if (!in)
+    return RNC_STATE;
+  *requests = in->filtered_requests;
+  return RNC_OK;
 }
 rnc_result rnc_node_interface_filtered(const rnc_node *n, uint32_t interface_id, uint64_t *announces) {
   const node_interface *in;
@@ -1748,6 +1779,9 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
   r = rnc_path_request_decode(packet, &request);
   if (r != RNC_OK)
     return r;
+  /* Transport.path_request accepts exactly the legacy 32, the unstamped 48 and the stamped 64 byte forms */
+  if (packet->data_size != 32 && packet->data_size != 48 && packet->data_size != 64)
+    return RNC_PROTOCOL;
   for (i = 0; i < RNC_NODE_REQUESTS; i++) {
     if (n->requests[i].used && n->requests[i].expiry > now &&
         same(n->requests[i].destination, request.destination) &&
@@ -1756,6 +1790,18 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
       return RNC_OK;
     if (!n->requests[i].used || n->requests[i].expiry <= now)
       slot = i;
+  }
+  if (n->stamps.enabled && n->stamps.enforce_announces) {
+    node_interface *in = interface(n, ingress);
+    uint8_t material[32];
+    double cost = in->pr_cost >= 0 ? in->pr_cost : n->stamps.pr_cost;
+    memcpy(material, request.destination, 16);
+    memcpy(material + 16, request.tag, 16);
+    if (!request.has_stamp || request.tag_size != 16 ||
+        !rnc_netstamp_valid(material, sizeof(material), request.stamp, sizeof(request.stamp), cost)) {
+      in->filtered_requests++;
+      return RNC_OK;
+    }
   }
   freq_add(&interface(n, ingress)->ip, now);
   pr_limited = ingress_limit_pr(interface(n, ingress), now);

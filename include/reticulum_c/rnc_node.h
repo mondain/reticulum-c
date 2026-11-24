@@ -26,6 +26,9 @@ typedef struct rnc_path_request {
   uint8_t destination[16], transport_id[16], tag[16];
   size_t tag_size;
   int has_transport;
+  /* the 64 byte form RNS 1.6 sends: dst | transport id | tag | 0xC1 | flags | 14 byte stamp */
+  int has_stamp;
+  uint8_t stamp[14];
 } rnc_path_request;
 typedef struct rnc_route {
   uint8_t destination[16], next_hop[16];
@@ -77,6 +80,11 @@ rnc_result rnc_path_request_create(const uint8_t destination[16],
                                    const uint8_t transport_id[16],
                                    const uint8_t *tag, size_t tag_size,
                                    rnc_packet *packet);
+/* A stamped path request: the 64 byte form; the stamp covers destination || tag (see rnc_netstamp.h), the
+ * transport id is required and the tag must be 16 bytes. */
+rnc_result rnc_path_request_create_stamped(const uint8_t destination[16], const uint8_t transport_id[16],
+                                           const uint8_t *tag, size_t tag_size, const uint8_t stamp[14],
+                                           rnc_packet *packet);
 rnc_result rnc_path_request_decode(const rnc_packet *packet,
                                    rnc_path_request *request);
 rnc_node *rnc_node_new(const rnc_identity *identity, int transport,
@@ -364,8 +372,9 @@ rnc_result rnc_node_set_interface_stamp_costs(rnc_node *node, uint32_t interface
                                               double pr_cost);
 /* The link request cost the destination announced with a valid stamp; RNC_STATE when it is unknown or never did. */
 rnc_result rnc_node_recall_link_cost(const rnc_node *node, const uint8_t destination[16], double *link_cost);
-/* Announces dropped on an interface for a missing or insufficient stamp. */
+/* Announces, and path requests, dropped on an interface for a missing or insufficient stamp. */
 rnc_result rnc_node_interface_filtered(const rnc_node *node, uint32_t interface_id, uint64_t *announces);
+rnc_result rnc_node_interface_filtered_requests(const rnc_node *node, uint32_t interface_id, uint64_t *requests);
 /* Known-destination store (Identity.recall). Every valid, fresh announce for
  * a non-local destination is remembered independently of path lifetime, in a
  * table bounded to RNC_NODE_KNOWN entries (least recently heard is evicted).

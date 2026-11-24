@@ -161,6 +161,99 @@ static void relayed_unchanged(void) {
   CHECK(seen);
   rnc_node_free(n);
 }
+/* ---- path requests ---- */
+static uint64_t clock_ms = 100; /* the node's clock only moves forward */
+static unsigned answers(rnc_node *n, const uint8_t dest[16]) {
+  rnc_node_event e;
+  unsigned sends = 0;
+  clock_ms += 3000;
+  CHECK(rnc_node_tick(n, 1000 + clock_ms / 1000, clock_ms) == RNC_OK);
+  while (rnc_node_poll(n, &e) == RNC_OK)
+    sends += e.type == RNC_NODE_SEND && e.packet.context == 0x0b && !memcmp(e.packet.destination, dest, 16);
+  return sends;
+}
+/* A path request for `dest` of the given kind: legacy 32 bytes, 48 with a transport id, 64 stamped. */
+static rnc_packet request(const uint8_t dest[16], kind k, double cost, size_t wire_size) {
+  rnc_packet p;
+  uint8_t tid[16], tag[16], material[32], stamp[RNC_NETSTAMP_SIZE];
+  CHECK(rng(NULL, tid, 16) == RNC_OK && rng(NULL, tag, 16) == RNC_OK);
+  if (k == UNSTAMPED) {
+    CHECK(rnc_path_request_create(dest, wire_size == 32 ? NULL : tid, tag, 16, &p) == RNC_OK);
+    return p;
+  }
+  memcpy(material, dest, 16);
+  memcpy(material + 16, tag, 16);
+  if (k == VALID) {
+    CHECK(rnc_netstamp_find(material, 32, cost, rng, NULL, 0, stamp, NULL) == RNC_OK);
+  } else {
+    do CHECK(rng(NULL, stamp, sizeof(stamp)) == RNC_OK);
+    while (rnc_netstamp_valid(material, 32, stamp, sizeof(stamp), cost));
+  }
+  CHECK(rnc_path_request_create_stamped(dest, tid, tag, 16, stamp, &p) == RNC_OK && p.data_size == 64);
+  return p;
+}
+static rnc_node *owner(uint8_t dest[16]) {
+  rnc_identity me = fresh();
+  rnc_node *n = rnc_node_new(&me, 1, rng, NULL);
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK && rnc_node_add_interface(n, 2, 1000000) == RNC_OK);
+  CHECK(rnc_node_add_destination(n, &me, "stamp.owner", NULL, 0, dest) == RNC_OK);
+  return n;
+}
+/* The reference accepts path requests of exactly 32, 48 and 64 bytes; shorter than 16 is ignored and anything
+ * else is a protocol violation. Nothing reads past the data. */
+static void pr_lengths(void) {
+  uint8_t dest[16];
+  rnc_node *n = owner(dest);
+  size_t sizes[] = {17, 31, 33, 47, 49, 63, 65, 90}, i;
+  rnc_packet p;
+  p = request(dest, UNSTAMPED, 0, 32);
+  CHECK(p.data_size == 32 && rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK);
+  p = request(dest, UNSTAMPED, 0, 48);
+  CHECK(p.data_size == 48 && rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK);
+  p = request(dest, VALID, 4.0, 64);
+  CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK);
+  CHECK(answers(n, dest) >= 1);
+  for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+    p = request(dest, UNSTAMPED, 0, 48);
+    memset(p.data + 48, 0xa5, sizeof(p.data) - 48 > 64 ? 64 : sizeof(p.data) - 48);
+    p.data_size = sizes[i];
+    CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_PROTOCOL);
+  }
+  rnc_node_free(n);
+}
+static void pr_stamp(void) {
+  uint8_t dest[16];
+  rnc_node *n = owner(dest);
+  rnc_stamp_policy policy;
+  rnc_packet p;
+  uint64_t filtered = 99;
+  CHECK(rnc_node_stamp_policy(n, &policy) == RNC_OK);
+  policy.enforce_announces = 1;
+  policy.pr_cost = 8.0;
+  CHECK(rnc_node_set_stamp_policy(n, &policy) == RNC_OK);
+  p = request(dest, UNSTAMPED, 0, 48);
+  CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK && answers(n, dest) == 0);
+  p = request(dest, WEAK, 8.0, 64);
+  CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK && answers(n, dest) == 0);
+  CHECK(rnc_node_interface_filtered_requests(n, 1, &filtered) == RNC_OK && filtered == 2);
+  p = request(dest, VALID, 8.0, 64);
+  CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK && answers(n, dest) >= 1);
+  /* an interface's own cost wins over the policy's */
+  CHECK(rnc_node_set_interface_stamp_costs(n, 2, -1, 20.0) == RNC_OK);
+  p = request(dest, VALID, 8.0, 64);
+  CHECK(rnc_node_input(n, 2, &p, 1000, ++clock_ms) == RNC_OK && answers(n, dest) == 0);
+  rnc_node_free(n);
+}
+static void pr_unenforced(void) {
+  uint8_t dest[16];
+  rnc_node *n = owner(dest);
+  rnc_packet p;
+  p = request(dest, UNSTAMPED, 0, 48);
+  CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK && answers(n, dest) >= 1);
+  p = request(dest, WEAK, 8.0, 64);
+  CHECK(rnc_node_input(n, 1, &p, 1000, ++clock_ms) == RNC_OK && answers(n, dest) >= 1);
+  rnc_node_free(n);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "unenforced"))
@@ -173,6 +266,12 @@ int main(int argc, char **argv) {
     per_interface();
   else if (!strcmp(argv[1], "relayed_unchanged"))
     relayed_unchanged();
+  else if (!strcmp(argv[1], "pr_lengths"))
+    pr_lengths();
+  else if (!strcmp(argv[1], "pr_stamp"))
+    pr_stamp();
+  else if (!strcmp(argv[1], "pr_unenforced"))
+    pr_unenforced();
   else
     CHECK(0);
   puts("node stamps test passed");
