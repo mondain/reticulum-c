@@ -15,6 +15,8 @@
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <poll.h>
+#include <pthread.h>
+#include <reticulum_c/rnc_netstamp.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_i2p.h>
 #include <reticulum_c/rnc_log.h>
@@ -452,6 +454,8 @@ typedef struct host_interface {
 } host_interface;
 struct rnc_host {
   rnc_node *node;
+  unsigned stamp_workers;   /* link request stamp search threads; 0 = one per core */
+  uint64_t stamp_trials;    /* key trials before giving up; 0 = 2^26 */
   host_interface interfaces[RNC_HOST_SLOTS];
   uint32_t next_id;
   uint64_t now;
@@ -1287,6 +1291,90 @@ static int setup_auto(host_interface *f) {
   f->status.bound_port = f->data_port;
   return 0;
 }
+static void rnc_cleanse_host(void *p, size_t n) { OPENSSL_cleanse(p, n); }
+/* ---- link request stamps on several threads ---------------------------------------------------------------- */
+typedef struct stamp_job {
+  const uint8_t *material;
+  double cost;
+  pthread_mutex_t lock;
+  int found;
+  uint64_t left;
+  uint8_t private_key[32], public_key[32];
+} stamp_job;
+static rnc_result stamp_random(void *context, uint8_t *out, size_t size) {
+  (void)context;
+  return size <= INT_MAX && RAND_priv_bytes(out, (int)size) == 1 ? RNC_OK : RNC_CRYPTO;
+}
+static void *stamp_worker(void *argument) {
+  stamp_job *job = argument;
+  uint8_t private_key[32], public_key[32];
+  for (;;) {
+    uint64_t slice;
+    rnc_result r;
+    pthread_mutex_lock(&job->lock);
+    if (job->found || !job->left) {
+      pthread_mutex_unlock(&job->lock);
+      return NULL;
+    }
+    slice = job->left < 2048u ? job->left : 2048u;
+    job->left -= slice;
+    pthread_mutex_unlock(&job->lock);
+    r = rnc_netstamp_find_key(job->material, 48, job->cost, stamp_random, NULL, slice, private_key, public_key, NULL);
+    if (r == RNC_OK) {
+      pthread_mutex_lock(&job->lock);
+      if (!job->found) {
+        memcpy(job->private_key, private_key, 32);
+        memcpy(job->public_key, public_key, 32);
+        job->found = 1;
+      }
+      pthread_mutex_unlock(&job->lock);
+      return NULL;
+    }
+    if (r != RNC_TIMEOUT)
+      return NULL;
+  }
+}
+int rnc_host_link_stamper(void *context, const uint8_t material[48], double cost, uint8_t private_key[32],
+                          uint8_t public_key[32]) {
+  rnc_host *h = context;
+  stamp_job job;
+  pthread_t threads[16];
+  unsigned workers, started = 0, i;
+  long cores;
+  if (!h || !material)
+    return 0;
+  workers = h->stamp_workers;
+  if (!workers) {
+    cores = sysconf(_SC_NPROCESSORS_ONLN);
+    workers = cores > 0 ? (cores > 16 ? 16u : (unsigned)cores) : 1u;
+  }
+  memset(&job, 0, sizeof(job));
+  job.material = material;
+  job.cost = cost;
+  job.left = h->stamp_trials ? h->stamp_trials : UINT64_C(1) << 26;
+  pthread_mutex_init(&job.lock, NULL);
+  for (i = 0; i < workers; i++)
+    if (pthread_create(&threads[started], NULL, stamp_worker, &job) == 0)
+      started++;
+  if (!started) /* no threads to be had: search on this one */
+    stamp_worker(&job);
+  for (i = 0; i < started; i++)
+    pthread_join(threads[i], NULL);
+  pthread_mutex_destroy(&job.lock);
+  if (job.found) {
+    memcpy(private_key, job.private_key, 32);
+    memcpy(public_key, job.public_key, 32);
+  }
+  rnc_cleanse_host(job.private_key, sizeof(job.private_key));
+  return job.found;
+}
+rnc_result rnc_host_set_link_stamping(rnc_host *h, unsigned workers, uint64_t max_trials, int always) {
+  if (!h || workers > 16u)
+    return RNC_INVALID;
+  h->stamp_workers = workers;
+  h->stamp_trials = max_trials;
+  return rnc_node_set_link_stamper(h->node, rnc_host_link_stamper, h, always);
+}
 rnc_host *rnc_host_new(rnc_node *node) {
   rnc_host *h;
   if (!node)
@@ -1295,6 +1383,7 @@ rnc_host *rnc_host_new(rnc_node *node) {
   if (h) {
     h->node = node;
     h->next_id = 0x80000000u;
+    (void)rnc_host_set_link_stamping(h, 0, 0, 0); /* RNS 1.6 stamps link requests by default */
   }
   return h;
 }

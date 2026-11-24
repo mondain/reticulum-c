@@ -266,6 +266,78 @@ static void persistence(void) {
   rnc_node_free(p.a);
   rnc_node_free(p.b);
 }
+/* RNS 1.6 appends a signed msgpack map after the signature: implementation name, version, transport
+ * status and the interface's destination and path request costs (Transport.synthesize_tunnel). */
+static size_t put_f64(uint8_t *o, double v) {
+  uint8_t b[8];
+  uint64_t u;
+  size_t i;
+  memcpy(&u, &v, 8);
+  for (i = 0; i < 8; i++)
+    b[i] = (uint8_t)(u >> (56 - 8 * i));
+  o[0] = 0xcb;
+  memcpy(o + 1, b, 8);
+  return 9;
+}
+static size_t reference_ext(uint8_t *o, int drop_key, int int_cost) {
+  size_t n = 0;
+  o[n++] = (uint8_t)(0x80 | (drop_key ? 4 : 5));
+  o[n++] = 0xcc; o[n++] = 0xfd; o[n++] = 0xa3; memcpy(o + n, "RNS", 3); n += 3;
+  o[n++] = 0xcc; o[n++] = 0xfc; o[n++] = 0xa5; memcpy(o + n, "1.6.1", 5); n += 5;
+  if (drop_key != 1) {
+    o[n++] = 0x01; o[n++] = 0xc3; /* transport: true */
+  }
+  o[n++] = 0xcc; o[n++] = 0xfb;
+  if (int_cost) o[n++] = 0x17; /* an integer where the reference sends a float */
+  else n += put_f64(o + n, 23.5);
+  o[n++] = 0xcc; o[n++] = 0xfa;
+  n += put_f64(o + n, 15.8);
+  return n;
+}
+static rnc_packet with_ext(pair *p, const uint8_t *ext, size_t ext_size) {
+  rnc_packet s = synthesis(p, p->hash);
+  uint8_t signed_data[112 + 128];
+  memcpy(signed_data, s.data, 112);
+  memcpy(signed_data + 112, ext, ext_size);
+  CHECK(rnc_identity_sign(&p->a_id, signed_data, 112 + ext_size, s.data + 112) == RNC_OK);
+  memcpy(s.data + 176, ext, ext_size);
+  s.data_size = 176 + ext_size;
+  return s;
+}
+static void accepts_extension(void) {
+  pair p;
+  uint8_t ext[128];
+  size_t n = reference_ext(ext, 0, 0);
+  rnc_packet s;
+  setup(&p);
+  s = with_ext(&p, ext, n);
+  CHECK(rnc_node_input(p.b, 1, &s, 1700000000, p.now) == RNC_OK);
+  CHECK(rnc_node_tunnel_count(p.b) == 1);
+  rnc_node_free(p.a);
+  rnc_node_free(p.b);
+}
+static void rejects_bad_extension(void) {
+  pair p;
+  uint8_t ext[128];
+  size_t n;
+  rnc_packet s;
+  setup(&p);
+  n = reference_ext(ext, 1, 0); /* no transport status */
+  s = with_ext(&p, ext, n);
+  CHECK(rnc_node_input(p.b, 1, &s, 1700000000, p.now) == RNC_PROTOCOL);
+  n = reference_ext(ext, 0, 1); /* destination cost not a float */
+  s = with_ext(&p, ext, n);
+  CHECK(rnc_node_input(p.b, 1, &s, 1700000000, p.now) == RNC_PROTOCOL);
+  n = reference_ext(ext, 0, 0);
+  s = with_ext(&p, ext, n - 3); /* truncated map */
+  CHECK(rnc_node_input(p.b, 1, &s, 1700000000, p.now) == RNC_PROTOCOL);
+  ext[n] = 0x00; /* extra bytes after the map */
+  s = with_ext(&p, ext, n + 1);
+  CHECK(rnc_node_input(p.b, 1, &s, 1700000000, p.now) == RNC_PROTOCOL);
+  CHECK(rnc_node_tunnel_count(p.b) == 0);
+  rnc_node_free(p.a);
+  rnc_node_free(p.b);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "establish"))
@@ -280,6 +352,10 @@ int main(int argc, char **argv) {
     expires();
   else if (!strcmp(argv[1], "persist"))
     persistence();
+  else if (!strcmp(argv[1], "extension"))
+    accepts_extension();
+  else if (!strcmp(argv[1], "extension_reject"))
+    rejects_bad_extension();
   else
     CHECK(0);
   puts("tunnel test passed");

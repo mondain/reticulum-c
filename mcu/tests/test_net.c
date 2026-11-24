@@ -3,6 +3,7 @@
  * whole-frame backpressure, provisioning settings and the line console. No sockets.
  * Built in the mcu profile build. */
 #include "rnc_mcu_net.h"
+#include <reticulum_c/rnc_netstamp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -203,6 +204,76 @@ int main(void) {
   CHECK(strstr(reply, "lora.freq") && strstr(reply, "stays off"));
   type(&con, &cfg, "clear", reply, sizeof(reply)); /* back to a radio that is off and unset */
   CHECK(cfg.lora.mode == RNC_LORA_MODE_OFF && cfg.lora.set == 0 && !rnc_lora_cfg_ready(&cfg.lora));
+  /* ---- the destination stamp: material shown by the console, a stamp checked against it before it is taken ---- */
+  {
+    uint8_t material[90], found[14], rnd = 3;
+    char hexmat[181], cmd[64], good[29];
+    size_t k;
+    rnc_mcu_cfg_init(&cfg);
+    cfg.stamp_value = 6.0; /* a test does not search for 2^25 hashes */
+    for (k = 0; k < sizeof(material); k++)
+      material[k] = (uint8_t)(k * 7 + 1);
+    for (k = 0; k < sizeof(material); k++)
+      (void)snprintf(hexmat + 2 * k, 3, "%02x", material[k]);
+    /* before the identity exists there is no material, and no stamp can be set */
+    type(&con, &cfg, "get stamp.material", reply, sizeof(reply));
+    CHECK(strstr(reply, "(not yet") != NULL);
+    type(&con, &cfg, "get stamp.status", reply, sizeof(reply));
+    CHECK(!strcmp(reply, "stamp.status=none"));
+    type(&con, &cfg, "set stamp 00112233445566778899aabbccdd", reply, sizeof(reply));
+    CHECK(strstr(reply, "error") && !cfg.stamp_new_set);
+    /* the platform fills the material and status in (rnc_mcu_stamp_prepare) */
+    memcpy(cfg.stamp_material, hexmat, sizeof(hexmat));
+    memcpy(cfg.stamp_status, "none", 5);
+    type(&con, &cfg, "get stamp.material", reply, sizeof(reply));
+    CHECK(!strcmp(reply + strlen("stamp.material="), hexmat) && !strncmp(reply, "stamp.material=", 15));
+    {
+      rnc_result r;
+      uint64_t i = 0;
+      do {
+        uint8_t seedbytes[14] = {0};
+        seedbytes[0] = rnd;
+        seedbytes[13] = (uint8_t)i;
+        seedbytes[12] = (uint8_t)(i >> 8);
+        memcpy(found, seedbytes, sizeof(found));
+        r = rnc_netstamp_valid(material, sizeof(material), found, sizeof(found), cfg.stamp_value) ? RNC_OK : RNC_AGAIN;
+        i++;
+      } while (r != RNC_OK && i < 100000);
+      CHECK(r == RNC_OK);
+    }
+    for (k = 0; k < 14; k++)
+      (void)snprintf(good + 2 * k, 3, "%02x", found[k]);
+    (void)snprintf(cmd, sizeof(cmd), "set stamp %s", good);
+    type(&con, &cfg, cmd, reply, sizeof(reply));
+    CHECK(!strstr(reply, "error") && cfg.stamp_new_set && !memcmp(cfg.stamp_new, found, 14));
+    /* a stamp that falls short, one of the wrong length and a non hex one are refused and change nothing */
+    cfg.stamp_new_set = 0;
+    found[0] ^= 0xff;
+    found[1] ^= 0xff;
+    for (k = 0; k < 14; k++)
+      (void)snprintf(good + 2 * k, 3, "%02x", found[k]);
+    (void)snprintf(cmd, sizeof(cmd), "set stamp %s", good);
+    {
+      int refused;
+      type(&con, &cfg, cmd, reply, sizeof(reply));
+      refused = strstr(reply, "error") != NULL;
+      /* the flipped bytes may, with probability 1/64, meet a cost of 6 again: only refusals are checked */
+      CHECK(refused ? !cfg.stamp_new_set : 1);
+    }
+    cfg.stamp_new_set = 0;
+    type(&con, &cfg, "set stamp 0011", reply, sizeof(reply));
+    CHECK(strstr(reply, "error") && !cfg.stamp_new_set);
+    type(&con, &cfg, "set stamp zz112233445566778899aabbccdd", reply, sizeof(reply));
+    CHECK(strstr(reply, "error") && !cfg.stamp_new_set);
+    /* an empty value clears the stored stamp */
+    type(&con, &cfg, "set stamp", reply, sizeof(reply));
+    CHECK(strstr(reply, "error") != NULL); /* needs a value; the explicit way is "set stamp clear" */
+    type(&con, &cfg, "set stamp clear", reply, sizeof(reply));
+    CHECK(!strstr(reply, "error") && cfg.stamp_new_set && !memcmp(cfg.stamp_new, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 14));
+    /* "clear" restores the defaults but not what the platform reported about the identity */
+    type(&con, &cfg, "clear", reply, sizeof(reply));
+    CHECK(!strcmp(cfg.stamp_material, hexmat) && !cfg.stamp_new_set);
+  }
   puts("mcu net tests passed");
   return 0;
 }

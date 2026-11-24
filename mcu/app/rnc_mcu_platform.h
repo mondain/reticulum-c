@@ -21,6 +21,7 @@ extern "C" {
 /* Keys the application passes to persist/load. */
 #define RNC_MCU_KEY_IDENTITY "identity" /* 64 bytes: the raw private key */
 #define RNC_MCU_KEY_TIME "time"         /* 8 bytes: the unix-time high-water mark */
+#define RNC_MCU_KEY_STAMP "stamp"       /* 14 bytes: the destination stamp (all zero: none), checked at every boot */
 
 typedef struct rnc_mcu_platform {
   void *context; /* passed back as the first argument of every hook */

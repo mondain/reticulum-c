@@ -1,0 +1,71 @@
+#ifndef RETICULUM_C_NETSTAMP_H
+#define RETICULUM_C_NETSTAMP_H
+#include <reticulum_c/rnc.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Network stamps, as RNS 1.6 uses them on announces, path requests and link requests (RNS.Stamps).
+ * A cost is fractional: 8 bits of fixed point, capped at 100. A stamp meets a cost when
+ * SHA-256(material || stamp), read as a 256 bit big-endian integer, does not exceed the target for that
+ * cost. The workblock is the material itself (no expansion), as for announces and path requests.
+ * These functions are unrelated to the discovery stamps of rnc_stamp.h, which keep their own rules. */
+#define RNC_NETSTAMP_SIZE 14u
+#define RNC_NETSTAMP_COST_CAP 100
+#define RNC_NETSTAMP_LINK_COST_CAP 40
+/* cost_to_fp: floor(cost * 256 + 0.5) clamped to 0..100*256; NaN gives 0. */
+uint16_t rnc_netstamp_cost_to_fp(double cost);
+double rnc_netstamp_cost_from_fp(uint16_t fp);
+/* The two byte wire form: integer part, then 1/256ths. */
+void rnc_netstamp_cost_to_bytes(double cost, uint8_t out[2]);
+double rnc_netstamp_cost_from_bytes(const uint8_t in[2]);
+double rnc_netstamp_quantize(double cost);
+/* Entry f of the authoritative mantissa table (0 for f > 255 except 256, which is 0 as well). */
+uint64_t rnc_netstamp_table(size_t index);
+/* 1 when the stamp meets the cost. stamp_size is RNC_NETSTAMP_SIZE for detached stamps, 32 for a stamped
+ * X25519 public key. 0 on any error. */
+int rnc_netstamp_valid(const void *material, size_t material_size, const void *stamp,
+                       size_t stamp_size, double cost);
+/* The stamp's value on the cost grid (RNS.Stamps.stamp_value); 0 on error. */
+double rnc_netstamp_value(const void *material, size_t material_size, const void *stamp,
+                          size_t stamp_size);
+/* Searches for a detached stamp that meets `cost` over `material`: a random 14 byte start, counted up.
+ * max_attempts bounds the work (0 means 2^32); RNC_TIMEOUT when it runs out, with `stamp` untouched, so a
+ * caller can search in slices. *attempts (optional) receives the number of trials made. */
+rnc_result rnc_netstamp_find(const void *material, size_t material_size, double cost, rnc_random_fn random,
+                             void *random_context, uint64_t max_attempts, uint8_t stamp[RNC_NETSTAMP_SIZE],
+                             uint64_t *attempts);
+/* The same for a stamped X25519 key (RNS.Stamps.generate_stamped_key): fresh private keys are drawn until
+ * the public key meets `cost` over `material`. Only for X25519 encryption keys, never for signature keys.
+ * Outputs are written only on success. */
+rnc_result rnc_netstamp_find_key(const void *material, size_t material_size, double cost,
+                                 rnc_random_fn random, void *random_context, uint64_t max_attempts,
+                                 uint8_t private_key[32], uint8_t public_key[32], uint64_t *attempts);
+/* The announce extension: the last RNC_NETSTAMP_EXT_SIZE bytes of the announce app data (inside the signed
+ * data): 0xC1, a reserved flags byte, the stamp, and the destination's link request cost (fraction byte, then
+ * integer byte whose top bit is reserved). The stamp material is destination || public key || name hash. */
+#define RNC_NETSTAMP_EXT_SIZE 18u
+void rnc_netstamp_announce_material(const uint8_t destination[16], const uint8_t public_key[64],
+                                    const uint8_t name_hash[10], uint8_t out[90]);
+rnc_result rnc_netstamp_ext_build(const uint8_t stamp[RNC_NETSTAMP_SIZE], double link_cost,
+                                  uint8_t out[RNC_NETSTAMP_EXT_SIZE]);
+typedef struct rnc_netstamp_ext {
+  uint8_t stamp[RNC_NETSTAMP_SIZE];
+  double link_cost;
+  size_t app_size; /* the app data length without the extension */
+} rnc_netstamp_ext;
+/* 1 and *ext filled when the data ends in a well formed extension (marker, reserved bit clear, cost within the
+ * cap); 0 otherwise, *ext untouched. The flags byte is reserved and not checked. The stamp is not verified. */
+int rnc_netstamp_ext_parse(const uint8_t *app_data, size_t size, rnc_netstamp_ext *ext);
+/* A ready made link stamper (see rnc_link_set_stamper): searches a stamped key with rnc_netstamp_find_key, up to
+ * max_attempts trials (0 means 2^32) in one blocking call, and returns 0 when that runs out. */
+typedef struct rnc_netstamp_link_stamper {
+  rnc_random_fn random;
+  void *random_context;
+  uint64_t max_attempts;
+} rnc_netstamp_link_stamper;
+int rnc_netstamp_link_stamper_run(void *context, const uint8_t material[48], double cost, uint8_t private_key[32],
+                                  uint8_t public_key[32]);
+#ifdef __cplusplus
+}
+#endif
+#endif

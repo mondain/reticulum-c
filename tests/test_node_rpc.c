@@ -366,6 +366,11 @@ int main(void) {
     CHECK(has(out, size, "hash", 4) && has(out, size, "last", 4) &&
           has(out, size, "rate_violations", 15) && has(out, size, "blocked_until", 13) &&
           has(out, size, "timestamps", 10));
+    /* RNS 1.6.1's rnpath reads path state, last use, destination value and link cost from every entry */
+    query("path_table", n2, h2, &id, &cfg, out, &size);
+    CHECK(out[0] == 0x91 && out[1] == 0x8a); /* one entry, a map of ten */
+    CHECK(has(out, size, "state", 5) && has(out, size, "used", 4) && has(out, size, "value", 5) &&
+          has(out, size, "lr_cost", 7));
     rnc_host_free(h2);
     rnc_node_free(n2);
   }
@@ -383,9 +388,11 @@ int main(void) {
   status.mtu = 500;
   status.bitrate = 1200;
   rnc_rpc_writer_init(&w, out, sizeof(out));
-  interface_stats(&w, host, &status);
+  interface_stats(&w, host, node, &status);
   CHECK(rnc_rpc_writer_finish(&w, &size) == RNC_OK && size > 50);
   CHECK(has(out, size, "gravity", 7) && has(out, size, "announces_to_internal", 21));
+  /* RNS 1.6's rnstatus reads the count of filtered announces of every interface */
+  CHECK(has(out, size, "afrxc", 5));
   rnc_host_free(host);
   rnc_node_free(node);
   checkpoint_retry_test();

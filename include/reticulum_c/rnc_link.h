@@ -59,6 +59,14 @@ rnc_result rnc_link_configure_mtu(rnc_link *link, size_t mtu);
 size_t rnc_link_mtu(const rnc_link *link);
 size_t rnc_link_mdu(const rnc_link *link);
 size_t rnc_link_channel_mdu(const rnc_link *link);
+/* RNS 1.6 link request stamps. When the destination announced a link request cost, the initiator's ephemeral
+ * X25519 key must be a stamped key over destination || its own signature public key. The stamper is called from
+ * rnc_link_open with that material and the cost; it fills a private/public X25519 pair that meets the cost and
+ * returns 1, or returns 0. On 0, rnc_link_open returns RNC_TIMEOUT, the link stays idle and its teardown reason is
+ * RNC_TEARDOWN_STAMP_FAILURE. A cost of 0 or no stamper means an ordinary key. */
+typedef int (*rnc_link_stamper_fn)(void *context, const uint8_t material[48], double cost, uint8_t private_key[32],
+                                   uint8_t public_key[32]);
+rnc_result rnc_link_set_stamper(rnc_link *link, rnc_link_stamper_fn stamper, void *context, double cost);
 /* Initiator: peer must be a previously verified announce. */
 rnc_result rnc_link_open(rnc_link *link, const rnc_announce *peer, uint64_t now_ms);
 /* Responder: application admits the request before calling accept. */
@@ -139,7 +147,8 @@ typedef enum rnc_link_status {
 } rnc_link_status;
 typedef enum rnc_link_teardown {
     RNC_TEARDOWN_NONE = 0, RNC_TEARDOWN_TIMEOUT, RNC_TEARDOWN_INITIATOR_CLOSED,
-    RNC_TEARDOWN_DESTINATION_CLOSED
+    RNC_TEARDOWN_DESTINATION_CLOSED,
+    RNC_TEARDOWN_STAMP_FAILURE /* no stamp for the link request could be made (Link.STAMP_FAILURE, 0x04) */
 } rnc_link_teardown;
 rnc_link_status rnc_link_status_of(const rnc_link *link);
 rnc_link_teardown rnc_link_teardown_reason(const rnc_link *link);

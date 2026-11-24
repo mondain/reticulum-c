@@ -211,6 +211,17 @@ active: 1 percent of every hour by default; the host may change it with the airt
 commands, within 0.01 to 100 percent, and the smaller of the short and long lock values
 is used. You are responsible for what the host configures.
 
+Destination stamp (RNS 1.6, all PlatformIO boards in node mode): networks running Reticulum 1.6 can
+refuse announces without a proof of work. A board does not search for it: the stamp depends only on the
+board's public data, so it is found elsewhere and loaded. `get stamp.material` prints what to stamp (it is
+empty until the board has run once and created its identity), `get stamp.status` says none, valid or
+stale, and `set stamp HEX` (28 hexadecimal digits) takes a stamp only if it meets the required value (25)
+over that material; `set stamp clear` removes it. The stamp is stored on `save`, under its own key
+beside the identity, and checked at every boot: one that does not fit this identity is ignored and shows as
+stale. With a stamp the board's announces carry it and the link request cost (12.5); without one they are
+unchanged. `reticulum-c-flash --port DEVICE --stamp` and the browser installer do all of this in one step.
+The ESP-IDF example application has no stamp console yet.
+
 Bluetooth LE (all PlatformIO boards): in rnode mode the board can also be
 driven over Bluetooth, as a stock RNode is. It is off, and does not advertise, until you
 set a six digit PIN: `set ble.pin 123456` (console or the setup tools; it is never printed,

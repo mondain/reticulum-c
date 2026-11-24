@@ -21,5 +21,6 @@ for sf in range(5, 13):
         for cr in range(5, 9):
             iface = RNodeInterface.__new__(RNodeInterface)
             iface.r_sf, iface.r_cr, iface.r_bandwidth = sf, cr, bw
+            iface.name = "RNode"  # 1.6 made it an instance attribute; the log line in updateBitrate reads it
             iface.updateBitrate()
             print("%d %d %d %.9f" % (sf, bw, cr, iface.bitrate))

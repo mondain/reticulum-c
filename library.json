@@ -34,6 +34,7 @@
       "+<src/requester.c>",
       "+<src/transfer.c>",
       "+<src/stamp.c>",
+      "+<src/netstamp.c>",
       "+<src/discovery.c>",
       "+<src/log.c>",
       "+<src/i2p.c>",

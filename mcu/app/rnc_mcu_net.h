@@ -18,6 +18,8 @@
  * Where the settings are stored (NVS, Preferences) is up to the port.
  */
 #include "rnc_lora_cfg.h"
+#include "rnc_mcu_app.h"
+#include <reticulum_c/rnc_netstamp.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -115,6 +117,16 @@ typedef struct rnc_mcu_cfg {
   char ble_pin[7];    /* RNode mode over Bluetooth: six digits, or empty (Bluetooth off) */
   uint16_t port;
   rnc_lora_cfg lora;  /* the radio: off until explicitly configured (rnc_lora_cfg.h) */
+  /* The destination stamp (RNS 1.6). A stamp depends only on the board's public data, so it is searched elsewhere
+   * (reticulum-c-flash, the web flasher) and loaded here: `get stamp.material` shows what to stamp, `set stamp HEX`
+   * takes 14 bytes that meet `stamp_value` over it. The runtime fields are filled in by the port before the console
+   * runs (rnc_mcu_stamp_prepare) and are not stored with the other settings; a new stamp is stored by the port on
+   * save under RNC_MCU_KEY_STAMP. */
+  double stamp_value;       /* the value a stamp must have; 25.0, the reference's default */
+  char stamp_material[181]; /* hex of destination || public key || name hash, empty before the identity exists */
+  char stamp_status[8];     /* "none", "valid" or "stale" (a stored stamp that does not fit this identity) */
+  uint8_t stamp_new[14];    /* set by "set stamp": all zero means remove the stored stamp */
+  int stamp_new_set;
 } rnc_mcu_cfg;
 
 static inline void rnc_mcu_cfg_init(rnc_mcu_cfg *c) {
@@ -122,6 +134,7 @@ static inline void rnc_mcu_cfg_init(rnc_mcu_cfg *c) {
   memcpy(c->mode, RNC_MCU_MODE_SERIAL, sizeof(RNC_MCU_MODE_SERIAL));
   c->port = RNC_MCU_DEFAULT_PORT;
   rnc_lora_cfg_init(&c->lora);
+  c->stamp_value = 25.0;
 }
 static inline int rnc_mcu_cfg_wifi_mode(const rnc_mcu_cfg *c) {
   return !strcmp(c->mode, RNC_MCU_MODE_WIFI);
@@ -137,8 +150,55 @@ static inline int rnc_mcu_cfg_wifi_ready(const rnc_mcu_cfg *c) {
   return c->ssid[0] != 0 && c->host[0] != 0 && c->port != 0 && (p == 0 || (p >= 8 && p <= 63));
 }
 
+static inline int rnc_mcu_hex_byte(const char *p) {
+  int v = 0, i;
+  for (i = 0; i < 2; i++) {
+    char ch = p[i];
+    v <<= 4;
+    if (ch >= '0' && ch <= '9')
+      v |= ch - '0';
+    else if (ch >= 'a' && ch <= 'f')
+      v |= ch - 'a' + 10;
+    else if (ch >= 'A' && ch <= 'F')
+      v |= ch - 'A' + 10;
+    else
+      return -1;
+  }
+  return v;
+}
+/* "set stamp": 28 hex digits that meet the stamp value over the board's own material, or "clear". */
+static inline int rnc_mcu_cfg_set_stamp(rnc_mcu_cfg *c, const char *value) {
+  uint8_t stamp[14], material[90];
+  size_t i;
+  if (!strcmp(value, "clear")) {
+    memset(c->stamp_new, 0, sizeof(c->stamp_new));
+    c->stamp_new_set = 1;
+    return 0;
+  }
+  if (strlen(value) != 28u || strlen(c->stamp_material) != 180u)
+    return -1;
+  for (i = 0; i < sizeof(stamp); i++) {
+    int v = rnc_mcu_hex_byte(value + 2 * i);
+    if (v < 0)
+      return -1;
+    stamp[i] = (uint8_t)v;
+  }
+  for (i = 0; i < sizeof(material); i++) {
+    int v = rnc_mcu_hex_byte(c->stamp_material + 2 * i);
+    if (v < 0)
+      return -1;
+    material[i] = (uint8_t)v;
+  }
+  if (!rnc_netstamp_valid(material, sizeof(material), stamp, sizeof(stamp), c->stamp_value))
+    return -1;
+  memcpy(c->stamp_new, stamp, sizeof(stamp));
+  c->stamp_new_set = 1;
+  return 0;
+}
 static inline int rnc_mcu_cfg_set(rnc_mcu_cfg *c, const char *key, const char *value) {
   size_t n = strlen(value);
+  if (!strcmp(key, "stamp"))
+    return rnc_mcu_cfg_set_stamp(c, value);
   if (!strncmp(key, "lora.", 5)) {
     if (rnc_lora_cfg_set(&c->lora, key + 5, value) != 0)
       return -1;
@@ -199,6 +259,43 @@ static inline int rnc_mcu_cfg_set(rnc_mcu_cfg *c, const char *key, const char *v
   return 0;
 }
 
+/* ---- the destination stamp: what the console shows, and where the stamp is kept ------------------------ */
+/* Fills the runtime stamp fields of `cfg` from the persisted identity and stamp, before the console runs. Without
+ * an identity (the very first boot, which creates it) the material stays empty. */
+static inline void rnc_mcu_stamp_prepare(rnc_mcu_cfg *cfg, const rnc_mcu_platform *platform) {
+  uint8_t key[64], name_hash[10], address[16], material[90], stamp[14];
+  rnc_identity id;
+  size_t i;
+  int n;
+  memset(cfg->stamp_material, 0, sizeof(cfg->stamp_material));
+  memcpy(cfg->stamp_status, "none", 5);
+  if (!platform || !platform->load)
+    return;
+  n = platform->load(platform->context, RNC_MCU_KEY_IDENTITY, key, sizeof(key));
+  if (n != (int)sizeof(key) || rnc_identity_from_private(&id, key) != RNC_OK ||
+      rnc_destination_hash(RNC_MCU_APP_NAME, &id, name_hash, address) != RNC_OK)
+    return;
+  rnc_netstamp_announce_material(address, id.public_key, name_hash, material);
+  for (i = 0; i < sizeof(material); i++)
+    (void)snprintf(cfg->stamp_material + 2 * i, 3, "%02x", material[i]);
+  n = platform->load(platform->context, RNC_MCU_KEY_STAMP, stamp, sizeof(stamp));
+  if (n == (int)sizeof(stamp)) {
+    uint8_t any = 0;
+    for (i = 0; i < sizeof(stamp); i++)
+      any |= stamp[i];
+    if (any)
+      memcpy(cfg->stamp_status,
+             rnc_netstamp_valid(material, sizeof(material), stamp, sizeof(stamp), cfg->stamp_value) ? "valid" : "stale",
+             6);
+  }
+}
+/* Stores a stamp taken by "set stamp" (all zero removes it); 0 on success. */
+static inline int rnc_mcu_stamp_store(const rnc_mcu_platform *platform, const uint8_t stamp[14]) {
+  if (!platform || !platform->persist)
+    return -1;
+  return platform->persist(platform->context, RNC_MCU_KEY_STAMP, stamp, 14);
+}
+
 /* ---- the line console ------------------------------------------------------ */
 #define RNC_MCU_CONSOLE_LINE 160u
 #define RNC_MCU_CONSOLE_SAVE 1u   /* returned by _feed: store the settings now */
@@ -231,6 +328,12 @@ static inline void rnc_mcu_console_get(const rnc_mcu_cfg *cfg, const char *key, 
     (void)snprintf(tmp, sizeof(tmp), "mode=%s", cfg->mode);
   } else if (!strcmp(key, "ssid")) {
     (void)snprintf(tmp, sizeof(tmp), "ssid=%s", cfg->ssid);
+  } else if (!strcmp(key, "stamp.material")) {
+    (void)snprintf(out, size, "stamp.material=%s",
+                   cfg->stamp_material[0] ? cfg->stamp_material : "(not yet: boot once to create the identity)");
+    return;
+  } else if (!strcmp(key, "stamp.status") || !strcmp(key, "stamp")) {
+    (void)snprintf(tmp, sizeof(tmp), "stamp.status=%s", cfg->stamp_status[0] ? cfg->stamp_status : "none");
   } else if (!strcmp(key, "ble.pin")) { /* never the value */
     (void)snprintf(tmp, sizeof(tmp), "ble.pin=%s", cfg->ble_pin[0] ? "(set)" : "(empty)");
   } else if (!strcmp(key, "password")) { /* never the value */
@@ -268,6 +371,7 @@ static inline unsigned rnc_mcu_console_line(rnc_mcu_console *c, rnc_mcu_cfg *cfg
                    "keys: mode (serial|wifi|rnode) ssid password host port ble.pin (six digits)\n"
                    "LoRa: lora.mode (off|leaf|gateway) lora.freq lora.bw lora.sf lora.cr lora.txp\n"
                    "lora.airtime; the radio stays off until mode, freq, bw, sf, cr and txp are set\n"
+                   "stamp.material (read) and stamp (set HEX|clear): the RNS 1.6 destination stamp\n"
                    "set mode wifi, fill in the rest, then save and reboot");
   } else if (!strcmp(cmd, "get")) {
     rnc_mcu_console_get(cfg, arg, reply, reply_size);
@@ -285,7 +389,12 @@ static inline unsigned rnc_mcu_console_line(rnc_mcu_console *c, rnc_mcu_cfg *cfg
     else
       (void)snprintf(reply, reply_size, "ok (not stored until save)");
   } else if (!strcmp(cmd, "clear")) {
+    char material[sizeof(cfg->stamp_material)], status[sizeof(cfg->stamp_status)];
+    memcpy(material, cfg->stamp_material, sizeof(material)); /* what the port learned about the identity stays */
+    memcpy(status, cfg->stamp_status, sizeof(status));
     rnc_mcu_cfg_init(cfg);
+    memcpy(cfg->stamp_material, material, sizeof(material));
+    memcpy(cfg->stamp_status, status, sizeof(status));
     (void)snprintf(reply, reply_size, "ok: defaults restored (not stored until save)");
   } else if (!strcmp(cmd, "save")) {
     actions = RNC_MCU_CONSOLE_SAVE;

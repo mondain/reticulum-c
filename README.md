@@ -98,10 +98,19 @@ listen_port = 7778
 
 The optional `--state FILE` selects the checkpoint path. The daemon provides
 TCP/UDP/AutoInterface and serial/KISS/RNode adapters, signed route checkpoints
-and authenticated shared-instance RPC. RNS 1.5.5 RPC uses MessagePack.
+and authenticated shared-instance RPC. RNS 1.6.1 RPC uses MessagePack.
 SIGHUP reloads configuration; SIGINT/SIGTERM
 stop the daemon. Keep identity, checkpoint and admin paths in a private directory.
 Actual radio and multicast deployment require separate hardware/network checks.
+
+RNS 1.6 network stamps are on by default, as in the reference 1.6.1: the daemon
+checks the stamps on announces, path requests and link requests, searches stamps for
+its own destinations on background threads (saved beside the state file), and stamps
+the path requests and link requests it sends. Nothing is enforced unless the
+`[stamps]` section says `enforce_stamps = Yes`; `--exampleconfig` lists every option.
+The tools (`reticulum-c-cp`, `-x`, `-sh`, `-git`, `-ctl`) stamp the link requests they send but do not
+stamp their own announces or path requests, so against a daemon or network that enforces stamps they are
+filtered; point them at a daemon that does not enforce.
 
 ## Tools
 
@@ -220,6 +229,11 @@ LoRa automatically. Frequency and power must be chosen explicitly. Wi-Fi
 passwords are not stored by the page. Browser flashing requires HTTPS and a
 browser with Web Serial support; downloads remain available without it.
 
+The same page can give a board its RNS 1.6 destination stamp: "Stamp this board" reads
+the board's stamp material, searches the proof of work in your browser (seconds to a
+minute; the board never searches) and stores the result. `reticulum-c-flash --port
+DEVICE --stamp` does the same from a terminal.
+
 The PlatformIO firmware also has an `rnode` mode (`set mode rnode`, or "Run as: RNode modem" in the setup form): the board becomes a LoRa modem that Sideband, rnsd or another Reticulum host drives over USB, or over Bluetooth LE once a six digit PIN is set (`set ble.pin`), with the RNode protocol. On a LilyGo T-Echo it has been driven over USB by this project's host RNode adapter and, over Bluetooth LE, from a Linux PC (BlueZ). Sideband on one Android phone connected to it over Bluetooth LE in a single session, and the T-Echo then counted two packets received and two sent over the air with a T-Beam Supreme. To connect Sideband: set `ble.pin`, pair the phone with that PIN in Android's Bluetooth settings, turn on "Connect using Bluetooth" and "Device requires BLE" in Sideband and restart it (Sideband's plain "Bluetooth" option is classic Bluetooth and cannot see this board). Not yet verified: that Sideband displays the announces the board receives, reconnecting repeatedly, other phones, rnsd, the reference RNodeInterface in its own Bluetooth mode (over USB it configured a T-Echo and sent announces with its default timing; through a Bluetooth bridge only once its 0.25 second readback wait was lengthened; see `mcu/README.md`), range, and the ESP32 Bluetooth transport (compiled only, never run on hardware). The board runs no Reticulum node of its own in this mode, so it announces nothing and its own packet counters stay at 0 until a host drives it; see `mcu/README.md`.
 
 The Pages workflow builds all nine board variants from the displayed source
@@ -281,7 +295,7 @@ they are not dependencies of the library or installed SDK. Builds never download
 an oracle automatically. Exact revisions and limitations are in
 [PROVENANCE.md](PROVENANCE.md).
 
-For upstream RNS 1.5.5, prepare its checkout and a Python environment containing
+For upstream RNS 1.6.1, prepare its checkout and a Python environment containing
 cryptography and pyserial 3.5, then:
 
 ```sh

@@ -216,8 +216,13 @@ void rnc_provision_console(rnc_mcu_cfg *cfg, const char *reason) {
           print("\n");
         }
       }
-      if (actions & RNC_MCU_CONSOLE_SAVE)
+      if (actions & RNC_MCU_CONSOLE_SAVE) {
         print(rnc_settings_save(cfg) ? "stored\n" : "error: cannot store\n");
+        if (cfg->stamp_new_set) {
+          print(rnc_stamp_store(cfg->stamp_new) ? "stamp stored\n" : "error: cannot store the stamp\n");
+          cfg->stamp_new_set = 0;
+        }
+      }
       if (actions & RNC_MCU_CONSOLE_REBOOT) {
         delay(100);
         ESP.restart();

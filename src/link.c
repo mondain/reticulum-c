@@ -231,6 +231,16 @@ static void begin(rnc_link *link, int state, int initiator, uint64_t now) {
     link->stale = link->teardown = 0;
     link->rtt_ms = 1;
 }
+rnc_result rnc_link_set_stamper(rnc_link *link, rnc_link_stamper_fn stamper, void *context, double cost) {
+    if (!link || !(cost >= 0 && cost <= 100))
+        return RNC_INVALID;
+    if (link->state != RNC_LINK_IDLE)
+        return RNC_STATE;
+    link->stamper = stamper;
+    link->stamper_context = context;
+    link->stamper_cost = cost;
+    return RNC_OK;
+}
 rnc_result rnc_link_open(rnc_link *link, const rnc_announce *peer, uint64_t now) {
     rnc_identity ephemeral = {0};
     rnc_packet packet = {0};
@@ -243,6 +253,27 @@ rnc_result rnc_link_open(rnc_link *link, const rnc_announce *peer, uint64_t now)
     result = rnc_identity_generate(&ephemeral, link->random, link->random_context);
     if (result != RNC_OK)
         goto done;
+    if (link->stamper && link->stamper_cost > 0) {
+        /* RNS 1.6: the encryption key carries the stamp; the signature key it is bound to is already known */
+        uint8_t material[48], stamped_private[32], stamped_public[32], seed[64];
+        memcpy(material, peer->destination, 16);
+        memcpy(material + 16, ephemeral.public_key + 32, 32);
+        if (!link->stamper(link->stamper_context, material, link->stamper_cost, stamped_private, stamped_public)) {
+            link->teardown = RNC_TEARDOWN_STAMP_FAILURE;
+            result = RNC_TIMEOUT;
+            goto done;
+        }
+        memcpy(seed, stamped_private, 32);
+        memcpy(seed + 32, ephemeral.private_key + 32, 32);
+        rnc_identity_clear(&ephemeral);
+        result = rnc_identity_from_private(&ephemeral, seed);
+        rnc_cleanse(seed, sizeof(seed));
+        rnc_cleanse(stamped_private, sizeof(stamped_private));
+        if (result == RNC_OK && memcmp(ephemeral.public_key, stamped_public, 32)) /* the pair must belong together */
+            result = RNC_CRYPTO;
+        if (result != RNC_OK)
+            goto done;
+    }
     packet.flags = 2;
     packet.data_size = 67;
     link->est_cost = 19u + packet.data_size;

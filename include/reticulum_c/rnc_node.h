@@ -1,6 +1,7 @@
 #ifndef RETICULUM_C_NODE_H
 #define RETICULUM_C_NODE_H
 #include <reticulum_c/rnc.h>
+#include <reticulum_c/rnc_link.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +27,9 @@ typedef struct rnc_path_request {
   uint8_t destination[16], transport_id[16], tag[16];
   size_t tag_size;
   int has_transport;
+  /* the 64 byte form RNS 1.6 sends: dst | transport id | tag | 0xC1 | flags | 14 byte stamp */
+  int has_stamp;
+  uint8_t stamp[14];
 } rnc_path_request;
 typedef struct rnc_route {
   uint8_t destination[16], next_hop[16];
@@ -77,6 +81,11 @@ rnc_result rnc_path_request_create(const uint8_t destination[16],
                                    const uint8_t transport_id[16],
                                    const uint8_t *tag, size_t tag_size,
                                    rnc_packet *packet);
+/* A stamped path request: the 64 byte form; the stamp covers destination || tag (see rnc_netstamp.h), the
+ * transport id is required and the tag must be 16 bytes. */
+rnc_result rnc_path_request_create_stamped(const uint8_t destination[16], const uint8_t transport_id[16],
+                                           const uint8_t *tag, size_t tag_size, const uint8_t stamp[14],
+                                           rnc_packet *packet);
 rnc_result rnc_path_request_decode(const rnc_packet *packet,
                                    rnc_path_request *request);
 rnc_node *rnc_node_new(const rnc_identity *identity, int transport,
@@ -346,6 +355,63 @@ rnc_result rnc_node_blackhole_import(rnc_node *node, const void *input,
 rnc_result rnc_node_blackhole_merge(rnc_node *node, const void *input,
                                     size_t size, const uint8_t source[16],
                                     uint64_t unix_seconds, size_t *added);
+/* Network stamps (RNS 1.6). With `enabled`, an announce whose app data ends in a stamp extension is checked
+ * against the cost the ingress interface requires (its own, set below, else destination_cost): a stamp that
+ * meets it is removed from the app data kept and delivered, and the destination's announced link request cost
+ * is recorded. With enforce_announces, an announce without a sufficient stamp is dropped and counted on its
+ * interface; otherwise it is accepted either way, as RNS 1.6.1 does by default. Announces are always passed on
+ * unchanged. enforce_link_requests and pr_cost take effect with link and path request stamps. Defaults: enabled,
+ * nothing enforced, destination_cost 23.5, pr_cost 15.8. */
+typedef struct rnc_stamp_policy {
+  int enabled, enforce_announces, enforce_link_requests;
+  double destination_cost, pr_cost;
+  double lr_cost; /* link request cost of a destination that has none of its own; default 12.5, at most 40 */
+} rnc_stamp_policy;
+rnc_result rnc_node_stamp_policy(const rnc_node *node, rnc_stamp_policy *policy);
+rnc_result rnc_node_set_stamp_policy(rnc_node *node, const rnc_stamp_policy *policy); /* RNC_INVALID for costs outside 0..100 */
+/* Per interface costs; a negative value means the policy's. RNC_STATE for an unknown interface. */
+rnc_result rnc_node_set_interface_stamp_costs(rnc_node *node, uint32_t interface_id, double destination_cost,
+                                              double pr_cost);
+/* The link request cost the destination announced with a valid stamp; RNC_STATE when it is unknown or never did. */
+rnc_result rnc_node_recall_link_cost(const rnc_node *node, const uint8_t destination[16], double *link_cost);
+/* Our own announces. A destination's stamp depends only on public data (see rnc_netstamp.h), so it can be
+ * searched elsewhere and loaded here. rnc_node_destination_stamp_material gives that material (destination
+ * hash, public key, name hash). rnc_node_set_destination_stamp checks the stamp against `destination_value`
+ * of rnc_node_set_stamp_emission (RNC_AUTH if it falls short, RNC_STATE for a destination that is not a local
+ * SINGLE one). A destination with a stamp announces with the extension and its link request cost; one without
+ * announces unstamped, unless `required`, when rnc_node_announce returns RNC_AGAIN until a stamp is loaded.
+ * The extension counts against the 316 byte destination app data limit: when the data and the extension do not
+ * fit, the announce goes out without it. Path responses are stamped when a stamp is loaded and never wait. */
+rnc_result rnc_node_set_stamp_emission(rnc_node *node, int required, double destination_value);
+/* Path requests we send are stamped through a provider the host sets: it is given the stamp material
+ * (destination || 16 byte tag) and fills the 14 byte stamp, returning 1, or 0 when it cannot (then the request is
+ * cancelled and RNC_TIMEOUT returned, as the reference does when stamping times out). A stamped request is the 64 byte
+ * form and always carries this node's id as transport id. Requests with a tag shorter than 16 bytes stay unstamped.
+ * NULL removes the provider. The provider runs inside rnc_node_request_path*, on the caller's thread. */
+typedef int (*rnc_stamp_provider_fn)(void *context, const uint8_t material[32], uint8_t stamp[14]);
+rnc_result rnc_node_set_stamp_provider(rnc_node *node, rnc_stamp_provider_fn provider, void *context);
+/* Link requests we send: a host calls rnc_node_stamp_link on each new link before rnc_link_open. The link then asks
+ * for a stamped key when the destination announced a link request cost above 0 (see rnc_node_recall_link_cost), or,
+ * with `always`, at the policy's lr_cost when it announced none. Unless the host sets its own stamper (for example
+ * rnc_netstamp_link_stamper_run with a larger attempt budget), the node searches with its own random source for
+ * up to 2^20 trials, as the reference stamps by default. A NULL stamper restores that default. */
+rnc_result rnc_node_set_link_stamper(rnc_node *node, rnc_link_stamper_fn stamper, void *context, int always);
+rnc_result rnc_node_stamp_link(const rnc_node *node, rnc_link *link, const uint8_t destination[16]);
+/* The index'th local SINGLE destination (in the order they were added); RNC_AGAIN past the last. */
+rnc_result rnc_node_destination_at(const rnc_node *node, size_t index, uint8_t destination[16]);
+rnc_result rnc_node_destination_stamp_material(const rnc_node *node, const uint8_t destination[16], uint8_t out[90]);
+rnc_result rnc_node_set_destination_stamp(rnc_node *node, const uint8_t destination[16], const uint8_t stamp[14]);
+/* The link request cost a local destination announces and, with enforce_link_requests, requires (the policy's
+ * lr_cost until set; 0 means none, at most 40). RNC_STATE for a destination that is not local. */
+rnc_result rnc_node_set_destination_link_cost(rnc_node *node, const uint8_t destination[16], double cost);
+rnc_result rnc_node_destination_link_cost(const rnc_node *node, const uint8_t destination[16], double *cost);
+/* Before accepting a link request for `destination`: RNC_OK when stamps are not enforced for link requests,
+ * the destination is not local, its cost is 0, or the request's encryption key meets the cost as a stamped key
+ * over destination || signature key; RNC_AUTH when it does not; RNC_PROTOCOL when the request is too short. */
+rnc_result rnc_node_check_link_request(const rnc_node *node, const uint8_t destination[16], const rnc_packet *request);
+/* Announces, and path requests, dropped on an interface for a missing or insufficient stamp. */
+rnc_result rnc_node_interface_filtered(const rnc_node *node, uint32_t interface_id, uint64_t *announces);
+rnc_result rnc_node_interface_filtered_requests(const rnc_node *node, uint32_t interface_id, uint64_t *requests);
 /* Known-destination store (Identity.recall). Every valid, fresh announce for
  * a non-local destination is remembered independently of path lifetime, in a
  * table bounded to RNC_NODE_KNOWN entries (least recently heard is evicted).

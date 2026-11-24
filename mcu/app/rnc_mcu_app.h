@@ -77,6 +77,7 @@ typedef struct rnc_mcu_config {
    * the earlier versions. */
   struct rnc_lora_if *lora;
   unsigned lora_mode;
+  double stamp_value; /* the value a loaded destination stamp must have; 0 = 25.0 (RNS 1.6's default) */
 } rnc_mcu_config;
 
 typedef struct rnc_mcu_app rnc_mcu_app;

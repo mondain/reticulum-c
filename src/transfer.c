@@ -286,6 +286,8 @@ static rnc_result accept_link(rnc_transfer_listener *l,
   }
   result = rnc_link_configure_mtu(
       s->c.link, rnc_node_link_mtu_on(l->node, event->interface_id));
+  if (result == RNC_OK) /* RNS 1.6 link request stamps, when enforced */
+    result = rnc_node_check_link_request(l->node, l->destination, &event->packet);
   if (result == RNC_OK)
     result = rnc_link_accept(s->c.link, &l->identity, l->destination,
                              &event->packet, now);
@@ -631,6 +633,8 @@ static rnc_result job_start(rnc_transfer_client *c, enum job_kind kind,
   }
   result = rnc_link_configure_mtu(
       j->c.link, rnc_node_link_mtu_to(c->node, destination, now));
+  if (result == RNC_OK)
+    result = rnc_node_stamp_link(c->node, j->c.link, destination); /* RNS 1.6 link request stamp */
   if (result == RNC_OK)
     result = rnc_link_open(j->c.link, &route.announce, now);
   if (result == RNC_OK)

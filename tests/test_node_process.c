@@ -16,6 +16,7 @@
 #include <reticulum_c/rnc_discovery.h>
 #include <reticulum_c/rnc_ipc.h>
 #include <reticulum_c/rnc_link.h>
+#include <reticulum_c/rnc_netstamp.h>
 #include <reticulum_c/rnc_service.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -95,6 +96,28 @@ static void cli(const char *exe) {
     CHECK(snprintf(example, sizeof(example), "%s/example", dir) > 0);
     config_file(example, out);
     CHECK(run_check(exe, example) == 0);
+    CHECK(!unlink(example));
+    /* RNS 1.6 stamping: the sample documents the section, and every option the reference reads is accepted */
+    CHECK(run_args(exe, sample, out, sizeof(out)) == 0 && strstr(out, "[stamps]") && strstr(out, "destination_cost"));
+    CHECK(snprintf(example, sizeof(example), "%s/stamps", dir) > 0);
+    config_file(example, "[stamps]\nenforce_stamps = Yes\nstamp_destinations = Yes\nstamp_prs = Yes\n"
+                         "always_stamp_lrs = No\ndestination_cost = 23.5\ndestination_value = 25.0\n"
+                         "pr_cost = 15.8\npr_value = 15.8\nlr_cost = 12.5\nlr_stamp_timeout = 15\n"
+                         "pr_stamp_timeout = 15\nmax_workers = 4\nworker_niceness = 10\n"
+                         "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n"
+                         "destination_cost = 8.5\npr_cost = 9\n");
+    CHECK(run_check(exe, example) == 0);
+    config_file(example, "[stamps]\ndestination_cost = 500\nlr_cost = 99\nmax_workers = 0\nworker_niceness = 99\n"
+                         "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n");
+    CHECK(run_check(exe, example) == 0); /* out of range values are clamped, as the reference does */
+    config_file(example, "[stamps]\ndestination_cost = abc\n" "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n");
+    CHECK(run_check(exe, example) != 0);
+    config_file(example, "[stamps]\nenforce_stamps = maybe\n" "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n");
+    CHECK(run_check(exe, example) != 0);
+    config_file(example, "[stamps]\nno_such_option = 1\n" "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\n");
+    CHECK(run_check(exe, example) != 0);
+    config_file(example, "[interfaces]\n[[T]]\ntype = TCPServerInterface\nlisten_port = 4242\npr_cost = x\n");
+    CHECK(run_check(exe, example) != 0);
     CHECK(!unlink(example));
     CHECK(run_args(exe, interactive, out, sizeof(out)) == 2);
     CHECK(run_args(exe, unknown, out, sizeof(out)) == 2);
@@ -1688,7 +1711,10 @@ static void live_peer_config(char *dir, size_t size, const char *base, const cha
   CHECK(snprintf(path, sizeof(path), "%s/config", dir) < (int)sizeof(path));
   CHECK(snprintf(text, sizeof(text),
                  "[reticulum]\nenable_transport = No\nshare_instance = No\n[interfaces]\n[[T]]\n"
-                 "type = TCPClientInterface\nenabled = Yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n", port) > 0);
+                 "type = TCPClientInterface\nenabled = Yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n"
+                 /* RNS 1.6 stamps every announce and path request it emits; at the default value the search
+                  * takes seconds, longer than these scenarios wait, so the reference peers stamp cheaply */
+                 "[stamps]\ndestination_value = 8\npr_value = 8\n", port) > 0);
   config_file(path, text);
 }
 typedef struct live_node {
@@ -4280,6 +4306,288 @@ static void tunnel_persistence(const char *exe) {
   remove_tree(dir);
   puts("node tunnel persistence tests passed");
 }
+/* ---- destination stamps in the node daemon (RNS 1.6) ---------------------------------------------------- */
+/* Asks the daemon over TCP for a path to `dest` and returns the announce it answers with; *ext says whether it
+ * carries a stamp extension (and fills it). 0 when no answer arrives in `seconds`. */
+static int ask_path(unsigned port, const uint8_t dest[16], unsigned seconds, rnc_announce *answer, rnc_netstamp_ext *ext,
+                    int *stamped) {
+  rnc_packet request;
+  uint8_t tag[16], raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX], in[512], decoded[RNC_MAX_FRAME + 1u], command;
+  size_t n, m, k, got, written;
+  rnc_host_framer framer = {0};
+  unsigned tries;
+  int fd = tcp_connect(port), found = 0;
+  *stamped = 0;
+  CHECK(fd >= 0);
+  for (k = 0; k < sizeof(tag); ++k)
+    tag[k] = (uint8_t)(rand() >> 8);
+  CHECK(rnc_path_request_create(dest, NULL, tag, sizeof(tag), &request) == RNC_OK);
+  CHECK(rnc_packet_encode(&request, raw, sizeof(raw), &n) == RNC_OK &&
+        rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK);
+  CHECK(write(fd, framed, m) == (ssize_t)m);
+  for (tries = 0; tries < seconds * 20 && !found; ++tries) {
+    struct pollfd p = {fd, POLLIN, 0};
+    CHECK(poll(&p, 1, 50) >= 0);
+    if (!(p.revents & POLLIN))
+      continue;
+    {
+      ssize_t r = read(fd, in, sizeof(in));
+      if (r <= 0)
+        break;
+      for (got = 0; got < (size_t)r && !found; ++got)
+        if (rnc_host_frame_feed(&framer, RNC_HOST_HDLC, in[got], &command, decoded, sizeof(decoded), &written) == RNC_OK) {
+          rnc_packet p2;
+          if (rnc_packet_decode(decoded, written, &p2) == RNC_OK && (p2.flags & 3u) == RNC_ANNOUNCE &&
+              !memcmp(p2.destination, dest, 16) && rnc_announce_verify(&p2, answer) == RNC_OK) {
+            *stamped = rnc_netstamp_ext_parse(answer->app_data, answer->app_size, ext);
+            found = 1;
+          }
+        }
+    }
+  }
+  close(fd);
+  return found;
+}
+static void stamper_config(const char *cfg, unsigned port, unsigned value) {
+  write_config(cfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\nrespond_to_probes = Yes\n"
+               "[stamps]\ndestination_value = %u\nmax_workers = 2\n"
+               "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+               value, port);
+}
+static void load_probe_destination(const char *keyfile, uint8_t dest[16], uint8_t public_key[64], uint8_t name_hash[10]) {
+  uint8_t private_key[64];
+  rnc_identity id;
+  int fd = open(keyfile, O_RDONLY);
+  CHECK(fd >= 0 && read(fd, private_key, 64) == 64);
+  close(fd);
+  CHECK(rnc_identity_from_private(&id, private_key) == RNC_OK);
+  CHECK(rnc_destination_hash("rnstransport.probe", &id, name_hash, dest) == RNC_OK);
+  memcpy(public_key, id.public_key, 64);
+}
+static void stamper(const char *exe) {
+  char dir[] = "/tmp/rnc-node-stp-XXXXXX", cfg[256], key[256], admin[256], state[256], id[33];
+  unsigned port = unused_port(), tries;
+  int fd, stamped = 0;
+  pid_t p;
+  uint8_t dest[16], pub[64], name_hash[10], material[90], first[14];
+  rnc_announce answer;
+  rnc_netstamp_ext ext;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(state, sizeof(state), "%s/state", dir) > 0);
+  stamper_config(cfg, port, 10);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  load_probe_destination(key, dest, pub, name_hash);
+  rnc_netstamp_announce_material(dest, pub, name_hash, material);
+  /* the search runs in the background; the path response carries the stamp once it is found */
+  for (tries = 0; tries < 8 && !stamped; ++tries)
+    CHECK(ask_path(port, dest, 5, &answer, &ext, &stamped) || tries < 7);
+  CHECK(stamped && ext.link_cost == 12.5);
+  CHECK(rnc_netstamp_valid(material, sizeof(material), ext.stamp, sizeof(ext.stamp), 10.0));
+  memcpy(first, ext.stamp, sizeof(first));
+  /* restarted, the same stamp is there at once: it was persisted, nothing is searched again */
+  stop(p, fd);
+  p = start_with_state(exe, cfg, key, admin, state, &fd);
+  ready_line(fd, id);
+  CHECK(ask_path(port, dest, 5, &answer, &ext, &stamped) && stamped && !memcmp(ext.stamp, first, sizeof(first)));
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node stamper tests passed");
+}
+/* A search that cannot finish (cost 40) must not hold up shutdown. */
+static void stamper_shutdown(const char *exe) {
+  char dir[] = "/tmp/rnc-node-stps-XXXXXX", cfg[256], key[256], admin[256], id[33];
+  unsigned port = unused_port();
+  int fd, status;
+  pid_t p;
+  struct timespec t0, t1;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  stamper_config(cfg, port, 40);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  { struct timespec w = {1, 0}; nanosleep(&w, NULL); }
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  CHECK(!kill(p, SIGTERM));
+  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status) && !WEXITSTATUS(status));
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  CHECK(t1.tv_sec - t0.tv_sec < 3);
+  close(fd);
+  remove_tree(dir);
+  puts("node stamper shutdown test passed");
+}
+
+/* The path requests the daemon sends are stamped at pr_value (here for a blackhole source it wants a path to). */
+static void stamper_requests(const char *exe) {
+  char dir[] = "/tmp/rnc-node-stpr-XXXXXX", cfg[256], key[256], admin[256], id[33];
+  unsigned port = unused_port(), tries;
+  int fd, peer, seen = 0;
+  pid_t p;
+  rnc_host_framer framer = {0};
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  write_config(cfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\n"
+               "blackhole_sources = 33333333333333333333333333333333\nblackhole_initial_wait = 1\n"
+               "[stamps]\npr_value = 8\n"
+               "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+               port);
+  p = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  peer = tcp_connect(port);
+  CHECK(peer >= 0);
+  for (tries = 0; tries < 200 && !seen; ++tries) {
+    struct pollfd pf = {peer, POLLIN, 0};
+    uint8_t in[512], decoded[RNC_MAX_FRAME + 1u], command;
+    CHECK(poll(&pf, 1, 100) >= 0);
+    if (pf.revents & POLLIN) {
+      ssize_t r = read(peer, in, sizeof(in)), k;
+      CHECK(r > 0);
+      for (k = 0; k < r && !seen; ++k) {
+        size_t written;
+        if (rnc_host_frame_feed(&framer, RNC_HOST_HDLC, in[k], &command, decoded, sizeof(decoded), &written) == RNC_OK) {
+          rnc_packet pkt;
+          rnc_path_request q;
+          uint8_t material[32];
+          if (rnc_packet_decode(decoded, written, &pkt) == RNC_OK && rnc_path_request_decode(&pkt, &q) == RNC_OK &&
+              pkt.data_size == 64) {
+            memcpy(material, q.destination, 16);
+            memcpy(material + 16, q.tag, 16);
+            CHECK(q.has_stamp && q.has_transport && rnc_netstamp_valid(material, 32, q.stamp, 14, 8.0));
+            seen = 1;
+          }
+        }
+      }
+    }
+  }
+  CHECK(seen);
+  close(peer);
+  stop(p, fd);
+  remove_tree(dir);
+  puts("node stamped path request tests passed");
+}
+
+/* ---- stamps on an enforcing network (RNS 1.6.1 as the oracle) ------------------------------------------- */
+static void stamps_peer_config(char *dir, size_t size, const char *base, const char *name, unsigned port, unsigned value) {
+  char path[600], text[700];
+  CHECK(snprintf(dir, size, "%s/%s", base, name) < (int)size);
+  CHECK(!mkdir(dir, 0700));
+  CHECK(snprintf(path, sizeof(path), "%s/config", dir) < (int)sizeof(path));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n[interfaces]\n[[T]]\n"
+                 "type = TCPClientInterface\nenabled = Yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n"
+                 "[stamps]\ndestination_value = %u\npr_value = 8\n", port, value) > 0);
+  config_file(path, text);
+}
+/* One of our daemons answers path requests for its probe destination on an enforcing reference transport node
+ * (enforce_stamps, destination_cost 12): `stamping` says whether the daemon stamps. A reference peer behind the
+ * node asks for the path; it gets one only if the daemon's answer carried a sufficient stamp. */
+static int enforcing_reference_path(const char *exe, const char *python, const char *ref_dir, const char *base,
+                                    const char *tag, int stamping) {
+  unsigned port = unused_port(), tries;
+  char dir[500], cfg[700], key[600], admin[600], line[512], id[33], text[1024];
+  uint8_t dest[16], pub[64], name_hash[10];
+  char hex[33];
+  live_proc node, peer;
+  pid_t daemon;
+  int fd, got = 0;
+  size_t k;
+  CHECK(snprintf(dir, sizeof(dir), "%s/%s-r", base, tag) < (int)sizeof(dir) && !mkdir(dir, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) < (int)sizeof(cfg));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[stamps]\nenforce_stamps = Yes\n"
+                 "destination_cost = 12\npr_cost = 8\n[interfaces]\n[[Server]]\ntype = TCPServerInterface\nenabled = Yes\n"
+                 "mode = gateway\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+  config_file(cfg, text);
+  live_spawn(&node, python, ref_dir, live_transport, dir);
+  CHECK(live_expect(&node, "READY", 20000, line, sizeof(line)));
+  CHECK(snprintf(dir, sizeof(dir), "%s/%s-d", base, tag) < (int)sizeof(dir) && !mkdir(dir, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) < (int)sizeof(cfg));
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) < (int)sizeof(key));
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) < (int)sizeof(admin));
+  write_config(cfg,
+               "[reticulum]\nenable_transport = No\nshare_instance = No\nrespond_to_probes = Yes\n"
+               "[stamps]\nstamp_destinations = %s\ndestination_value = 14\n"
+               "[interfaces]\n[[Up]]\ntype = TCPClientInterface\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+               stamping ? "Yes" : "No", port);
+  daemon = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  load_probe_destination(key, dest, pub, name_hash);
+  for (k = 0; k < 16; ++k)
+    CHECK(snprintf(hex + 2 * k, 3, "%02x", dest[k]) == 2);
+  { char pd[500]; stamps_peer_config(pd, sizeof(pd), base, tag, port, 8);
+    live_spawn(&peer, python, ref_dir, live_peer, pd); }
+  CHECK(live_expect(&peer, "HASH", 20000, line, sizeof(line)));
+  live_sleep(3000); /* connected, and the daemon's stamp (value 14) is found */
+  for (tries = 0; tries < 3 && !got; ++tries) {
+    char req[64];
+    long hops = -1, w;
+    char h[40];
+    CHECK(snprintf(req, sizeof(req), "request %s\n", hex) > 0);
+    live_send(&peer, req);
+    CHECK(live_expect(&peer, "PATH", 12000, line, sizeof(line)));
+    CHECK(sscanf(line, "PATH %39s %ld %ld", h, &hops, &w) == 3);
+    got = hops > 0;
+  }
+  live_end(&peer);
+  stop(daemon, fd);
+  live_end(&node);
+  return got;
+}
+static void stamps_reference(const char *exe, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-stamps-XXXXXX";
+  CHECK(mkdtemp(base));
+  /* a stamped answer is accepted by an enforcing node, an unstamped one is dropped */
+  CHECK(enforcing_reference_path(exe, python, reference, base, "on", 1));
+  CHECK(!enforcing_reference_path(exe, python, reference, base, "off", 0));
+  puts("node stamps against an enforcing reference passed");
+}
+/* The other direction: our daemon enforces; a reference peer whose announce is stamped enough is learned, one
+ * stamped at value 0 is not. */
+static void stamps_enforcing_daemon(const char *exe, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-stamps-XXXXXX", dir[500], cfg[700], key[600], admin[600], line[512], id[33], hash[40], pd[500];
+  unsigned port = unused_port();
+  live_proc good, weak;
+  pid_t daemon;
+  int fd;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(dir, sizeof(dir), "%s/d", base) < (int)sizeof(dir) && !mkdir(dir, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) < (int)sizeof(cfg));
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) < (int)sizeof(key));
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) < (int)sizeof(admin));
+  write_config(cfg,
+               "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[stamps]\nenforce_stamps = Yes\n"
+               "destination_cost = 12\n[interfaces]\n[[Server]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\n"
+               "listen_port = %u\n", port);
+  daemon = start(exe, cfg, key, admin, &fd);
+  ready_line(fd, id);
+  stamps_peer_config(pd, sizeof(pd), base, "good", port, 14);
+  live_spawn(&good, python, reference, live_peer, pd);
+  CHECK(live_expect(&good, "HASH", 20000, line, sizeof(line)));
+  CHECK(snprintf(hash, sizeof(hash), "%s", line + 5) < (int)sizeof(hash));
+  live_sleep(1500);
+  live_send(&good, "announce\n");
+  CHECK(path_within(admin, hash, 40)); /* stamped at 14, required 12 */
+  stamps_peer_config(pd, sizeof(pd), base, "weak", port, 0);
+  live_spawn(&weak, python, reference, live_peer, pd);
+  CHECK(live_expect(&weak, "HASH", 20000, line, sizeof(line)));
+  CHECK(snprintf(hash, sizeof(hash), "%s", line + 5) < (int)sizeof(hash));
+  live_sleep(1500);
+  live_send(&weak, "announce\n");
+  CHECK(!path_within(admin, hash, 8)); /* stamped at 0: filtered */
+  live_end(&weak);
+  live_end(&good);
+  stop(daemon, fd);
+  puts("node enforcing stamps against reference peers passed");
+}
 
 /* ---- reticulum-c-cp (rncp compatible file transfer) --------------------- */
 static pid_t spawn_cp(const char *cp, int *out, char *const *args) {
@@ -6077,6 +6385,12 @@ int main(int argc, char **argv) {
 
   else if (!strcmp(argv[2], "tunnel_persist") && argc == 3)
     tunnel_persistence(argv[1]);
+  else if (!strcmp(argv[2], "stamper") && argc == 3)
+    stamper(argv[1]);
+  else if (!strcmp(argv[2], "stamper_requests") && argc == 3)
+    stamper_requests(argv[1]);
+  else if (!strcmp(argv[2], "stamper_shutdown") && argc == 3)
+    stamper_shutdown(argv[1]);
 
   else if (!strcmp(argv[2], "logging") && argc == 3)
     logging_config(argv[1]);
@@ -6098,6 +6412,10 @@ int main(int argc, char **argv) {
     blackhole(argv[1]);
   else if (!strcmp(argv[2], "shared"))
     shared(argv[1], NULL, NULL);
+  else if (!strcmp(argv[2], "stamps_ref") && argc == 5)
+    stamps_reference(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "stamps_enforcing_ref") && argc == 5)
+    stamps_enforcing_daemon(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "live_ref") && argc == 5)
     live_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "disc_list") && argc == 4)

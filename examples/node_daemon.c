@@ -10,6 +10,7 @@
 #include <openssl/rand.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_ipc.h>
+#include <reticulum_c/rnc_netstamp.h>
 #include <reticulum_c/rnc_log.h>
 #include <reticulum_c/rnc_service.h>
 #include <signal.h>
@@ -89,6 +90,7 @@ typedef struct interface_config {
   unsigned announce_interval_s, stamp_value, disc_frequency, disc_bandwidth;
   double lat, lon, height;
   uint8_t lxmf[16];
+  double dst_cost, pr_cost; /* required stamp costs of this interface; negative means [stamps] */
 } interface_config;
 #ifndef RNC_NODE_VERSION
 #define RNC_NODE_VERSION "unknown" /* the build normally passes the project version */
@@ -116,12 +118,21 @@ typedef struct config {
   uint8_t bh_sources[RNC_SERVICE_ALLOWLIST][16];
   size_t bh_source_count;
   unsigned bh_interval_minutes, bh_initial_wait;
+  /* [stamps], with the reference's names and defaults (RNS 1.6.1) */
+  rnc_stamp_policy stamps;
+  double destination_value, pr_value, lr_stamp_timeout, pr_stamp_timeout;
+  int stamp_destinations, stamp_prs, always_stamp_lrs;
+  unsigned max_workers, worker_niceness; /* max_workers 0: one per core */
   uint16_t shared_port, control_port;
   uint8_t rpc_key[RNC_RPC_KEY_MAX];
   size_t rpc_key_size;
   size_t count;
   interface_config interfaces[CONFIG_INTERFACES];
 } config;
+/* destination stamps (node_stamper.h) */
+static void stamper_start(const config *c, rnc_node *node, const char *state);
+static void stamper_stop(void);
+static void stamper_step(void);
 static volatile sig_atomic_t stopping, reloading;
 static void signal_handler(int n) {
   if (n == SIGHUP)
@@ -369,6 +380,7 @@ static int sub_key(struct sub_config *sub, const char *key, const char *value) {
     return 0;
   return 1;
 }
+static int cost_value(const char *value, double cap, double *out);
 static int interface_key(interface_config *f, const char *key,
                          const char *value) {
   unsigned long n;
@@ -459,6 +471,16 @@ static int interface_key(interface_config *f, const char *key,
         return 1;
       }
     return 0;
+  }
+  if (!strcmp(key, "destination_cost") || !strcmp(key, "pr_cost")) {
+    double v;
+    if (!cost_value(value, RNC_NETSTAMP_COST_CAP, &v))
+      return 0;
+    if (key[0] == 'd')
+      f->dst_cost = v;
+    else
+      f->pr_cost = v;
+    return 1;
   }
   if (!strcmp(key, "announce_cap")) {
     char *end;
@@ -957,6 +979,74 @@ static int finish_config(config *c) {
   }
   return enabled > 0 || c->share;
 }
+/* A cost as the reference reads it: any float, clamped to 0..cap. */
+static int cost_value(const char *value, double cap, double *out) {
+  char *end;
+  double v;
+  if (!*value)
+    return 0;
+  v = strtod(value, &end);
+  if (*end || v != v)
+    return 0;
+  *out = v < 0 ? 0 : v > cap ? cap : v;
+  return 1;
+}
+static int stamps_key(config *c, const char *key, const char *value) {
+  double v;
+  long n;
+  char *end;
+  int b;
+  if (!strcmp(key, "enforce_stamps")) {
+    if (!boolean(value, &b))
+      return 0;
+    c->stamps.enforce_announces = c->stamps.enforce_link_requests = b;
+  } else if (!strcmp(key, "stamp_destinations") || !strcmp(key, "stamp_prs") ||
+             !strcmp(key, "always_stamp_lrs")) {
+    if (!boolean(value, &b))
+      return 0;
+    if (!strcmp(key, "stamp_destinations"))
+      c->stamp_destinations = b;
+    else if (!strcmp(key, "stamp_prs"))
+      c->stamp_prs = b;
+    else
+      c->always_stamp_lrs = b;
+  } else if (!strcmp(key, "destination_cost")) {
+    if (!cost_value(value, RNC_NETSTAMP_COST_CAP, &c->stamps.destination_cost))
+      return 0;
+  } else if (!strcmp(key, "destination_value")) {
+    if (!cost_value(value, RNC_NETSTAMP_COST_CAP, &c->destination_value))
+      return 0;
+  } else if (!strcmp(key, "pr_cost")) {
+    if (!cost_value(value, RNC_NETSTAMP_COST_CAP, &c->stamps.pr_cost))
+      return 0;
+  } else if (!strcmp(key, "pr_value")) {
+    if (!cost_value(value, RNC_NETSTAMP_COST_CAP, &c->pr_value))
+      return 0;
+  } else if (!strcmp(key, "lr_cost")) {
+    if (!cost_value(value, RNC_NETSTAMP_LINK_COST_CAP, &c->stamps.lr_cost))
+      return 0;
+  } else if (!strcmp(key, "lr_stamp_timeout") || !strcmp(key, "pr_stamp_timeout")) {
+    if (!cost_value(value, 3600.0, &v))
+      return 0;
+    if (v < 0.020)
+      v = 0.020;
+    if (key[0] == 'l')
+      c->lr_stamp_timeout = v;
+    else
+      c->pr_stamp_timeout = v;
+  } else if (!strcmp(key, "max_workers") || !strcmp(key, "worker_niceness")) {
+    n = strtol(value, &end, 10);
+    if (!*value || *end)
+      return 0;
+    if (key[0] == 'm')
+      c->max_workers = n < 1 ? 1u : n > 1024 ? 1024u : (unsigned)n;
+    else
+      c->worker_niceness = n < 0 ? 0u : n > 20 ? 20u : (unsigned)n;
+  } else {
+    return 0;
+  }
+  return 1;
+}
 static int read_config(const char *path, config *c) {
   FILE *file;
   char line[512];
@@ -967,6 +1057,15 @@ static int read_config(const char *path, config *c) {
   c->shared_port = 37428;
   c->control_port = 37429;
   c->loglevel = RNC_LOG_NOTICE;
+  c->stamps.enabled = 1;
+  c->stamps.destination_cost = 23.5;
+  c->stamps.pr_cost = 15.8;
+  c->stamps.lr_cost = 12.5;
+  c->destination_value = 25.0;
+  c->pr_value = 15.8;
+  c->lr_stamp_timeout = c->pr_stamp_timeout = 15.0;
+  c->stamp_destinations = c->stamp_prs = 1;
+  c->worker_niceness = 16;
   file = fopen(path, "r");
   if (!file)
     return 0;
@@ -1021,6 +1120,7 @@ static int read_config(const char *path, config *c) {
       current = &c->interfaces[c->count++];
       memset(current, 0, sizeof(*current));
       current->enabled = 1;
+      current->dst_cost = current->pr_cost = -1.0;
       s[n - 2] = 0;
       if (!text_copy(current->name, sizeof(current->name), s + 2)) {
         valid = 0;
@@ -1035,6 +1135,9 @@ static int read_config(const char *path, config *c) {
         current = NULL;
       } else if (!strcmp(s, "[logging]")) {
         section = 4;
+        current = NULL;
+      } else if (!strcmp(s, "[stamps]")) {
+        section = 6;
         current = NULL;
       } else if (!strcmp(s, "[interfaces]")) {
         section = 2;
@@ -1268,6 +1371,11 @@ static int read_config(const char *path, config *c) {
           break;
         }
       } else {
+        valid = 0;
+        break;
+      }
+    } else if (section == 6) {
+      if (!stamps_key(c, s, value)) {
         valid = 0;
         break;
       }
@@ -1607,6 +1715,9 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
   *host = *node ? rnc_host_new(*node) : NULL;
   if (!*host)
     goto fail;
+  (void)rnc_node_set_stamp_policy(*node, &c->stamps);
+  /* link request stamps are searched on the host's threads (max_workers); lr_stamp_timeout bounds them as a trial budget */
+  (void)rnc_host_set_link_stamping(*host, c->max_workers, (uint64_t)(c->lr_stamp_timeout * 200000.0), c->always_stamp_lrs);
   if (c->explicit_proofs)
     (void)rnc_node_set_implicit_proofs(*node, 0);
   if (c->no_link_mtu_discovery)
@@ -1638,6 +1749,8 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
           goto fail;
         continue;
       }
+      (void)rnc_node_set_interface_stamp_costs(*node, c->interfaces[i].interface_id,
+                                               c->interfaces[i].dst_cost, c->interfaces[i].pr_cost);
       if (rnc_host_get_status(*host, c->interfaces[i].interface_id, &status) ==
           RNC_OK)
         printf("interface id=%u kind=%u port=%u online=%d\n",
@@ -1682,6 +1795,7 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
     fprintf(stderr, "Cannot start management destinations\n");
     goto fail;
   }
+  stamper_start(c, *node, state);
   return 1;
 fail:
   mgmt_stop();
@@ -2049,6 +2163,24 @@ static const char *example_config =
     "# An identity file shared by the instances of one network (created if absent).\n"
     "# network_identity = ~/.reticulum/storage/network_identity\n"
     "\n"
+    "# Network stamps (RNS 1.6). Costs are fractional; a stamp costs about 2^cost hashes. The _cost options say\n"
+    "# what this node requires of others, the _value options what it puts on what it emits. Interfaces take\n"
+    "# destination_cost and pr_cost of their own.\n"
+    "[stamps]\n"
+    "# enforce_stamps = No\n"
+    "# stamp_destinations = Yes\n"
+    "# stamp_prs = Yes\n"
+    "# always_stamp_lrs = No\n"
+    "destination_cost = 23.5\n"
+    "# destination_value = 25.0\n"
+    "# pr_cost = 15.8\n"
+    "# pr_value = 15.8\n"
+    "# lr_cost = 12.5\n"
+    "# lr_stamp_timeout = 15\n"
+    "# pr_stamp_timeout = 15\n"
+    "# max_workers = 4\n"
+    "# worker_niceness = 16\n"
+    "\n"
     "[logging]\n"
     "# 0 critical, 1 error, 2 warning, 3 notice, 4 verbose, 5 debug, 6 extreme, 7 trace\n"
     "loglevel = 3\n"
@@ -2093,6 +2225,7 @@ static void log_apply(const config *c) {
   rnc_log_set_level(c->loglevel);
 }
 #include "node_rpc.h"
+#include "node_stamper.h"
 #include "node_mgmt.h"
 #include "node_discovery.h"
 
@@ -2312,6 +2445,7 @@ int main(int argc, char **argv) {
       }
     }
     mgmt_step((uint64_t)time(NULL), monotonic_ms());
+    stamper_step();
     admin_step(admin, clients, host, node, &id, state_path, monotonic_ms());
     rpc_step(&rpc, host, node, &current, &id, monotonic_ms());
     if (reloading) {

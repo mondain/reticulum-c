@@ -34,6 +34,7 @@ static int discovery_start(const config *c, const rnc_identity *transport,
                            const rnc_identity *network, rnc_node *node);
 static void discovery_step(uint64_t unix_seconds, uint64_t now);
 static void mgmt_stop(void) {
+  stamper_stop();
   discovery_stop();
   rnc_identity_clear(&mgmt.network);
   rnc_responder_free(mgmt.responder);
@@ -58,7 +59,7 @@ static rnc_result mgmt_status(void *context, const char *path,
   link_count = mp_bool_true(request, size, 1);
   rnc_rpc_writer_init(&w, response, capacity);
   (void)rnc_rpc_write_array(&w, link_count ? 2 : 1);
-  all_stats(&w, m->host, &m->settings, m->identity,
+  all_stats(&w, m->host, m->node, &m->settings, m->identity,
             monotonic_ms() - m->started);
   if (link_count)
     (void)rnc_rpc_write_uint(&w, rnc_node_link_count(m->node, 0));
