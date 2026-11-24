@@ -24,7 +24,6 @@ static struct stamper {
   rnc_node *node;
   char path[1100]; /* <state>.stamps; empty without a state file */
   double value, pr_value, pr_timeout;
-  rnc_netstamp_link_stamper link; /* link request stamps: lr_stamp_timeout bounds the search by trials */
   unsigned workers, niceness, started;
   pthread_t threads[STAMPER_MAX_WORKERS];
   pthread_mutex_t lock;
@@ -158,10 +157,7 @@ static void stamper_start(const config *c, rnc_node *node, const char *state) {
   stp.pr_timeout = c->pr_stamp_timeout;
   if (c->stamp_prs)
     (void)rnc_node_set_stamp_provider(node, stamper_pr_provider, NULL);
-  /* a stamped key costs tens of microseconds a trial; the timeout is expressed as a trial budget */
-  stp.link.random = secure_random;
-  stp.link.max_attempts = (uint64_t)(c->lr_stamp_timeout * 20000.0);
-  (void)rnc_node_set_link_stamper(node, rnc_netstamp_link_stamper_run, &stp.link, c->always_stamp_lrs);
+
   stp.enabled = c->stamp_destinations;
   stp.value = c->destination_value;
   stp.niceness = c->worker_niceness;

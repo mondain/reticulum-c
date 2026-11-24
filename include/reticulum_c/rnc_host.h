@@ -247,6 +247,14 @@ rnc_result rnc_host_identity_load(const char *path, rnc_random_fn random,
 rnc_result rnc_host_identity_save(const char *path, const rnc_identity *identity,
                                   int public_only, int overwrite);
 rnc_host *rnc_host_new(rnc_node *node);
+/* Link requests this node sends are stamped when the destination asks (RNS 1.6). A new host installs a stamper that
+ * searches the stamped key on `workers` threads (0 = one per core, at most 16) and gives up after `max_trials`
+ * key trials in all (0 = 2^26, seconds on a few cores up to a cost of about 25); with `always` it also stamps for
+ * destinations that announced no cost, at the policy's lr_cost. RNC_INVALID for more than 16 workers. */
+rnc_result rnc_host_set_link_stamping(rnc_host *host, unsigned workers, uint64_t max_trials, int always);
+/* The stamper itself (an rnc_link_stamper_fn; `context` is the rnc_host), for tests and custom hosts. */
+int rnc_host_link_stamper(void *context, const uint8_t material[48], double cost, uint8_t private_key[32],
+                          uint8_t public_key[32]);
 void rnc_host_free(rnc_host *host);
 rnc_result rnc_host_add(rnc_host *host, uint32_t interface_id,
                         const rnc_host_config *config);

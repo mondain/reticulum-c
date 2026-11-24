@@ -1716,6 +1716,8 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
   if (!*host)
     goto fail;
   (void)rnc_node_set_stamp_policy(*node, &c->stamps);
+  /* link request stamps are searched on the host's threads (max_workers); lr_stamp_timeout bounds them as a trial budget */
+  (void)rnc_host_set_link_stamping(*host, c->max_workers, (uint64_t)(c->lr_stamp_timeout * 200000.0), c->always_stamp_lrs);
   if (c->explicit_proofs)
     (void)rnc_node_set_implicit_proofs(*node, 0);
   if (c->no_link_mtu_discovery)
