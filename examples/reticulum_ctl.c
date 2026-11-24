@@ -1738,6 +1738,7 @@ static int discovered_listing(const char *dir, const char *filter, int details, 
       printf("Name         : %s\nType         : %s\nStack        : %s\n", list[k].name, type, impl_str);
       printf("Status       : %s\n", list[k].status == 2 ? "Available" : list[k].status == 1 ? "Unknown" : "Stale");
       printf("Transport    : %s\n", tr && tr->type == V_BOOL && tr->u ? "Enabled" : "Disabled");
+      printf("Stamp Value  : %.3f\n", (double)list[k].value); /* after Transport since RNS 1.6 */
       printf("Distance     : %llu hop%s\n", (unsigned long long)as_uint(hops), as_uint(hops) == 1 ? "" : "s");
       printf("Discovered   : %s\nLast Heard   : %s\nLocation     : %s\n", disc_text, heard_text, location);
       if ((f = map_get(r, "frequency")) != NULL) {
@@ -1763,7 +1764,7 @@ static int discovered_listing(const char *dir, const char *filter, int details, 
       }
       if ((f = map_get(r, "port")) != NULL)
         printf("Port         : %llu\n", (unsigned long long)as_uint(f));
-      printf("Stamp Value  : %llu\n\nConfiguration Entry:\n", (unsigned long long)list[k].value);
+      printf("\nConfiguration Entry:\n");
       if (cfg && cfg->type == V_STR) {
         const char *at = (const char *)cfg->p, *end = at + cfg->n;
         while (at <= end) {
@@ -1811,7 +1812,7 @@ static int discovered_listing(const char *dir, const char *filter, int details, 
         (void)snprintf(heard_text, sizeof(heard_text), "%dh ago", (int)(diff / 3600));
       else
         (void)snprintf(heard_text, sizeof(heard_text), "%dd ago", (int)(diff / 86400));
-      (void)snprintf(value_text, sizeof(value_text), "%llu", (unsigned long long)list[k].value);
+      (void)snprintf(value_text, sizeof(value_text), "%.3f", (double)list[k].value); /* RNS.prettycost, three decimals since 1.6 */
       if (have_location) {
         disc_coordinate(lat, 4, tmp, sizeof(tmp));
         disc_coordinate(lon, 4, tmp2, sizeof(tmp2));
