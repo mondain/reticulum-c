@@ -239,7 +239,8 @@ authenticated before any byte is accepted or sent.
 Not included: stock RNode EEPROM provisioning, signing and firmware-update flows
 (rnodeconf cannot flash or provision this firmware), battery and temperature reports. The generic ESP-IDF image has no Bluetooth or radio selection and ignores this mode.
 
-Status screens (LilyGo T-Echo e-paper, LilyGo T-Beam Supreme OLED). These two boards draw a
+Status screens (LilyGo T-Echo e-paper, LilyGo T-Beam Supreme OLED, Heltec WiFi LoRa 32 V3
+OLED). These three boards draw a
 status page: name and version, the phase (setup or running), radio on or off, frequency and
 transmit power, bandwidth, spreading factor and coding rate, RSSI and SNR of the last packet,
 packet counts and airtime used, the link (USB, Bluetooth or none) and, only while it is
@@ -249,11 +250,14 @@ encrypted and whenever no PIN is set. The screen only reads the node's state, ru
 low priority task, and a screen that fails to start never affects the radio, USB or
 Bluetooth. The e-paper refreshes at most every 15 s (2 s when the PIN row changes) with a
 full refresh every 5 minutes; the OLED every second. Libraries (pinned in platformio.ini):
-GxEPD2, Adafruit GFX, Adafruit SH110X, Adafruit BusIO. The e-paper uses SPIM3 (the Adafruit
+GxEPD2, Adafruit GFX, Adafruit SH110X (Supreme), Adafruit SSD1306 (Heltec V3), Adafruit
+BusIO. The Heltec V3 panel is powered from Vext (GPIO36, on when low) and reset on GPIO21;
+both OLEDs are at I2C 0x3C on SDA 17 and SCL 18. The e-paper uses SPIM3 (the Adafruit
 nRF52 core disables SPIM0 and SPIM1). Other boards build without a screen driver.
 Evidence: the layout, the PIN rule and the refresh policy are unit tested (test_mcu_status).
-On 2026-11-15 the Supreme OLED showed the status page, and the T-Echo e-paper showed the
-status page and, with ble.pin set and mode rnode, showed the PIN while advertising, removed
+On 2026-11-25 the Heltec V3 OLED showed the status page (serial mode, LoRa gateway); its
+PIN rows, RNode mode and the other modes were not checked on that board. On 2026-11-15 the
+Supreme OLED showed the status page, and the T-Echo e-paper showed the status page and, with ble.pin set and mode rnode, showed the PIN while advertising, removed
 it while a PC was paired and connected, and showed it again after the disconnect. Not
 checked on hardware: the no-PIN case, the 5 minute full refresh, the Supreme PIN rows.
 
@@ -625,8 +629,8 @@ esp32s3   Heltec WiFi LoRa 32 V3, LilyGo T-Beam Supreme, T-Deck, T-Deck Plus,
 ```
 
 Board pin maps differ for the radio, display and power chips. Only the LoRa radio is
-driven (see the LoRa radio section; GPS, buttons and the battery are not). The T-Echo e-paper and
-the Supreme OLED show a status page (see the status screens paragraph in the RNode section).
+driven (see the LoRa radio section; GPS, buttons and the battery are not). The T-Echo e-paper
+and the Supreme and Heltec V3 OLEDs show a status page (see the status screens paragraph in the RNode section).
 Set the board name in menuconfig so /info reports it.
 
 ## Limits

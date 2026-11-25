@@ -1,6 +1,6 @@
-// The status screens of the T-Echo (e-paper) and the T-Beam Supreme (OLED); see
-// docs/display-status-design.md. Only the environments that set RNC_DISPLAY_OLED or
-// RNC_DISPLAY_EPAPER build any of it; everywhere else these are empty stubs. RNC_DISPLAY_NULL
+// The status screens of the T-Echo (e-paper), the T-Beam Supreme and the Heltec V3 (OLED); see
+// docs/display-status-design.md. Only the environments that set RNC_DISPLAY_OLED,
+// RNC_DISPLAY_SSD1306 or RNC_DISPLAY_EPAPER build any of it; everywhere else these are empty stubs. RNC_DISPLAY_NULL
 // builds the same code with a driver that draws nothing (a compile check on any board).
 #pragma once
 #include <stddef.h>
@@ -12,7 +12,8 @@
 #include "rnc_rnode.h"
 #include "rnc_status.h"
 
-#if defined(RNC_DISPLAY_OLED) || defined(RNC_DISPLAY_EPAPER) || defined(RNC_DISPLAY_NULL)
+#if defined(RNC_DISPLAY_OLED) || defined(RNC_DISPLAY_SSD1306) || defined(RNC_DISPLAY_EPAPER) || \
+    defined(RNC_DISPLAY_NULL)
 #define RNC_HAVE_DISPLAY 1
 
 // What the status page is built from (read only, from the display task). The pointers must stay
