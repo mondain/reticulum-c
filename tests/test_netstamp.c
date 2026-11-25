@@ -145,7 +145,11 @@ static void ext_rejects(void) {
   CHECK(rnc_netstamp_ext_parse(bad, sizeof(bad), &got) == 0);
   CHECK(rnc_netstamp_ext_parse(ext, sizeof(ext) - 1, &got) == 0); /* too short */
   CHECK(rnc_netstamp_ext_parse(NULL, 0, &got) == 0);
-  CHECK(got.app_size == 0x7777777777777777ull); /* untouched on every refusal */
+  {
+    size_t sentinel;
+    memset(&sentinel, 0x77, sizeof(sentinel));
+    CHECK(got.app_size == sentinel); /* untouched on every refusal (size_t is 32 bits on armv6/armv7) */
+  }
   memcpy(bad, ext, sizeof(ext));
   bad[1] = 0x42; /* the flags byte is reserved for the future and not checked, as in the reference */
   CHECK(rnc_netstamp_ext_parse(bad, sizeof(bad), &got) == 1);
