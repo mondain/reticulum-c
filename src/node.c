@@ -69,6 +69,10 @@ typedef struct node_interface {
       pr_sustained;
   int has_tunnel;
   uint8_t tunnel_id[32];
+  /* tunnel synthesis state of this connection */
+  int tunnel_sent, synthesis_received, plain_synthesis, has_reply_hash;
+  uint8_t sent_tunnel_id[32], reply_hash[32];
+  rnc_tunnel_peer peer;
   double dst_cost, pr_cost; /* required stamp costs; negative means the node's policy */
   uint64_t filtered_announces, filtered_requests;
 } node_interface;
@@ -522,6 +526,10 @@ rnc_result rnc_node_add_interface(rnc_node *n, uint32_t id, uint32_t bitrate) {
       n->interfaces[i].ic_active = n->interfaces[i].pr_active = 0;
       n->interfaces[i].dst_cost = n->interfaces[i].pr_cost = -1.0;
       n->interfaces[i].filtered_announces = n->interfaces[i].filtered_requests = 0;
+      n->interfaces[i].has_tunnel = 0;
+      n->interfaces[i].tunnel_sent = n->interfaces[i].synthesis_received = 0;
+      n->interfaces[i].plain_synthesis = n->interfaces[i].has_reply_hash = 0;
+      memset(&n->interfaces[i].peer, 0, sizeof(n->interfaces[i].peer));
       return RNC_OK;
     }
   return RNC_NO_SPACE;
@@ -1555,11 +1563,34 @@ static int ext_name_ok(const uint8_t *s, size_t n) {
       return 0;
   return 1;
 }
-static int tunnel_ext_valid(const uint8_t *ext, size_t size) {
+static double ext_double(const uint8_t *b, size_t size) {
+  uint64_t u = 0;
+  size_t i;
+  for (i = 0; i < size; i++)
+    u = (u << 8) | b[i];
+  if (size == 4) {
+    uint32_t u32 = (uint32_t)u;
+    float f;
+    memcpy(&f, &u32, sizeof(f));
+    return f;
+  } else {
+    double d;
+    memcpy(&d, &u, sizeof(d));
+    return d;
+  }
+}
+static void ext_text(char *out, size_t cap, const uint8_t *s, size_t n) {
+  if (n >= cap)
+    n = cap - 1;
+  memcpy(out, s, n);
+  out[n] = 0;
+}
+/* 1 when the map is acceptable; `peer` then holds what it says. */
+static int tunnel_ext_parse(const uint8_t *ext, size_t size, rnc_tunnel_peer *peer) {
   rmp r = {ext, size, 0};
   const uint8_t *b, *str;
   uint64_t entries, key, seen = 0;
-  size_t len;
+  size_t len, width;
   if (!rmp_take(&r, 1, &b))
     return 0;
   if ((*b & 0xf0) == 0x80)
@@ -1578,13 +1609,24 @@ static int tunnel_ext_valid(const uint8_t *ext, size_t size) {
         return 0;
       if (key == 0xfd ? !ext_name_ok(str, len) : (len == 0 || !isdigit(str[0])))
         return 0;
+      if (key == 0xfd)
+        ext_text(peer->implementation, sizeof(peer->implementation), str, len);
+      else
+        ext_text(peer->version, sizeof(peer->version), str, len);
     } else if (key == 0x01) {
       if (!rmp_take(&r, 1, &b) || (*b != 0xc2 && *b != 0xc3))
         return 0;
+      peer->transport = *b == 0xc3;
     } else if (key == 0xfb || key == 0xfa) {
-      if (!rmp_take(&r, 1, &b) || (*b != 0xca && *b != 0xcb) ||
-          !rmp_take(&r, *b == 0xca ? 4 : 8, NULL))
+      if (!rmp_take(&r, 1, &b) || (*b != 0xca && *b != 0xcb))
         return 0;
+      width = *b == 0xca ? 4 : 8;
+      if (!rmp_take(&r, width, &str))
+        return 0;
+      if (key == 0xfb)
+        peer->destination_cost = rnc_netstamp_quantize(ext_double(str, width));
+      else
+        peer->pr_cost = rnc_netstamp_quantize(ext_double(str, width));
     } else if (!rmp_skip_depth(&r, 0)) {
       return 0;
     }
@@ -1595,30 +1637,57 @@ static int tunnel_ext_valid(const uint8_t *ext, size_t size) {
   }
   return seen == 0x1f && r.i == r.n;
 }
+static rnc_result tunnel_send(rnc_node *n, node_interface *in, const uint8_t interface_hash[32]);
 static rnc_result tunnel_synthesized(rnc_node *n, uint32_t ingress,
-                                     const rnc_packet *p, uint64_t now) {
+                                     const rnc_packet *p, uint64_t now, uint64_t unix_seconds) {
   rnc_identity remote;
+  rnc_tunnel_peer peer;
+  node_interface *in = interface(n, ingress);
   uint8_t id[32], material[96];
+  rnc_result r;
+  if (!in)
+    return RNC_STATE;
   /* public key, interface hash, random hash, signature; since RNS 1.6 also a signed extension map */
   if ((p->flags & 3u) != RNC_DATA || p->data_size < 176 || p->data_size > 464)
     return RNC_PROTOCOL;
+  if (in->synthesis_received)
+    return RNC_PROTOCOL;
   if (rnc_identity_from_public(&remote, p->data) != RNC_OK)
     return RNC_PROTOCOL;
+  memset(&peer, 0, sizeof(peer));
   if (p->data_size > 176) {
     uint8_t signed_data[464 - 64];
     size_t ext_size = p->data_size - 176;
     memcpy(signed_data, p->data, 112);
     memcpy(signed_data + 112, p->data + 176, ext_size);
     if (rnc_identity_verify(&remote, signed_data, 112 + ext_size, p->data + 112) != RNC_OK ||
-        !tunnel_ext_valid(p->data + 176, ext_size))
+        !tunnel_ext_parse(p->data + 176, ext_size, &peer))
       return RNC_PROTOCOL;
+    peer.has_info = 1;
   } else if (rnc_identity_verify(&remote, p->data, 112, p->data + 112) != RNC_OK) {
     return RNC_PROTOCOL;
   }
   memcpy(material, p->data, 96); /* public key and interface hash */
   if (rnc_hash(material, sizeof(material), id) != RNC_OK)
     return RNC_CRYPTO;
-  return tunnel_handle(n, id, ingress, now);
+  in->synthesis_received = 1;
+  peer.has_identity = 1;
+  memcpy(peer.identity_hash, remote.hash, 16);
+  peer.has_tunnel = 1;
+  memcpy(peer.tunnel_id, in->tunnel_sent ? in->sent_tunnel_id : id, 32);
+  in->peer = peer;
+  if (rnc_node_is_blackholed(n, remote.hash, unix_seconds)) {
+    in->peer.has_tunnel = 0;
+    rnc_logf(RNC_LOG_DEBUG, "node", "tunnel synthesis from a blackholed transport node ignored");
+    return RNC_OK;
+  }
+  /* we named the tunnel on this connection: what arrives is the peer's answer */
+  if (in->tunnel_sent)
+    return RNC_OK;
+  r = tunnel_handle(n, id, ingress, now);
+  if (r == RNC_OK && peer.has_info && in->has_reply_hash && n->has_identity)
+    (void)tunnel_send(n, in, in->reply_hash);
+  return r;
 }
 static void tunnels_cull(rnc_node *n, uint64_t now) {
   size_t i, k;
@@ -1647,16 +1716,40 @@ static void tunnels_cull(rnc_node *n, uint64_t now) {
     }
   }
 }
-rnc_result rnc_node_synthesize_tunnel(rnc_node *n, uint32_t interface_id,
-                                      const uint8_t interface_hash[32],
-                                      uint64_t now) {
+static void put_double(uint8_t *out, size_t *n, double v) {
+  uint64_t u;
+  size_t i;
+  memcpy(&u, &v, sizeof(u));
+  out[(*n)++] = 0xcb;
+  for (i = 0; i < 8; i++)
+    out[(*n)++] = (uint8_t)(u >> (56 - 8 * i));
+}
+static void put_str(uint8_t *out, size_t *n, const char *s) {
+  size_t length = strlen(s); /* fixstr: both strings are our own short ones */
+  out[(*n)++] = (uint8_t)(0xa0 | length);
+  memcpy(out + *n, s, length);
+  *n += length;
+}
+/* The map of Transport.synthesize_tunnel, in the reference's key order. */
+static size_t tunnel_ext_build(const rnc_node *n, const node_interface *in, uint8_t *out) {
+  size_t k = 0;
+  out[k++] = 0x85;
+  out[k++] = 0xcc, out[k++] = 0xfd;
+  put_str(out, &k, RNC_IMPLEMENTATION_NAME);
+  out[k++] = 0xcc, out[k++] = 0xfc;
+  put_str(out, &k, RNC_VERSION_STRING);
+  out[k++] = 0x01, out[k++] = n->transport ? 0xc3 : 0xc2;
+  out[k++] = 0xcc, out[k++] = 0xfb;
+  put_double(out, &k, in->dst_cost >= 0 ? in->dst_cost : n->stamps.destination_cost);
+  out[k++] = 0xcc, out[k++] = 0xfa;
+  put_double(out, &k, in->pr_cost >= 0 ? in->pr_cost : n->stamps.pr_cost);
+  return k;
+}
+static rnc_result tunnel_send(rnc_node *n, node_interface *in, const uint8_t interface_hash[32]) {
   rnc_packet p;
-  uint8_t signature[64];
+  uint8_t signature[64], signed_data[112 + 128];
+  size_t ext_size = 0;
   rnc_result r;
-  if (!n || !interface_hash)
-    return RNC_INVALID;
-  if (!n->has_identity || !interface(n, interface_id))
-    return RNC_STATE;
   memset(&p, 0, sizeof(p));
   p.flags = (uint8_t)(RNC_PLAIN << 2); /* PLAIN DATA, header 1, broadcast */
   r = tunnel_address(p.destination);
@@ -1667,16 +1760,73 @@ rnc_result rnc_node_synthesize_tunnel(rnc_node *n, uint32_t interface_id,
   r = n->random(n->random_context, p.data + 96, 16);
   if (r != RNC_OK)
     return r;
-  r = rnc_identity_sign(&n->identity, p.data, 112, signature);
+  if (!in->plain_synthesis)
+    ext_size = tunnel_ext_build(n, in, p.data + 176);
+  memcpy(signed_data, p.data, 112);
+  memcpy(signed_data + 112, p.data + 176, ext_size);
+  r = rnc_identity_sign(&n->identity, signed_data, 112 + ext_size, signature);
   if (r != RNC_OK)
     return r;
   memcpy(p.data + 112, signature, 64);
-  p.data_size = 176;
+  p.data_size = 176 + ext_size;
   if (!room(n, 1))
     return RNC_AGAIN;
-  emit(n, RNC_NODE_SEND, interface_id, &p); /* this interface only */
-  (void)now;
+  emit(n, RNC_NODE_SEND, in->id, &p); /* this interface only */
   return RNC_OK;
+}
+rnc_result rnc_node_synthesize_tunnel(rnc_node *n, uint32_t interface_id,
+                                      const uint8_t interface_hash[32],
+                                      uint64_t now) {
+  node_interface *in;
+  uint8_t material[96], id[32];
+  rnc_result r;
+  if (!n || !interface_hash)
+    return RNC_INVALID;
+  in = n->has_identity ? interface(n, interface_id) : NULL;
+  if (!in)
+    return RNC_STATE;
+  memcpy(material, n->identity.public_key, 64);
+  memcpy(material + 64, interface_hash, 32);
+  if (rnc_hash(material, sizeof(material), id) != RNC_OK)
+    return RNC_CRYPTO;
+  r = tunnel_send(n, in, interface_hash);
+  if (r == RNC_OK) {
+    in->tunnel_sent = 1;
+    memcpy(in->sent_tunnel_id, id, 32);
+    in->peer.has_tunnel = 1;
+    memcpy(in->peer.tunnel_id, id, 32);
+  }
+  (void)now;
+  return r;
+}
+rnc_result rnc_node_set_interface_tunnel(rnc_node *n, uint32_t interface_id, const uint8_t interface_hash[32],
+                                         int extension) {
+  node_interface *in = n ? interface(n, interface_id) : NULL;
+  if (!n)
+    return RNC_INVALID;
+  if (!in)
+    return RNC_STATE;
+  in->has_reply_hash = interface_hash != NULL;
+  if (interface_hash)
+    memcpy(in->reply_hash, interface_hash, 32);
+  in->plain_synthesis = !extension;
+  return RNC_OK;
+}
+rnc_result rnc_node_interface_tunnel_peer(const rnc_node *n, uint32_t interface_id, rnc_tunnel_peer *peer) {
+  size_t i;
+  if (!n || !peer)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_INTERFACES; i++)
+    if (interface_id && n->interfaces[i].id == interface_id) {
+      *peer = n->interfaces[i].peer;
+      return RNC_OK;
+    }
+  return RNC_STATE;
+}
+int rnc_node_interface_peer_blackholed(const rnc_node *n, uint32_t interface_id, uint64_t unix_seconds) {
+  rnc_tunnel_peer peer;
+  return rnc_node_interface_tunnel_peer(n, interface_id, &peer) == RNC_OK && peer.has_identity &&
+         rnc_node_is_blackholed(n, peer.identity_hash, unix_seconds);
 }
 size_t rnc_node_tunnel_count(const rnc_node *n) {
   size_t i, c = 0;
@@ -2524,7 +2674,7 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
     if (same(address, p.destination))
       r = requested(n, ingress, &p, unix_seconds, now);
     else if (tunnel_address(address) == RNC_OK && same(address, p.destination))
-      r = tunnel_synthesized(n, ingress, &p, now);
+      r = tunnel_synthesized(n, ingress, &p, now, unix_seconds);
     else {
       for (i = 0; i < RNC_NODE_INTERFACES; i++)
         if (n->interfaces[i].id && n->interfaces[i].id != ingress &&

@@ -9,7 +9,8 @@
 #
 # Files checked: CMakeLists.txt, library.json, idf_component.yml, every
 # mcu/esp-idf/components/*/idf_component.yml, and the fallback RNC_MCU_VERSION in
-# mcu/app/rnc_mcu_app.h. Exit 0 when all agree, 1 otherwise, 2 for usage errors.
+# mcu/app/rnc_mcu_app.h, and RNC_VERSION_STRING in include/reticulum_c/rnc.h.
+# Exit 0 when all agree, 1 otherwise, 2 for usage errors.
 set -eu
 
 root=
@@ -64,6 +65,13 @@ if [ -f "$app" ]; then
   compare "$app" "$(version_of "$app" 's/^#define RNC_MCU_VERSION "\([^"]*\)".*/\1/p')"
 else
   bad "mcu/app/rnc_mcu_app.h is missing"
+fi
+
+header=$root/include/reticulum_c/rnc.h
+if [ -f "$header" ]; then
+  compare "$header" "$(version_of "$header" 's/^#define RNC_VERSION_STRING "\([^"]*\)".*/\1/p')"
+else
+  bad "include/reticulum_c/rnc.h is missing"
 fi
 
 if [ -n "$tag" ]; then

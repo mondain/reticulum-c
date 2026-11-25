@@ -118,6 +118,9 @@ typedef struct rnc_host_config {
   /* TCP: the link runs over an I2P tunnel, so dead-peer detection uses the I2P timings (reference
    * `i2p_tunneled`). Connections a listener accepts inherit it. */
   int i2p_tunneled;
+  /* TCP_CONNECT and I2P: send the tunnel synthesis without the RNS 1.6 map, for a peer running RNS 1.5,
+   * which accepts only that form (see rnc_node_set_interface_tunnel). */
+  int tunnel_plain;
   /* TCP_LISTEN and TCP_CONNECT: a Linux abstract Unix socket named "rns/<unix_name>" instead of an address
    * and port, which is how the reference's shared instance listens by default (its name is the config's
    * instance_name, "default" if unset). address and port are ignored. rnc_host_add returns RNC_UNSUPPORTED
@@ -247,6 +250,11 @@ rnc_result rnc_host_identity_load(const char *path, rnc_random_fn random,
 rnc_result rnc_host_identity_save(const char *path, const rnc_identity *identity,
                                   int public_only, int overwrite);
 rnc_host *rnc_host_new(rnc_node *node);
+/* The stamp costs an interface requires (see rnc_node_set_interface_stamp_costs; negative: the node's
+ * policy). Unlike the node call, this also covers the connections a listener accepts and re-created
+ * interfaces. RNC_STATE for an unknown interface. */
+rnc_result rnc_host_set_interface_stamp_costs(rnc_host *host, uint32_t interface_id, double destination_cost,
+                                              double pr_cost);
 /* Link requests this node sends are stamped when the destination asks (RNS 1.6). A new host installs a stamper that
  * searches the stamped key on `workers` threads (0 = one per core, at most 16) and gives up after `max_trials`
  * key trials in all (0 = 2^26, seconds on a few cores up to a cost of about 25); with `always` it also stamps for

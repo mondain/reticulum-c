@@ -241,9 +241,12 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
                                "announce_rate_penalty", "burst_activated",
                                "pr_burst_activated"};
   size_t i;
+  rnc_tunnel_peer peer;
   (void)rnc_node_interface_filtered(node, s->interface_id, &filtered);
+  if (rnc_node_interface_tunnel_peer(node, s->interface_id, &peer) != RNC_OK)
+    memset(&peer, 0, sizeof(peer));
   (void)rnc_rpc_write_map(w, 25u + 14u + sizeof(zeros) / sizeof(*zeros) +
-                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u);
+                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u + 7u);
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
   key_string(w, "type", kind_name(s));
@@ -320,6 +323,43 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
   key_bool(w, "pr_burst_active", 0);
   key_int(w, "gravity", s->gravity);
   key_bool(w, "announces_to_internal", s->announces_to_internal);
+  /* what tunnel synthesis said about the other end, under the reference's names */
+  (void)rnc_rpc_write_string(w, "tunnel_id");
+  if (peer.has_tunnel)
+    (void)rnc_rpc_write_bin(w, peer.tunnel_id, 32);
+  else
+    (void)rnc_rpc_write_nil(w);
+  (void)rnc_rpc_write_string(w, "remote_transport_id");
+  if (peer.has_identity)
+    (void)rnc_rpc_write_bin(w, peer.identity_hash, 16);
+  else
+    (void)rnc_rpc_write_nil(w);
+  if (peer.has_info) {
+    unsigned parts[8], count = 0, k;
+    const char *v = peer.version;
+    while (count < 8 && *v >= '0' && *v <= '9') { /* the reference's version_tuple */
+      char *end;
+      parts[count++] = (unsigned)strtoul(v, &end, 10);
+      v = strchr(end, '.');
+      if (!v)
+        break;
+      ++v;
+    }
+    key_string(w, "rem_impl", peer.implementation);
+    (void)rnc_rpc_write_string(w, "rem_vers");
+    (void)rnc_rpc_write_array(w, count);
+    for (k = 0; k < count; ++k)
+      (void)rnc_rpc_write_uint(w, parts[k]);
+    key_bool(w, "rem_is_tn", peer.transport);
+    key_real(w, "rem_dst_cost", peer.destination_cost);
+    key_real(w, "rem_pr_cost", peer.pr_cost);
+  } else {
+    key_nil(w, "rem_impl");
+    key_nil(w, "rem_vers");
+    key_nil(w, "rem_is_tn");
+    key_nil(w, "rem_dst_cost");
+    key_nil(w, "rem_pr_cost");
+  }
 }
 static void all_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node, const config *c,
                       const rnc_identity *id, uint64_t uptime) {

@@ -234,7 +234,7 @@ if(BUILD_TESTING)
     endforeach()
     add_executable(test_tunnel tests/test_tunnel.c)
     target_link_libraries(test_tunnel PRIVATE reticulum_c)
-    foreach(case establish reject restore newer expire persist extension extension_reject)
+    foreach(case establish reject restore newer expire persist extension extension_reject peer peer_blackholed)
         add_test(NAME reticulum_tunnel_${case} COMMAND test_tunnel ${case})
     endforeach()
 if(RNC_HAVE_OPENSSL)
@@ -589,6 +589,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-node> cp_big $<TARGET_FILE:reticulum-c-cp>)
                 set_tests_properties(reticulum_node_process_cp_big PROPERTIES LABELS network TIMEOUT 600)
             endif()
+            add_test(NAME reticulum_node_process_tunnel_peers COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> tunnel_peers $<TARGET_FILE:reticulum-c-ctl>)
+            set_tests_properties(reticulum_node_process_tunnel_peers PROPERTIES LABELS network TIMEOUT 60)
             add_test(NAME reticulum_node_process_tool_stamps COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> tool_stamps $<TARGET_FILE:reticulum-c-cp>
                 $<TARGET_FILE:reticulum-c-x> $<TARGET_FILE:reticulum-c-sh> $<TARGET_FILE:reticulum-c-ctl>)
@@ -619,6 +622,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_stamps_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 240)
+                add_test(NAME reticulum_node_process_tunnel_peers_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> tunnel_peers_ref
+                    $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_tunnel_peers_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 add_test(NAME reticulum_node_process_tool_stamps_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> tool_stamps_ref
