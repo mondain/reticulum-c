@@ -9,7 +9,7 @@
 #ifdef __linux__
 #include <sys/syscall.h>
 /* the strict POSIX feature level of node_daemon.c hides these; a worker lowers its own scheduling priority */
-extern int setpriority(int which, id_t who, int prio);
+extern int setpriority(int which, unsigned int who, int prio); /* id_t is unsigned int; musl hides the type here */
 extern long syscall(long number, ...);
 #define STAMPER_PRIO_PROCESS 0
 #endif
@@ -98,7 +98,7 @@ static void *stamper_worker_run(void *unused) {
   uint8_t stamp[RNC_NETSTAMP_SIZE];
   (void)unused;
 #ifdef __linux__
-  (void)setpriority(STAMPER_PRIO_PROCESS, (id_t)syscall(SYS_gettid), (int)stp.niceness);
+  (void)setpriority(STAMPER_PRIO_PROCESS, (unsigned int)syscall(SYS_gettid), (int)stp.niceness);
 #endif
   for (;;) {
     rnc_result r;
