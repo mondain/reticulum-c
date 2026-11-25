@@ -1,7 +1,7 @@
 /* reticulum-c-cp: file transfer compatible with the reference rncp.
  *
  *   reticulum-c-cp --connect HOST:PORT --identity FILE -l [-a HASH]... [-n]
- *                  [-s DIR] [-O] [-F [-j DIR]] [-b SECONDS]
+ *                  [-s DIR] [-O] [-F [-j DIR]] [-b SECONDS] [--stamp-value N]
  *   reticulum-c-cp --connect HOST:PORT --identity FILE FILE DESTINATION
  *   reticulum-c-cp --connect HOST:PORT --identity FILE -f REMOTE_FILE DESTINATION
  *                  [-s DIR] [-O]
@@ -15,6 +15,7 @@
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
+#include "tool_stamps.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
@@ -75,6 +76,7 @@ typedef struct options {
   int listen, fetch, no_auth, allow_fetch, overwrite, silent, no_compress, print_identity, phy_rates;
   long announce; /* seconds between announces; -1 = never */
   unsigned wait;
+  double stamp_value;
   rnc_transfer_config config;
   char saved_dir[PATH_MAX], jail_dir[PATH_MAX];
 } options;
@@ -352,6 +354,7 @@ static int open_node(rnc_identity *id, rnc_node **node, rnc_host **host) {
   *host = *node ? rnc_host_new(*node) : NULL;
   if (!*host)
     return 0;
+  tool_stamps_requests(*node, opt.stamp_value);
   memset(&hc, 0, sizeof(hc));
   hc.kind = RNC_HOST_TCP_CONNECT;
   hc.name = "rncp link";
@@ -459,12 +462,14 @@ static int listen_mode(rnc_identity *id, app *a) {
   print_hex(destination, 16);
   puts(">");
   fflush(stdout);
+  tool_stamps_listen(a->node, opt.identity, opt.stamp_value);
   while (!stopping) {
     uint64_t now = monotonic_ms();
     if (!pump(a))
-      return 1;
+      break;
+    tool_stamps_step();
     /* announce once the TCP link is up, then every -b seconds */
-    if (opt.announce >= 0 && now >= next_announce && (!announced || opt.announce > 0)) {
+    if (opt.announce >= 0 && now >= next_announce && (!announced || opt.announce > 0) && tool_stamps_ready()) {
       rnc_host_status s;
       if (rnc_host_get_status(a->host, 1, &s) == RNC_OK && s.online) {
         (void)rnc_node_announce(a->node, destination, (uint64_t)time(NULL), now);
@@ -473,7 +478,8 @@ static int listen_mode(rnc_identity *id, app *a) {
       }
     }
   }
-  return 0;
+  tool_stamps_stop();
+  return stopping ? 0 : 1;
 }
 /* Feeds what arrives while waiting for a path to the listener and client. */
 static int await_callback(void *context, const rnc_host_event *event) {
@@ -647,6 +653,7 @@ int main(int argc, char **argv) {
   opt.announce = -1;
   opt.wait = DEFAULT_PATH_WAIT;
   opt.save = ".";
+  opt.stamp_value = tool_stamp_default();
   for (i = 1; i < argc; ++i) {
     const char *arg = argv[i];
 #define VALUE (i + 1 < argc ? argv[++i] : (usage(), exit(2), (char *)NULL))
@@ -656,6 +663,10 @@ int main(int argc, char **argv) {
       opt.identity = VALUE;
     else if (!strcmp(arg, "-l") || !strcmp(arg, "--listen"))
       opt.listen = 1;
+    else if (!strcmp(arg, "--stamp-value")) {
+      if (!tool_stamp_parse(VALUE, &opt.stamp_value))
+        return usage(), 2;
+    }
     else if (!strcmp(arg, "-n") || !strcmp(arg, "--no-auth"))
       opt.no_auth = 1;
     else if (!strcmp(arg, "-F") || !strcmp(arg, "--allow-fetch"))

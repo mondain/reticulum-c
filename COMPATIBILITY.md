@@ -1255,6 +1255,14 @@ Network stamps (design: `docs/superpowers/specs/2026-11-24-network-stamps-design
 | `reticulum-c-flash --stamp` against an emulated setup console | material read, stamp found and set, saved, board restarted |
 | PlatformIO builds | the XIAO nRF52840 (309 KB of 815 KB flash) and the T-Beam Supreme build with the stamp console |
 
+Tool stamps (announces and path requests):
+
+| Check | Result |
+| --- | --- |
+| `cp`, `x`, `sh` and `ctl path` against an enforcing daemon (`reticulum_node_process_tool_stamps`) and an enforcing 1.6.1 transport node (`..._tool_stamps_rns`) | stamped announces and path requests pass; with `--stamp-value 0` the listener or the request is filtered; the saved stamp is reused |
+| Git server, helper and admin tool through the same two (`reticulum_git_roundtrip_enforcing`, `..._enforcing_rns`) | clone, push, management and permissions |
+| A 64 byte path request through an RNS 1.5.5 (`e40191b3`) transport node in gateway mode (run by hand, 2026-11-25) | forwarded to a listener that had not announced; the file transfer completed |
+
 Not covered: a link request round trip against an enforcing reference destination (unit tests only), the
 ESP-IDF example application, the browser flasher against real hardware (a simulated serial device only),
 and any over the air check of a stamped board. Reference 1.6 changes with no wire effect (SQLite storage,

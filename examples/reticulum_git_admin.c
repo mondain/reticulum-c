@@ -27,6 +27,7 @@
  * (releases with -s instead, if given). Permission texts are lines such as
  * `r:HASH`, `w:all`, `rel:none`, `adm:HASH`. */
 #include "rngit_common.h"
+#include "tool_stamp_value.h"
 #include <dirent.h>
 #include <fnmatch.h>
 #include <openssl/evp.h>
@@ -173,6 +174,7 @@ static void connect_node(const url *u, const char *connect_arg) {
   snprintf(path, sizeof(path), "%s/client_identity", config_dir);
   if (!rngit_open_node(&C->net, connect, path, "rngit admin link"))
     exit(1);
+  tool_stamps_requests(C->net.node, tool_stamp_default()); /* RNC_STAMP_VALUE=0 turns it off */
   C->net.requester = rnc_requester_new(C->net.node, C->max_value, rngit_random, NULL);
   if (!C->net.requester)
     fatal("Could not set up the request client");

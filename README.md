@@ -108,9 +108,18 @@ checks the stamps on announces, path requests and link requests, searches stamps
 its own destinations on background threads (saved beside the state file), and stamps
 the path requests and link requests it sends. Nothing is enforced unless the
 `[stamps]` section says `enforce_stamps = Yes`; `--exampleconfig` lists every option.
-The tools (`reticulum-c-cp`, `-x`, `-sh`, `-git`, `-ctl`) stamp the link requests they send but do not
-stamp their own announces or path requests, so against a daemon or network that enforces stamps they are
-filtered; point them at a daemon that does not enforce.
+The tools stamp too, with the reference's values, so they work on a network that enforces:
+
+- **Announces.** A listener (`reticulum-c-cp -l`, `-x -l`, `-sh -l`, `reticulum-c-git`) searches a stamp of
+  value 25 on one thread per core and announces once it has it: seconds on a desktop, longer on a small
+  board. It is saved in `<identity file>.stamps`, so later runs start at once.
+- **Path requests.** `cp`, `x`, `sh`, the git tools and `ctl` stamp them at 15.8, which takes milliseconds.
+- **Settings.** `--stamp-value N` (`cp`, `x`, `sh`, `git`, `ctl`) or the environment's `RNC_STAMP_VALUE`
+  (also read by `git-remote` and `git-admin`) sets the announce value. 0 turns the tool's announce and path
+  request stamping off. Link request stamps are separate and unaffected.
+
+A stamped path request uses the 64 byte form of RNS 1.6; an RNS 1.5.5 transport node forwards it. A
+stamped announce carries 18 more bytes of app data, which software older than 1.6 does not strip.
 
 ## Tools
 

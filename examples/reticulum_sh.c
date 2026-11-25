@@ -17,6 +17,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #include "msgpack_tree.h"
+#include "tool_stamps.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -112,7 +113,7 @@ typedef struct options {
   const char *connect, *identity;
   int listen, no_remote_command, remote_args, mirror, no_id, no_tty, print_identity;
   long announce; /* -1 = never */
-  double timeout;
+  double timeout, stamp_value;
   uint8_t allowed[32][16];
   size_t allowed_count;
   char **command; /* after -- */
@@ -146,6 +147,7 @@ static int open_node(rnc_identity *id, app *a) {
   a->host = a->node ? rnc_host_new(a->node) : NULL;
   if (!a->host)
     return 0;
+  tool_stamps_requests(a->node, opt.stamp_value);
   memset(&hc, 0, sizeof(hc));
   hc.kind = RNC_HOST_TCP_CONNECT;
   hc.name = "rnsh link";
@@ -772,11 +774,13 @@ static int listen_mode(rnc_identity *id, app *a) {
   print_hex(destination, 16);
   puts(">");
   fflush(stdout);
+  tool_stamps_listen(a->node, opt.identity, opt.stamp_value);
   while (!stopping) {
     rnc_host_event event;
     uint64_t unix_now, now;
     if (!pump_host(a, 1, &unix_now))
-      return 1;
+      break;
+    tool_stamps_step();
     now = monotonic_ms();
     while (rnc_host_poll(a->host, &event) == RNC_OK) {
       const rnc_packet *p;
@@ -793,7 +797,7 @@ static int listen_mode(rnc_identity *id, app *a) {
           (void)rnc_link_input(sessions[i].link, p, now);
     }
     listener_tick(a, unix_now, now);
-    if (opt.announce >= 0 && now >= next_announce && (!announced || opt.announce > 0)) {
+    if (opt.announce >= 0 && now >= next_announce && (!announced || opt.announce > 0) && tool_stamps_ready()) {
       rnc_host_status st;
       if (rnc_host_get_status(a->host, 1, &st) == RNC_OK && st.online) {
         (void)rnc_node_announce(a->node, destination, unix_now, now);
@@ -804,7 +808,8 @@ static int listen_mode(rnc_identity *id, app *a) {
   }
   for (i = 0; i < SESSIONS; i++)
     session_release(a, &sessions[i]);
-  return 0;
+  tool_stamps_stop();
+  return stopping ? 0 : 1;
 }
 
 /* ---- initiator ---------------------------------------------------------- */
@@ -1134,7 +1139,7 @@ static int run_initiator(rnc_identity *id, app *a, const uint8_t destination[16]
 }
 
 static void usage(void) {
-  fputs("usage: reticulum-c-sh --connect HOST:PORT --identity FILE -l -a IDENTITY_HASH... [-b SECONDS] [-C | -A] [-- PROGRAM [ARGS...]]\n"
+  fputs("usage: reticulum-c-sh --connect HOST:PORT --identity FILE -l -a IDENTITY_HASH... [-b SECONDS] [--stamp-value N] [-C | -A] [-- PROGRAM [ARGS...]]\n"
         "       reticulum-c-sh --connect HOST:PORT --identity FILE [-m] [-N] [-w SECONDS] DESTINATION [-- COMMAND [ARGS...]]\n",
         stderr);
 }
@@ -1147,6 +1152,7 @@ int main(int argc, char **argv) {
   int rc;
   opt.announce = -1;
   opt.timeout = 15.0;
+  opt.stamp_value = tool_stamp_default();
   for (i = 1; i < argc; ++i) {
     const char *arg = argv[i];
 #define VALUE (i + 1 < argc ? argv[++i] : (usage(), exit(2), (char *)NULL))
@@ -1160,6 +1166,10 @@ int main(int argc, char **argv) {
       opt.identity = VALUE;
     else if (!strcmp(arg, "-l") || !strcmp(arg, "--listen"))
       opt.listen = 1;
+    else if (!strcmp(arg, "--stamp-value")) {
+      if (!tool_stamp_parse(VALUE, &opt.stamp_value))
+        return usage(), 2;
+    }
     else if (!strcmp(arg, "-C") || !strcmp(arg, "--no-remote-command"))
       opt.no_remote_command = 1;
     else if (!strcmp(arg, "-A") || !strcmp(arg, "--remote-command-as-args"))

@@ -20,6 +20,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #include "msgpack_tree.h"
+#include "tool_stamps.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -408,6 +409,7 @@ typedef struct options {
   const char *connect, *identity, *stdin_text;
   int listen, no_announce, mirror, detailed, no_id, print_identity, interactive;
   double timeout, result_timeout; /* result_timeout 0 = none given (-W) */
+  double stamp_value;
   long stdout_limit, stderr_limit; /* -1 = none */
   uint8_t allowed[8][16];
   size_t allowed_count;
@@ -442,6 +444,7 @@ static int open_node(rnc_identity *id, app *a) {
   a->host = a->node ? rnc_host_new(a->node) : NULL;
   if (!a->host)
     return 0;
+  tool_stamps_requests(a->node, opt.stamp_value);
   memset(&hc, 0, sizeof(hc));
   hc.kind = RNC_HOST_TCP_CONNECT;
   hc.name = "rnx link";
@@ -531,10 +534,12 @@ static int listen_mode(rnc_identity *id, app *a) {
   print_hex(destination, 16);
   puts(">");
   fflush(stdout);
+  tool_stamps_listen(a->node, opt.identity, opt.stamp_value);
   while (!stopping) {
     if (!pump(a))
-      return 1;
-    if (!announced) {
+      break;
+    tool_stamps_step();
+    if (!announced && tool_stamps_ready()) {
       rnc_host_status s;
       if (rnc_host_get_status(a->host, 1, &s) == RNC_OK && s.online) {
         (void)rnc_node_announce(a->node, destination, (uint64_t)time(NULL),
@@ -543,7 +548,8 @@ static int listen_mode(rnc_identity *id, app *a) {
       }
     }
   }
-  return 0;
+  tool_stamps_stop();
+  return stopping ? 0 : 1;
 }
 
 /* ---- client -------------------------------------------------------------- */
@@ -759,7 +765,7 @@ static int run_interactive(rnc_identity *id, app *a, const uint8_t destination[1
   return 0;
 }
 static void usage(void) {
-  fputs("usage: reticulum-c-x --connect HOST:PORT --identity FILE -l -a IDENTITY_HASH... [-b]\n"
+  fputs("usage: reticulum-c-x --connect HOST:PORT --identity FILE -l -a IDENTITY_HASH... [-b] [--stamp-value N]\n"
         "       reticulum-c-x --connect HOST:PORT --identity FILE [-w SECONDS] [-m] [-d] [-N]\n"
         "                     [--stdin TEXT] [--stdout BYTES] [--stderr BYTES] DESTINATION COMMAND\n",
         stderr);
@@ -782,6 +788,7 @@ int main(int argc, char **argv) {
   int rc;
   opt.timeout = DEFAULT_TIMEOUT;
   opt.stdout_limit = opt.stderr_limit = -1;
+  opt.stamp_value = tool_stamp_default();
   for (i = 1; i < argc; ++i) {
     const char *arg = argv[i];
 #define VALUE (i + 1 < argc ? argv[++i] : (usage(), exit(EXIT_USAGE), (char *)NULL))
@@ -791,6 +798,10 @@ int main(int argc, char **argv) {
       opt.identity = VALUE;
     else if (!strcmp(arg, "-l") || !strcmp(arg, "--listen"))
       opt.listen = 1;
+    else if (!strcmp(arg, "--stamp-value")) {
+      if (!tool_stamp_parse(VALUE, &opt.stamp_value))
+        return usage(), EXIT_USAGE;
+    }
     else if (!strcmp(arg, "-b") || !strcmp(arg, "--no-announce"))
       opt.no_announce = 1;
     else if (!strcmp(arg, "-m"))

@@ -427,6 +427,10 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                 add_test(NAME reticulum_git_roundtrip COMMAND ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_roundtrip.sh c_client
                     $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git> $<TARGET_FILE:reticulum-c-git-remote>)
                 set_tests_properties(reticulum_git_roundtrip PROPERTIES LABELS network TIMEOUT 240)
+                add_test(NAME reticulum_git_roundtrip_enforcing COMMAND ${CMAKE_COMMAND} -E env
+                    RNC_GIT_ENFORCE=1 RNC_STAMP_VALUE=10 ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_roundtrip.sh c_client
+                    $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git> $<TARGET_FILE:reticulum-c-git-remote>)
+                set_tests_properties(reticulum_git_roundtrip_enforcing PROPERTIES LABELS network TIMEOUT 240)
                 add_test(NAME reticulum_git_manage COMMAND ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_manage.sh c_client
                     $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git> $<TARGET_FILE:reticulum-c-git-remote>)
                 set_tests_properties(reticulum_git_manage PROPERTIES LABELS network TIMEOUT 300)
@@ -445,6 +449,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                             ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
                         set_tests_properties(reticulum_git_manage_${mode} PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 400)
                     endforeach()
+                    add_test(NAME reticulum_git_roundtrip_enforcing_rns COMMAND ${CMAKE_COMMAND} -E env
+                        "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}" RNC_GIT_ENFORCE=ref RNC_STAMP_VALUE=10
+                        ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_roundtrip.sh c_client
+                        $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-git> $<TARGET_FILE:reticulum-c-git-remote>
+                        ${Python3_EXECUTABLE} ${RNC_REFERENCE_DIR})
+                    set_tests_properties(reticulum_git_roundtrip_enforcing_rns PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 300)
                     add_test(NAME reticulum_git_pages_diff COMMAND ${CMAKE_COMMAND} -E env
                         "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                         ${RNC_BASH} ${CMAKE_SOURCE_DIR}/tests/git_pages.sh
@@ -579,6 +589,10 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-node> cp_big $<TARGET_FILE:reticulum-c-cp>)
                 set_tests_properties(reticulum_node_process_cp_big PROPERTIES LABELS network TIMEOUT 600)
             endif()
+            add_test(NAME reticulum_node_process_tool_stamps COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> tool_stamps $<TARGET_FILE:reticulum-c-cp>
+                $<TARGET_FILE:reticulum-c-x> $<TARGET_FILE:reticulum-c-sh> $<TARGET_FILE:reticulum-c-ctl>)
+            set_tests_properties(reticulum_node_process_tool_stamps PROPERTIES LABELS network TIMEOUT 120)
             add_test(NAME reticulum_node_process_cli_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cli_tools $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
@@ -605,6 +619,13 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_stamps_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 240)
+                add_test(NAME reticulum_node_process_tool_stamps_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> tool_stamps_ref
+                    $<TARGET_FILE:reticulum-c-cp> $<TARGET_FILE:reticulum-c-x> $<TARGET_FILE:reticulum-c-sh>
+                    $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_tool_stamps_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
                 add_test(NAME reticulum_node_process_stamps_enforcing_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> stamps_enforcing_ref
@@ -843,6 +864,15 @@ if(BUILD_TESTING AND RNC_TOP_LEVEL AND UNIX AND RNC_HAVE_OPENSSL AND RNC_PROFILE
                 ENVIRONMENT "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                 LABELS "mcu;reticulum_interop;network;pty" TIMEOUT 600)
         endif()
+    endif()
+endif()
+
+# The listening tools stamp their announces at value 25 by default; the tests that run them use a cheap value
+# (a test that wants another passes --stamp-value or sets the variable on its own command line).
+if(BUILD_TESTING AND RNC_TOP_LEVEL)
+    get_property(RNC_ALL_TESTS DIRECTORY PROPERTY TESTS)
+    if(RNC_ALL_TESTS)
+        set_property(TEST ${RNC_ALL_TESTS} APPEND PROPERTY ENVIRONMENT "RNC_STAMP_VALUE=8")
     endif()
 endif()
 

@@ -2226,6 +2226,17 @@ static void log_apply(const config *c) {
 }
 #include "node_rpc.h"
 #include "node_stamper.h"
+static void stamper_start(const config *c, rnc_node *node, const char *state) {
+  stamper_options o;
+  o.stamp_destinations = c->stamp_destinations;
+  o.stamp_prs = c->stamp_prs;
+  o.destination_value = c->destination_value;
+  o.pr_value = c->pr_value;
+  o.pr_stamp_timeout = c->pr_stamp_timeout;
+  o.workers = c->max_workers;
+  o.niceness = c->worker_niceness;
+  stamper_start_options(&o, node, state);
+}
 #include "node_mgmt.h"
 #include "node_discovery.h"
 

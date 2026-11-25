@@ -23,6 +23,7 @@
 #include "msgpack_tree.h"
 #include "rnid_b256.h"
 #include "rsg_meta.h"
+#include "tool_stamp_value.h"
 #include <reticulum_c/rnc.h>
 #include <reticulum_c/rnc_host.h>
 #include <reticulum_c/rnc_ipc.h>
@@ -342,6 +343,7 @@ static void reply_free(reply *r) {
   free(r->data);
   free(r->pool);
 }
+static double stamp_value; /* --stamp-value, else RNC_STAMP_VALUE, else 25; set in main */
 /* ---- remote management (-R) --------------------------------------------
  * rnstatus -R and rnpath -R talk to another transport instance's management destination,
  * "rnstransport.remote.management", whose hash comes from that instance's identity hash. The
@@ -402,6 +404,8 @@ static int remote_call(const char *path, const uint8_t *request, size_t request_
   have_id = 1;
   node = rnc_node_new(&id, 0, remote_random, NULL);
   host = node ? rnc_host_new(node) : NULL;
+  if (node)
+    tool_stamps_requests(node, stamp_value);
   memset(&hc, 0, sizeof(hc));
   hc.kind = RNC_HOST_TCP_CONNECT;
   hc.name = "ctl remote";
@@ -674,6 +678,11 @@ static int make_target(conn *c, target *t) {
 /* shared option handling; returns 1 if argv[*i] was consumed */
 static int conn_option(conn *c, int argc, char **argv, int *i) {
   const char *a = argv[*i];
+  if (!strcmp(a, "--stamp-value")) { /* 0: do not stamp path requests */
+    if (*i + 1 >= argc || !tool_stamp_parse(argv[++*i], &stamp_value))
+      return -1;
+    return 1;
+  }
   if (!strcmp(a, "-R") || !strcmp(a, "--attach") || !strcmp(a, "--mgmt-identity") || !strcmp(a, "-w")) {
     if (*i + 1 >= argc)
       return -1;
@@ -1125,8 +1134,18 @@ static int send_packet(const target *t, const rnc_packet *packet) {
 static int send_path_request(const target *t, const uint8_t hash[16]) {
   uint8_t tag[16];
   rnc_packet packet;
-  return RAND_bytes(tag, sizeof(tag)) == 1 && rnc_path_request_create(hash, NULL, tag, sizeof(tag), &packet) == RNC_OK &&
-         send_packet(t, &packet);
+  if (RAND_bytes(tag, sizeof(tag)) != 1)
+    return 0;
+  if (stamp_value > 0) { /* the 1.6 form; the transport id only has to name us as the asker */
+    uint8_t material[32], stamp[RNC_NETSTAMP_SIZE], asker[16];
+    memcpy(material, hash, 16);
+    memcpy(material + 16, tag, 16);
+    if (RAND_bytes(asker, sizeof(asker)) != 1 || !pr_stamp_default_provider(NULL, material, stamp) ||
+        rnc_path_request_create_stamped(hash, asker, tag, sizeof(tag), stamp, &packet) != RNC_OK)
+      return 0;
+  } else if (rnc_path_request_create(hash, NULL, tag, sizeof(tag), &packet) != RNC_OK)
+    return 0;
+  return send_packet(t, &packet);
 }
 /* The path table entry for `hash`, or no pool at all; the reply stays alive until reply_free */
 static const val *find_path(const reply *r, const uint8_t hash[16]) {
@@ -2935,12 +2954,13 @@ static int cmd_id(int argc, char **argv) {
 
 static void usage(void) {
   fputs("usage: reticulum-c-ctl status [-j] [--port N] (--identity FILE | --rpc-key HEX | --config FILE)\n"
-        "       reticulum-c-ctl path [-t] [-m HOPS] [-j] [HASH] [-b] [-B HASH [--duration HOURS] [--reason TEXT]] [-U HASH] [connection options]\n"
+        "       reticulum-c-ctl path [-t] [-m HOPS] [-j] [HASH] [-b] [-B HASH [--duration HOURS] [--reason TEXT]] [-U HASH] [--stamp-value N] [connection options]\n"
         "       reticulum-c-ctl id (-g FILE | -i FILE [-p] [-P] [-x] [-X] [-H ASPECTS]\n"
         "                          [-s FILE --raw] [-V SIG -r FILE --raw] [-e FILE] [-d FILE] [-w OUT] [-f])\n",
         stderr);
 }
 int main(int argc, char **argv) {
+  stamp_value = tool_stamp_default();
   if (argc < 2) {
     usage();
     return RC_INVALID_ARGS;

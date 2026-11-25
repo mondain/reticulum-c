@@ -1,10 +1,21 @@
-/* Destination stamps for the node daemon (RNS 1.6). Every local SINGLE destination gets a stamp over its
- * public data (destination hash, public key, name hash) at [stamps] destination_value. The search is plain
- * hashing and runs on worker threads (max_workers, at worker_niceness) in slices, so shutdown and reloads
- * never wait on it; the main loop collects a finished stamp, hands it to the node and saves it beside the
- * state file (<state>.stamps) so a restart does not search again. The node itself never waits for a stamp:
- * until one is loaded the destination's announces and path responses go out unstamped. Included by
- * node_daemon.c. */
+/* Destination stamps (RNS 1.6), for the node daemon and the command line tools (tool_stamps.h). Every local
+ * SINGLE destination gets a stamp over its public data (destination hash, public key, name hash). The search is
+ * plain hashing and runs on worker threads in slices, so shutdown and reloads never wait on it; the caller's
+ * main loop collects a finished stamp with stamper_step, which hands it to the node and saves it in
+ * <state>.stamps so a restart does not search again. The node itself never waits for a stamp: until one is
+ * loaded the destination's announces and path responses go out unstamped. */
+#ifndef RNC_EXAMPLES_NODE_STAMPER_H
+#define RNC_EXAMPLES_NODE_STAMPER_H
+#include "pr_stamp.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <reticulum_c/rnc.h>
+#include <reticulum_c/rnc_log.h>
 #include <pthread.h>
 #ifdef __linux__
 #include <sys/syscall.h>
@@ -19,6 +30,11 @@ extern long syscall(long number, ...);
 typedef struct stamper_entry {
   uint8_t destination[16], stamp[RNC_NETSTAMP_SIZE];
 } stamper_entry;
+typedef struct stamper_options {
+  int stamp_destinations, stamp_prs;
+  double destination_value, pr_value, pr_stamp_timeout;
+  unsigned workers, niceness; /* workers 0: one per core */
+} stamper_options;
 static struct stamper {
   int enabled, searching, found, cancel;
   rnc_node *node;
@@ -28,8 +44,11 @@ static struct stamper {
   pthread_t threads[STAMPER_MAX_WORKERS];
   pthread_mutex_t lock;
   uint8_t job_destination[16], job_material[90], job_stamp[RNC_NETSTAMP_SIZE];
-  stamper_entry done[STAMPER_MAX_DESTINATIONS];
+  stamper_entry done[STAMPER_MAX_DESTINATIONS]; /* loaded into the node */
   size_t done_count;
+  stamper_entry kept[STAMPER_MAX_DESTINATIONS]; /* saved ones not in use: another program sharing the file, or a
+                                                   destination not registered yet; written back on save */
+  size_t kept_count;
   uint8_t gave_up[STAMPER_MAX_DESTINATIONS][16]; /* destinations whose search failed; not retried in this run */
   size_t gave_up_count;
 } stp;
@@ -43,26 +62,68 @@ static int stamper_has(const uint8_t destination[16]) {
       return 1;
   return 0;
 }
+static int stamper_write(const char *path, const uint8_t *data, size_t size) {
+  char temp[1200];
+  size_t used = 0;
+  int fd, ok = 0;
+  if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", path) >= (int)sizeof(temp))
+    return 0;
+  fd = mkstemp(temp);
+  if (fd < 0)
+    return 0;
+  if (fchmod(fd, 0600) == 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0) {
+    while (used < size) {
+      ssize_t n = write(fd, data + used, size - used);
+      if (n < 0 && errno == EINTR)
+        continue;
+      if (n <= 0)
+        break;
+      used += (size_t)n;
+    }
+    ok = used == size && fsync(fd) == 0;
+  }
+  ok = close(fd) == 0 && ok && rename(temp, path) == 0;
+  if (!ok)
+    (void)unlink(temp);
+  return ok;
+}
 static void stamper_save(void) {
   uint8_t data[8 + STAMPER_MAX_DESTINATIONS * sizeof(stamper_entry) + 32];
-  size_t n = 0, i;
+  size_t n = 6, i, count = 0;
   if (!stp.path[0])
     return;
   memcpy(data, "RNST", 4);
   data[4] = 1;
-  data[5] = (uint8_t)stp.done_count;
-  n = 6;
-  for (i = 0; i < stp.done_count; ++i) {
-    memcpy(data + n, stp.done[i].destination, 16);
-    memcpy(data + n + 16, stp.done[i].stamp, RNC_NETSTAMP_SIZE);
+  for (i = 0; i < stp.done_count + stp.kept_count && count < STAMPER_MAX_DESTINATIONS; ++i, ++count) {
+    const stamper_entry *e = i < stp.done_count ? &stp.done[i] : &stp.kept[i - stp.done_count];
+    memcpy(data + n, e->destination, 16);
+    memcpy(data + n + 16, e->stamp, RNC_NETSTAMP_SIZE);
     n += sizeof(stamper_entry);
   }
+  data[5] = (uint8_t)count;
   if (rnc_hash(data, n, data + n) != RNC_OK)
     return;
-  if (!write_file_atomic(stp.path, data, n + 32))
+  if (!stamper_write(stp.path, data, n + 32))
     rnc_logf(RNC_LOG_WARNING, "stamps", "cannot save %s", stp.path);
 }
-/* Stamps found by an earlier run; one that no longer verifies (another identity, another value) is ignored. */
+/* Gives the node the saved stamp of `destination`, if there is one and it still verifies. */
+static int stamper_apply_kept(const uint8_t destination[16]) {
+  size_t i;
+  for (i = 0; i < stp.kept_count; ++i)
+    if (!memcmp(stp.kept[i].destination, destination, 16)) {
+      rnc_result r = rnc_node_set_destination_stamp(stp.node, destination, stp.kept[i].stamp);
+      if (r == RNC_STATE)
+        return 0;
+      if (r == RNC_OK && stp.done_count < STAMPER_MAX_DESTINATIONS) {
+        stp.done[stp.done_count++] = stp.kept[i];
+        rnc_logf(RNC_LOG_VERBOSE, "stamps", "stamp loaded from %s", stp.path);
+      }
+      stp.kept[i] = stp.kept[--stp.kept_count]; /* in use now, or no longer good (another value or identity) */
+      return r == RNC_OK;
+    }
+  return 0;
+}
+/* Stamps found by an earlier run; each is applied once its destination is registered. */
 static void stamper_load(void) {
   uint8_t data[8 + STAMPER_MAX_DESTINATIONS * sizeof(stamper_entry) + 32], digest[32];
   FILE *f;
@@ -74,16 +135,11 @@ static void stamper_load(void) {
   if (got < 38 || memcmp(data, "RNST", 4) || data[4] != 1)
     return;
   count = data[5];
-  if (got != 6 + count * sizeof(stamper_entry) + 32 || rnc_hash(data, got - 32, digest) != RNC_OK ||
-      memcmp(digest, data + got - 32, 32))
+  if (count > STAMPER_MAX_DESTINATIONS || got != 6 + count * sizeof(stamper_entry) + 32 ||
+      rnc_hash(data, got - 32, digest) != RNC_OK || memcmp(digest, data + got - 32, 32))
     return;
-  for (i = 0; i < count && stp.done_count < STAMPER_MAX_DESTINATIONS; ++i) {
-    const uint8_t *e = data + 6 + i * sizeof(stamper_entry);
-    if (rnc_node_set_destination_stamp(stp.node, e, e + 16) == RNC_OK) {
-      memcpy(&stp.done[stp.done_count++], e, sizeof(stamper_entry));
-      rnc_logf(RNC_LOG_VERBOSE, "stamps", "stamp loaded from %s", stp.path);
-    }
-  }
+  for (i = 0; i < count; ++i)
+    memcpy(&stp.kept[stp.kept_count++], data + 6 + i * sizeof(stamper_entry), sizeof(stamper_entry));
 }
 static void *stamper_worker_run(void *unused);
 static void *stamper_worker(void *unused) {
@@ -98,7 +154,8 @@ static void *stamper_worker_run(void *unused) {
   uint8_t stamp[RNC_NETSTAMP_SIZE];
   (void)unused;
 #ifdef __linux__
-  (void)setpriority(STAMPER_PRIO_PROCESS, (unsigned int)syscall(SYS_gettid), (int)stp.niceness);
+  if (stp.niceness)
+    (void)setpriority(STAMPER_PRIO_PROCESS, (unsigned int)syscall(SYS_gettid), (int)stp.niceness);
 #endif
   for (;;) {
     rnc_result r;
@@ -108,7 +165,7 @@ static void *stamper_worker_run(void *unused) {
     pthread_mutex_unlock(&stp.lock);
     if (stop)
       return NULL;
-    r = rnc_netstamp_find(stp.job_material, sizeof(stp.job_material), stp.value, secure_random, NULL, STAMPER_SLICE,
+    r = rnc_netstamp_find(stp.job_material, sizeof(stp.job_material), stp.value, stamp_random, NULL, STAMPER_SLICE,
                           stamp, NULL);
     if (r == RNC_OK) {
       pthread_mutex_lock(&stp.lock);
@@ -157,35 +214,27 @@ static void stamper_begin(const uint8_t destination[16]) {
 /* Path requests are stamped inline: at pr_value (15.8 by default) the search takes milliseconds. The slice
  * loop gives up at pr_stamp_timeout, and the request is cancelled then. */
 static int stamper_pr_provider(void *context, const uint8_t material[32], uint8_t stamp[RNC_NETSTAMP_SIZE]) {
-  uint64_t deadline = monotonic_ms() + (uint64_t)(stp.pr_timeout * 1000.0);
   (void)context;
-  do {
-    rnc_result r = rnc_netstamp_find(material, 32, stp.pr_value, secure_random, NULL, 1u << 14, stamp, NULL);
-    if (r == RNC_OK)
-      return 1;
-    if (r != RNC_TIMEOUT)
-      return 0;
-  } while (monotonic_ms() < deadline);
-  return 0;
+  return pr_stamp_search(material, stp.pr_value, stp.pr_timeout, stamp);
 }
-static void stamper_start(const config *c, rnc_node *node, const char *state) {
+static void stamper_start_options(const stamper_options *o, rnc_node *node, const char *state) {
   long cores;
   memset(&stp, 0, sizeof(stp));
   pthread_mutex_init(&stp.lock, NULL);
   stp.node = node;
-  stp.pr_value = c->pr_value;
-  stp.pr_timeout = c->pr_stamp_timeout;
-  if (c->stamp_prs)
+  stp.pr_value = o->pr_value;
+  stp.pr_timeout = o->pr_stamp_timeout;
+  if (o->stamp_prs)
     (void)rnc_node_set_stamp_provider(node, stamper_pr_provider, NULL);
 
-  stp.enabled = c->stamp_destinations;
-  stp.value = c->destination_value;
-  stp.niceness = c->worker_niceness;
+  stp.enabled = o->stamp_destinations;
+  stp.value = o->destination_value;
+  stp.niceness = o->niceness;
   cores = sysconf(_SC_NPROCESSORS_ONLN);
-  stp.workers = c->max_workers ? c->max_workers : (cores > 0 ? (unsigned)cores : 1u);
+  stp.workers = o->workers ? o->workers : (cores > 0 ? (unsigned)cores : 1u);
   if (stp.workers > STAMPER_MAX_WORKERS)
     stp.workers = STAMPER_MAX_WORKERS;
-  (void)rnc_node_set_stamp_emission(node, 0, c->destination_value);
+  (void)rnc_node_set_stamp_emission(node, 0, o->destination_value);
   if (!stp.enabled)
     return;
   if (state && snprintf(stp.path, sizeof(stp.path), "%s.stamps", state) >= (int)sizeof(stp.path))
@@ -232,9 +281,10 @@ static void stamper_step(void) {
     }
   }
   for (i = 0; rnc_node_destination_at(stp.node, i, destination) == RNC_OK; ++i)
-    if (!stamper_has(destination)) {
+    if (!stamper_has(destination) && !stamper_apply_kept(destination)) {
       stamper_begin(destination);
       if (stp.searching)
         return;
     }
 }
+#endif
