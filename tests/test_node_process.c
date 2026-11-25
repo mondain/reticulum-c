@@ -2297,7 +2297,13 @@ static void echo_reference(const char *exe, const char *echo, const char *refere
   int dfd;
   live_proc ref;
   const char *at;
+  char announcer[4096];
   CHECK(mkdtemp(base));
+  { /* the reference peers announce: with cheap stamps, as set_announcer_path gives them */
+    const char *old = getenv("PYTHONPATH");
+    CHECK(snprintf(announcer, sizeof(announcer), "%s%s%s", reference, old && *old ? ":" : "", old ? old : "") <
+          (int)sizeof(announcer));
+  }
   CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0);
   CHECK(snprintf(key, sizeof(key), "%s/daemon_id", base) > 0);
   CHECK(snprintf(admin, sizeof(admin), "%s/admin", base) > 0);
@@ -2316,7 +2322,7 @@ static void echo_reference(const char *exe, const char *echo, const char *refere
     char *argv[] = {(char *)python, script, "-s", "--config", dir, NULL};
     char *client[] = {(char *)echo, "--connect", connect, "--identity", id_file, "--count", "3", "client", hash, NULL};
     live_peer_config(dir, sizeof(dir), base, "refserver", port);
-    live_spawn_argv(&ref, reference, argv);
+    live_spawn_argv(&ref, announcer, argv);
     CHECK(live_find(&ref, "Echo server <", 30000, line, sizeof(line)));
     at = strstr(line, "Echo server <");
     CHECK(sscanf(at, "Echo server <%32[0-9a-f]>", hash) == 1);
@@ -2343,7 +2349,7 @@ static void echo_reference(const char *exe, const char *echo, const char *refere
       uint64_t end = now_ms() + 40000;
       int replied = 0;
       live_peer_config(dir, sizeof(dir), base, "refclient", port);
-      live_spawn_argv(&ref, reference, argv);
+      live_spawn_argv(&ref, announcer, argv);
       live_sleep(4000);
       while (now_ms() < end && !replied) {
         live_send(&ref, "\n"); /* Enter: request the path, then send once it is known */
@@ -4165,7 +4171,7 @@ static void tunnel_reference(const char *exe, const char *reference,
       close(fds[0]);
       CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
       close(fds[1]);
-      CHECK(!setenv("PYTHONPATH", reference, 1));
+      CHECK(!set_announcer_path(reference));
       execl(python, python, "-c", reference_tunnel_peer, rdir, "announce", "40",
             (char *)NULL);
       _exit(127);
@@ -4224,7 +4230,7 @@ static void tunnel_reference(const char *exe, const char *reference,
         (void)dup2(devnull, STDOUT_FILENO);
         (void)dup2(devnull, STDERR_FILENO);
       }
-      CHECK(!setenv("PYTHONPATH", reference, 1));
+      CHECK(!set_announcer_path(reference));
       execl(python, python, "-c", reference_tunnel_peer, rdir, "idle", "40",
             (char *)NULL);
       _exit(127);
