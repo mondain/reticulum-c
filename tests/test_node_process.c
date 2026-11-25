@@ -297,6 +297,16 @@ static unsigned unused_port(void) {
   close(fd);
   return port;
 }
+/* The PYTHONPATH of an oracle process that announces: the reference checkout first, then what the test environment
+ * already carries, which is where tests/oracle_env comes from (cheap stamps for the oracle, see its sitecustomize.py).
+ * Processes whose stamps matter to the daemon (it validates them against its required cost) keep the plain path. */
+static int set_announcer_path(const char *reference) {
+  const char *old = getenv("PYTHONPATH");
+  char path[4096];
+  if (snprintf(path, sizeof(path), "%s%s%s", reference, old && *old ? ":" : "", old ? old : "") >= (int)sizeof(path))
+    return -1;
+  return setenv("PYTHONPATH", path, 1);
+}
 static int tcp_connect(unsigned port) {
   struct sockaddr_in addr;
   int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -2580,7 +2590,7 @@ static pid_t start_reference(const char *python, const char *reference,
     close(fds[0]);
     CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
     close(fds[1]);
-    CHECK(!setenv("PYTHONPATH", reference, 1));
+    CHECK(!set_announcer_path(reference));
     execl(python, python, "-c", reference_peer, dir, limit, (char *)NULL);
     _exit(127);
   }
@@ -2864,7 +2874,7 @@ static void blackhole_source_reference(const char *exe, const char *reference,
       CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 &&
             dup2(fds[1], STDERR_FILENO) >= 0);
       close(fds[1]);
-      CHECK(!setenv("PYTHONPATH", reference, 1));
+      CHECK(!set_announcer_path(reference));
       execl(python, python, "-c", reference_publisher, rdir, limit, hash,
             (char *)NULL);
       _exit(127);

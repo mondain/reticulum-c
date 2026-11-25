@@ -15,7 +15,7 @@ cd "$D"
 
 ref() {   # ref SUBCOMMAND ARGS...: the reference rngit client (stdin stays free for prompts)
   local sub=$1; shift
-  EDITOR="$D/editor.sh" PYTHONPATH=$REFDIR "$PYTHON" -c "
+  EDITOR="$D/editor.sh" PYTHONPATH=$REFDIR:$ORACLE_ENV "$PYTHON" -c "
 import sys
 from RNS.Utilities.rngit import server
 sub, rest = sys.argv[1], sys.argv[2:]

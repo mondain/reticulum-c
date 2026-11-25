@@ -13,7 +13,7 @@ trap 'rm -rf "$D"' EXIT
 cc -std=c11 -O1 -Wall -Wextra -Werror -I"$SRC/mcu/radio" "$SRC/mcu/tests/radio/bitrate_dump.c" \
   "$SRC/mcu/radio/rnc_lora_phy.c" -o "$D/ours" || { echo "FAIL: build"; exit 1; }
 "$D/ours" > "$D/ours.txt" || exit 1
-PYTHONPATH="$REFDIR" "$PYTHON" "$SRC/mcu/tests/ref_rnode_bitrate.py" > "$D/ref.txt" 2> "$D/ref.err"
+PYTHONPATH="$REFDIR:$SRC/tests/oracle_env" "$PYTHON" "$SRC/mcu/tests/ref_rnode_bitrate.py" > "$D/ref.txt" 2> "$D/ref.err"
 rc=$?
 if [ $rc -eq 77 ]; then
   cat "$D/ref.err" >&2

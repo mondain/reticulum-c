@@ -22,7 +22,7 @@ for i in $(seq 1 50); do
   sleep 0.1
 done
 [ -n "$PTY" ] || { echo "FAIL: the device printed no pty path"; cat "$D/dev.err"; exit 1; }
-PYTHONPATH="$REFDIR" "$PYTHON" "$DRIVER" "$PTY" 12 > "$D/ref.out" 2> "$D/ref.err"
+PYTHONPATH="$REFDIR:$(cd "$(dirname "$0")/../.." && pwd)/tests/oracle_env" "$PYTHON" "$DRIVER" "$PTY" 12 > "$D/ref.out" 2> "$D/ref.err"
 rc=$?
 if [ $rc -eq 77 ]; then cat "$D/ref.err" >&2; exit 77; fi
 [ $rc -eq 0 ] || { echo "FAIL: the reference driver exited $rc"; cat "$D/ref.err" "$D/ref.out" "$D/dev.out"; exit 1; }

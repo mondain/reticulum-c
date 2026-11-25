@@ -92,7 +92,7 @@ loglevel = 2
     target_host = 127.0.0.1
     target_port = $PORT
 CFG
-    PYTHONPATH="$REFDIR" "$PYTHON" "$SRC/mcu/tests/ref_client.py" "$D/rns-$1" 50 > "$D/ref-$1.log" 2>&1 \
+    PYTHONPATH="$REFDIR:$SRC/tests/oracle_env" "$PYTHON" "$SRC/mcu/tests/ref_client.py" "$D/rns-$1" 50 > "$D/ref-$1.log" 2>&1 \
       || fail "the reference client ($1)"
     cat "$D/ref-$1.log"
   fi
