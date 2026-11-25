@@ -2590,7 +2590,7 @@ static pid_t start_reference(const char *python, const char *reference,
     close(fds[0]);
     CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
     close(fds[1]);
-    CHECK(!setenv("PYTHONPATH", reference, 1));
+    CHECK(!set_announcer_path(reference));
     execl(python, python, "-c", reference_peer, dir, limit, (char *)NULL);
     _exit(127);
   }
