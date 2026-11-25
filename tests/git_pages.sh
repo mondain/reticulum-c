@@ -26,7 +26,7 @@ fail() { echo "FAIL: $*" >&2; for f in "$D"/*.log; do echo "--- $f" >&2; tail -1
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0
 export TZ=UTC GIT_AUTHOR_NAME=Ann GIT_AUTHOR_EMAIL=ann@example GIT_COMMITTER_NAME=Ann GIT_COMMITTER_EMAIL=ann@example
 PORT=$((20000 + (RANDOM % 20000)))
-PYTHONPATH=$REFDIR
+PYTHONPATH=$REFDIR:$(cd "$(dirname "$0")" && pwd)/oracle_env
 export PYTHONPATH
 
 # ---- the transport node -----------------------------------------------------
