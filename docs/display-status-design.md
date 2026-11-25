@@ -32,7 +32,8 @@ it on, on what settings, is anything arriving), at a glance. Nothing else was as
 - No host-pushed images (the RNode display protocol), no sleep or low-power display
   management, no backlight control.
 - Not the other boards that have screens (T3-S3, Heltec boards); the interface allows
-  them later.
+  them later. (Added 2026-11-25: the Heltec WiFi LoRa 32 V3 now shows the same page, on its
+  SSD1306 OLED, with RNC_DISPLAY_SSD1306.)
 - The generic ESP-IDF image is untouched.
 
 ## 4. Anti-goals (a working result that would still be a failure)
