@@ -2,6 +2,13 @@ if(BUILD_TESTING AND RNC_INTEROP_TESTS)
     if(NOT UNIX)
         message(FATAL_ERROR "The live oracle harness currently requires POSIX process/socket APIs")
     endif()
+    # RNS 1.6 searches a proof of work for every announce and path request it emits; on a small runner that outlasts what
+    # many scenarios wait, so the oracle processes stamp cheaply (tests/oracle_env/sitecustomize.py explains).
+    if(RNC_INTEROP_PYTHONPATH)
+        set(RNC_INTEROP_PYTHONPATH "${RNC_INTEROP_PYTHONPATH}:${PROJECT_SOURCE_DIR}/tests/oracle_env")
+    else()
+        set(RNC_INTEROP_PYTHONPATH "${PROJECT_SOURCE_DIR}/tests/oracle_env")
+    endif()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     find_package(Git REQUIRED)
     execute_process(COMMAND ${GIT_EXECUTABLE} -C "${RNC_REFERENCE_DIR}" rev-parse HEAD

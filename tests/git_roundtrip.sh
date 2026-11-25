@@ -44,7 +44,7 @@ admin() {   # admin KIND URL [FILE]: create, or set the permission file of a gro
   if [ "$MODE" = ref_client ]; then
     printf '#!/bin/sh\ncp "%s" "$1"\n' "$file" > "$D/editor.sh"; chmod +x "$D/editor.sh"
     local cmd=create; [ "$kind" = create ] || cmd=perms
-    EDITOR="$D/editor.sh" PYTHONPATH=$REFDIR "$PYTHON" -c "
+    EDITOR="$D/editor.sh" PYTHONPATH=$REFDIR:$ORACLE_ENV "$PYTHON" -c "
 import sys
 from RNS.Utilities.rngit import server
 sys.argv=['rngit','$cmd','--config','$D/cli','--rnsconfig','$D/rns','-i','$D/cli/client_identity','$url']

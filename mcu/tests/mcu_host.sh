@@ -94,7 +94,7 @@ loglevel = 2
     target_host = 127.0.0.1
     target_port = $PORT
 CFG
-  PYTHONPATH="$REFDIR" "$PYTHON" "$SRC/mcu/tests/ref_client.py" "$D/rns" 60 > "$D/ref.log" 2>&1 || fail "the reference client"
+  PYTHONPATH="$REFDIR:$SRC/tests/oracle_env" "$PYTHON" "$SRC/mcu/tests/ref_client.py" "$D/rns" 60 > "$D/ref.log" 2>&1 || fail "the reference client"
   cat "$D/ref.log"
 fi
 echo "mcu host test passed"

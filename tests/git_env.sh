@@ -2,6 +2,8 @@
 # (C or reference), a client helper on PATH. Sourced, not run.
 set -u
 MODE=$1 NODE=$2 SERVER=$3 HELPER=$4 PYTHON=${5:-} REFDIR=${6:-}
+# the oracle processes stamp cheaply (tests/oracle_env/sitecustomize.py): RNS 1.6 searches a proof of work per announce
+ORACLE_ENV=$(cd "$(dirname "$0")" && pwd)/oracle_env
 D=$(mktemp -d /tmp/rnc-git-XXXXXX)
 PIDS=()
 cleanup() {
@@ -53,7 +55,7 @@ if [ "$MODE" = c_client ] || [ "$MODE" = ref_server ]; then
   "$SERVER" --print-identity --config "$D/cli" --identity "$D/cli/client_identity" >/dev/null 2>&1 || true
   CLIENT_HASH=$("$SERVER" --print-identity --config "$D/cli" --identity "$D/cli/client_identity" 2>/dev/null | sed -n 's/.*Identity  *: <\(.*\)>/\1/p')
 else
-  CLIENT_HASH=$(PYTHONPATH=$REFDIR "$PYTHON" -c "
+  CLIENT_HASH=$(PYTHONPATH=$REFDIR:$ORACLE_ENV "$PYTHON" -c "
 import RNS
 i=RNS.Identity(); i.to_file('$D/cli/client_identity'); print(RNS.hexrep(i.hash, delimit=False))")
 fi
@@ -93,7 +95,7 @@ dev = r:all, adm:$CLIENT_HASH
 priv = rw:$CLIENT_HASH
 locked = r:none
 CFG
-  PYTHONPATH=$REFDIR "$PYTHON" -u -c "
+  PYTHONPATH=$REFDIR:$ORACLE_ENV "$PYTHON" -u -c "
 import sys
 from RNS.Utilities.rngit import server
 sys.argv=['rngit','--config','$D/srv','--rnsconfig','$D/refrns']
@@ -145,7 +147,7 @@ loglevel = 2
 CFG
   cat > "$D/bin/git-remote-rns" <<SH
 #!/bin/sh
-export PYTHONPATH="$REFDIR"
+export PYTHONPATH="$REFDIR:$ORACLE_ENV"
 export RNGIT_CONFIG="$D/cli" RNS_CONFIG="$D/rns"
 exec "$PYTHON" -c 'from RNS.Utilities.rngit.client import main; main()' "\$@"
 SH
