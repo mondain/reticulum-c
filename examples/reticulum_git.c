@@ -24,6 +24,7 @@
  * of the reference. A request that runs git is answered synchronously while the
  * node stays serviced, except forks, mirrors and syncs. */
 #include "rngit_common.h"
+#include "tool_stamps.h"
 #include <stdarg.h>
 #include <dirent.h>
 
@@ -1356,13 +1357,14 @@ static void prepare_git_environment(const char *argv0, const char *connect) {
   }
 }
 static void usage(void) {
-  fputs("usage: reticulum-c-git --connect HOST:PORT [--config DIR] [--identity FILE] [--print-identity]\n",
+  fputs("usage: reticulum-c-git --connect HOST:PORT [--config DIR] [--identity FILE] [--print-identity] [--stamp-value N]\n",
         stderr);
 }
 int main(int argc, char **argv) {
   const char *connect = NULL, *config = NULL, *identity = NULL;
   char default_config[PATH_MAX], identity_path[PATH_MAX + 32];
   int i, print_identity = 0;
+  double stamp_value = tool_stamp_default();
   uint8_t destination[16];
   uint64_t last_announce = 0, last_mirror_check = 0;
   int announced = 0;
@@ -1379,6 +1381,10 @@ int main(int argc, char **argv) {
       identity = VALUE;
     else if (!strcmp(argv[i], "--print-identity"))
       print_identity = 1;
+    else if (!strcmp(argv[i], "--stamp-value")) {
+      if (!tool_stamp_parse(VALUE, &stamp_value))
+        return usage(), 2;
+    }
     else
       return usage(), 2;
   }
@@ -1421,6 +1427,7 @@ int main(int argc, char **argv) {
   stats_load();
   if (!rngit_open_node(&G.net, connect, identity, "rngit link"))
     return 1;
+  tool_stamps_requests(G.net.node, stamp_value);
   if (rnc_node_add_destination(G.net.node, &G.net.id, GIT_APP_NAME, NULL, 0, destination) != RNC_OK)
     return 1;
   G.net.responder = rnc_responder_new(G.net.node, G.max_bundle, rngit_random, NULL);
@@ -1467,10 +1474,12 @@ int main(int argc, char **argv) {
     puts(">");
   }
   fflush(stdout);
+  tool_stamps_listen(G.net.node, identity, stamp_value);
   while (!rngit_stopping) {
     uint64_t now = rngit_monotonic_ms();
     if (!rngit_pump(&G.net))
       break;
+    tool_stamps_step();
     jobs_poll();
     stats_job(now);
     if (now - last_mirror_check > 60000u) {
@@ -1483,7 +1492,7 @@ int main(int argc, char **argv) {
       (void)rnc_node_announce(G.net.node, destination, (uint64_t)time(NULL), now);
       announced = 2;
     }
-    if (!announced || (G.announce_minutes && now - last_announce > (uint64_t)G.announce_minutes * 60000u)) {
+    if ((!announced && tool_stamps_ready()) || (announced && G.announce_minutes && now - last_announce > (uint64_t)G.announce_minutes * 60000u)) {
       rnc_host_status s;
       if (rnc_host_get_status(G.net.host, 1, &s) == RNC_OK && s.online) {
         (void)rnc_node_announce(G.net.node, destination, (uint64_t)time(NULL), now);
@@ -1495,6 +1504,7 @@ int main(int argc, char **argv) {
     }
   }
   (void)stats_persist();
+  tool_stamps_stop();
   rngit_close_node(&G.net);
   st_free_all();
   return 0;

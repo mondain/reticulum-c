@@ -16,6 +16,7 @@
  * to destination hashes. DESTINATION may be such an alias. Each request uses its
  * own link, where the reference keeps one open. */
 #include "rngit_common.h"
+#include "tool_stamp_value.h"
 
 #define PATH_TIMEOUT_MS 15000u
 #define REQUEST_TIMEOUT_MS 1800000u
@@ -676,6 +677,7 @@ int main(int argc, char **argv) {
   }
   if (!rngit_open_node(&C->net, connect, path, "rngit link"))
     return 255;
+  tool_stamps_requests(C->net.node, tool_stamp_default()); /* RNC_STAMP_VALUE=0 turns it off */
   C->net.requester =
       rnc_requester_new(C->net.node, C->max_value, rngit_random, NULL);
   if (!C->net.requester)

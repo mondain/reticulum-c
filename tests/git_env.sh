@@ -31,10 +31,26 @@ type = TCPServerInterface
 listen_ip = 127.0.0.1
 listen_port = $PORT
 CFG
-"$NODE" --config "$D/node/config" --identity "$D/node/id" --admin "$D/node/admin" > "$D/node.log" 2>&1 &
-PIDS+=($!)
-for i in $(seq 1 50); do grep -q "Ready identity=" "$D/node.log" 2>/dev/null && break; sleep 0.1; done
-grep -q "Ready identity=" "$D/node.log" || fail "node did not start"
+# RNC_GIT_ENFORCE: the node requires stamps, so the repository node and the client have to stamp.
+# With the value "ref" an unmodified reference node does the requiring.
+if [ -n "${RNC_GIT_ENFORCE:-}" ]; then
+  printf '[stamps]\nenforce_stamps = Yes\ndestination_cost = 8\npr_cost = 8\n' >> "$D/node/config"
+fi
+if [ "${RNC_GIT_ENFORCE:-}" = ref ]; then
+  sed -i 's/^type = TCPServerInterface/type = TCPServerInterface\nenabled = Yes/' "$D/node/config"
+  PYTHONPATH=$REFDIR "$PYTHON" -u -c 'import sys
+from RNS.Utilities import rnsd
+sys.argv = ["rnsd", "--config", sys.argv[1], "-v"]
+rnsd.main()' "$D/node" > "$D/node.log" 2>&1 &
+  PIDS+=($!)
+  for i in $(seq 1 100); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
+  (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null || fail "reference node did not start"
+else
+  "$NODE" --config "$D/node/config" --identity "$D/node/id" --admin "$D/node/admin" > "$D/node.log" 2>&1 &
+  PIDS+=($!)
+  for i in $(seq 1 50); do grep -q "Ready identity=" "$D/node.log" 2>/dev/null && break; sleep 0.1; done
+  grep -q "Ready identity=" "$D/node.log" || fail "node did not start"
+fi
 
 # repositories
 mkdir -p "$D/repos/pub" "$D/repos/priv" "$D/repos/locked" "$D/repos/ro" "$D/repos/dev" "$D/srv"
@@ -163,8 +179,12 @@ esac
 chmod +x "$D/bin/git-remote-rns"
 export PATH="$D/bin:$PATH"
 # the server announces on start; wait until the node has learned the path
+if [ "${RNC_GIT_ENFORCE:-}" = ref ]; then
+  sleep 8   # the reference node does not log announces; the server's second one follows after 5 s
+else
 for i in $(seq 1 300); do grep -q "announce destination=$DEST" "$D/node.log" 2>/dev/null && break; sleep 0.1; done
 grep -q "announce destination=$DEST" "$D/node.log" || fail "the node never saw the server's announce"
+fi
 
 
 URL="rns://$DEST"

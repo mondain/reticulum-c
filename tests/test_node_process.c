@@ -5214,6 +5214,172 @@ static void cp_reference(const char *exe, const char *cp, const char *python) {
   puts("cp reference tests passed");
 }
 
+static int ctl_run(const char *ctl, char *out, size_t size, ...);
+/* ---- the tools stamp what they send, against a daemon that enforces stamps ------------------------------- */
+/* Starts a listener and returns its destination; `announced` waits until it has found its announce stamp. */
+static pid_t stamp_listener(const char *tool, char *const *args, int *fd, char dest[33], char *out, size_t size,
+                            int stamping) {
+  pid_t p = spawn_cp(tool, fd, args);
+  memset(out, 0, size);
+  read_until(*fd, "listening", out, size, 15);
+  read_until(*fd, ">\n", out, size, 15);
+  { /* "rncp listening on <", "rnx listening for commands on <" and so on */
+    const char *at = strstr(strstr(out, "listening"), " on <");
+    CHECK(at);
+    memcpy(dest, at + 5, 32);
+    dest[32] = 0;
+  }
+  if (stamping)
+    read_until(*fd, "Announce stamp ready", out, size, 60);
+  return p;
+}
+static void tool_stamps(const char *exe, const char *cp, const char *x, const char *sh, const char *ctl,
+                        const char *reference, const char *python) {
+  char dir[] = "/tmp/rnc-tool-stamps-XXXXXX", cfg[256], key[256], admin[256], recv[300], idc[300], idl[300],
+       idw[300], connect[64], hash[33], dest[33], out[4096], lout[4096], payload[300], cache[320], text[1024],
+       identity[33];
+  unsigned port = unused_port();
+  int dfd = -1, lfd;
+  pid_t daemon = 0, listener;
+  live_proc node;
+  struct stat st;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(recv, sizeof(recv), "%s/recv", dir) > 0 && !mkdir(recv, 0700));
+  CHECK(snprintf(idc, sizeof(idc), "%s/id_client", dir) > 0);
+  CHECK(snprintf(idl, sizeof(idl), "%s/id_listener", dir) > 0);
+  CHECK(snprintf(idw, sizeof(idw), "%s/id_unstamped", dir) > 0);
+  CHECK(snprintf(cache, sizeof(cache), "%s.stamps", idl) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(payload, sizeof(payload), "%s/payload.bin", dir) > 0);
+  file_bytes(payload, "stamped", 7);
+  write_identity(idc, 11, hash);
+  if (reference) { /* an unmodified 1.6.1 transport node that enforces */
+    char rdir[300], rcfg[320], line[512];
+    CHECK(snprintf(rdir, sizeof(rdir), "%s/ref", dir) > 0 && !mkdir(rdir, 0700));
+    CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[stamps]\nenforce_stamps = Yes\n"
+                   "destination_cost = 8\npr_cost = 8\n[interfaces]\n[[Server]]\ntype = TCPServerInterface\n"
+                   "enabled = Yes\nmode = gateway\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+    config_file(rcfg, text);
+    live_spawn(&node, python, reference, live_transport, rdir);
+    CHECK(live_expect(&node, "READY", 20000, line, sizeof(line)));
+  } else {
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = Yes\nshare_instance = No\n"
+                   "[stamps]\nenforce_stamps = Yes\ndestination_cost = 8\npr_cost = 8\n"
+                   "[interfaces]\n[[TCP]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+                   port) > 0);
+    config_file(cfg, text);
+    daemon = start(exe, cfg, key, admin, &dfd);
+    ready_line(dfd, identity);
+  }
+
+  { /* cp: a stamping listener is learned and takes a file from a stamping sender */
+    char *la[] = {(char *)cp, "--connect", connect, "--identity", idl, "--stamp-value", "10", "-l", "-n", "-s", recv,
+                  "-b", "2", NULL};
+    char *send[] = {(char *)cp, "--connect", connect, "--identity", idc, "-w", "10", payload, dest, NULL};
+    char *unstamped[] = {(char *)cp, "--connect", connect, "--identity", idc, "--stamp-value", "0", "-w", "4",
+                         payload, dest, NULL};
+    listener = stamp_listener(cp, la, &lfd, dest, lout, sizeof(lout), 1);
+    CHECK(run_cp(cp, out, sizeof(out), send) == 0 && strstr(out, "Transfer complete"));
+    kill(listener, SIGKILL);
+    CHECK(waitpid(listener, NULL, 0) == listener);
+    close(lfd);
+    CHECK(!stat(cache, &st) && (st.st_mode & 077) == 0);
+    /* the saved stamp is used by the next run */
+    la[12] = "0"; /* -b 0: announce once, so a later sender has to ask for the path */
+    listener = stamp_listener(cp, la, &lfd, dest, lout, sizeof(lout), 1);
+    CHECK(!strstr(lout, "Generating announce stamp"));
+    usleep(1500000);
+    /* a sender's path request is filtered when it does not stamp; a stamped one is answered */
+    CHECK(run_cp(cp, out, sizeof(out), unstamped) != 0 && !strstr(out, "Transfer complete"));
+    CHECK(run_cp(cp, out, sizeof(out), send) == 0 && strstr(out, "Transfer complete"));
+    kill(listener, SIGKILL);
+    CHECK(waitpid(listener, NULL, 0) == listener);
+    close(lfd);
+  }
+  { /* a listener that does not stamp is filtered: nobody finds a path to it */
+    char *la[] = {(char *)cp, "--connect", connect, "--identity", idw, "--stamp-value", "0", "-l", "-n", "-s", recv,
+                  "-b", "2", NULL};
+    char *send[] = {(char *)cp, "--connect", connect, "--identity", idc, "-w", "5", payload, dest, NULL};
+    listener = stamp_listener(cp, la, &lfd, dest, lout, sizeof(lout), 0);
+    CHECK(run_cp(cp, out, sizeof(out), send) != 0 && !strstr(out, "Transfer complete"));
+    kill(listener, SIGKILL);
+    CHECK(waitpid(listener, NULL, 0) == listener);
+    close(lfd);
+  }
+  { /* x */
+    char *la[] = {(char *)x, "--connect", connect, "--identity", idl, "--stamp-value", "10", "-l", "-a", hash, NULL};
+    char *run[] = {(char *)x, "--connect", connect, "--identity", idc, "-w", "10", dest, "echo stamped-x", NULL};
+    listener = stamp_listener(x, la, &lfd, dest, lout, sizeof(lout), 1);
+    CHECK(run_cp(x, out, sizeof(out), run) == 0 && strstr(out, "stamped-x"));
+    kill(listener, SIGKILL);
+    CHECK(waitpid(listener, NULL, 0) == listener);
+    close(lfd);
+  }
+  { /* sh */
+    char *la[] = {(char *)sh, "--connect", connect, "--identity", idl, "--stamp-value", "10", "-l", "-a", hash,
+                  "-b", "2", NULL};
+    char *run[] = {(char *)sh, "--connect", connect, "--identity", idc, "-w", "10", dest, "--", "echo", "stamped-sh",
+                   NULL};
+    listener = stamp_listener(sh, la, &lfd, dest, lout, sizeof(lout), 1);
+    CHECK(run_cp(sh, out, sizeof(out), run) == 0 && strstr(out, "stamped-sh"));
+    kill(listener, SIGKILL);
+    CHECK(waitpid(listener, NULL, 0) == listener);
+    close(lfd);
+  }
+  { /* x and sh used the same identity file since: cp's saved stamp is still there */
+    char *la[] = {(char *)cp, "--connect", connect, "--identity", idl, "--stamp-value", "10", "-l", "-n", "-s", recv,
+                  NULL};
+    listener = stamp_listener(cp, la, &lfd, dest, lout, sizeof(lout), 1);
+    CHECK(!strstr(lout, "Generating announce stamp"));
+    kill(listener, SIGKILL);
+    CHECK(waitpid(listener, NULL, 0) == listener);
+    close(lfd);
+  }
+  { /* ctl path: its request, sent into a shared instance, goes on to the enforcing node with its stamp */
+    char fcfg[300], fkey[300], fadmin[300], port_arg[16], data_arg[16];
+    unsigned data = unused_port(), control = unused_port();
+    char *la[] = {(char *)cp, "--connect", connect, "--identity", idl, "--stamp-value", "10", "-l", "-n", "-s", recv,
+                  "-b", "0", NULL};
+    pid_t front;
+    int ffd;
+    CHECK(snprintf(fcfg, sizeof(fcfg), "%s/front", dir) > 0);
+    CHECK(snprintf(fkey, sizeof(fkey), "%s/front_id", dir) > 0);
+    CHECK(snprintf(fadmin, sizeof(fadmin), "%s/front_admin", dir) > 0);
+    CHECK(snprintf(port_arg, sizeof(port_arg), "%u", control) > 0);
+    CHECK(snprintf(data_arg, sizeof(data_arg), "%u", data) > 0);
+    listener = stamp_listener(cp, la, &lfd, dest, lout, sizeof(lout), 1);
+    sleep(9); /* announced once, and the node's retransmission of it is over, before the front daemon exists */
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = No\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                   "shared_instance_port = %u\ninstance_control_port = %u\n[interfaces]\n[[Up]]\n"
+                   "type = TCPClientInterface\ntarget_host = 127.0.0.1\ntarget_port = %u\n",
+                   data, control, port) > 0);
+    config_file(fcfg, text);
+    front = start(exe, fcfg, fkey, fadmin, &ffd);
+    ready_line(ffd, identity);
+    usleep(1500000);
+    CHECK(ctl_run(ctl, out, sizeof(out), "path", dest, "--port", port_arg, "--data-port", data_arg, "--identity",
+                  fkey, "-w", "4", "--stamp-value", "0", NULL) != 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "path", dest, "--port", port_arg, "--data-port", data_arg, "--identity",
+                  fkey, "-w", "10", NULL) == 0);
+    stop(front, ffd);
+    kill(listener, SIGKILL);
+    CHECK(waitpid(listener, NULL, 0) == listener);
+    close(lfd);
+  }
+  if (reference)
+    live_end(&node);
+  else
+    stop(daemon, dfd);
+  puts("tool stamp tests passed");
+}
+
 /* ---- reticulum-c-x (rnx compatible remote execution) -------------------- */
 static void parse_after(const char *text, const char *needle, char hash[33]) {
   const char *at = strstr(text, needle);
@@ -6358,7 +6524,7 @@ static void i2p_reference(const char *exe, const char *fake,
 }
 
 int main(int argc, char **argv) {
-  CHECK(argc == 3 || argc == 4 || argc == 5 || argc == 6);
+  CHECK(argc >= 3 && argc <= 9);
   if (!strcmp(argv[2], "i2p") && argc == 4)
     i2p_daemon(argv[1], argv[3]);
   else if (!strcmp(argv[2], "i2p_ref") && argc == 6)
@@ -6388,6 +6554,10 @@ int main(int argc, char **argv) {
     cp_reference(argv[1], argv[3], argv[5]);
   else if (!strcmp(argv[2], "cp_tools") && argc == 4)
     cp_tools(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "tool_stamps") && argc == 7)
+    tool_stamps(argv[1], argv[3], argv[4], argv[5], argv[6], NULL, NULL);
+  else if (!strcmp(argv[2], "tool_stamps_ref") && argc == 9)
+    tool_stamps(argv[1], argv[3], argv[4], argv[5], argv[6], argv[7], argv[8]);
   else if (!strcmp(argv[2], "cli_id_ref") && argc == 5)
     cli_id_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "cli_tools") && argc == 4)
