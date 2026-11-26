@@ -1,12 +1,20 @@
 /* Image to WebP conversion for the media pages of reticulum-c-git (included by
  * reticulum_git.c): media.py. The same external encoders are run as
- * subprocesses, in the same preference order, through a pipe from `git show`:
+ * subprocesses, in the same preference order, on the output of `git show`:
  *
  *   magick - webp:-       convert - webp:-       gm convert - webp:-
  *   ffmpeg -y -loglevel error -i - -f webp pipe:1   (avconv alike)
  *
  * RNGIT_MEDIA_BACKEND forces one by name, the first one found on PATH is used
- * otherwise and remembered. The conversion has to finish within 8 seconds, the
+ * otherwise and remembered.
+ *
+ * Repository content is untrusted and image libraries pick a decoder from what
+ * they are given, some of which read local files. So, as in RNS 1.6.1
+ * (docs/security/2026_11_19): an encoder runs only on content of at most
+ * 32 MiB that starts with a PNG, JPEG, GIF, TIFF, WebP or BMP signature, and
+ * ImageMagick and GraphicsMagick are told that format (png:-).
+ *
+ * The conversion has to finish within 8 seconds, the
  * result has to be a WebP file of the size the response can carry, and when no
  * encoder is installed (or one fails) nothing is converted and the caller
  * serves the original, as the reference does. */
@@ -14,6 +22,7 @@
 #define RETICULUM_C_RNGIT_MEDIA_H
 
 #define MC_TIMEOUT_MS 8000u
+#define MC_INPUT_MAX ((size_t)32 << 20)
 typedef struct mc_backend {
   const char *name;
   const char *argv[10];
@@ -88,14 +97,111 @@ static int mc_webp_valid(const uint8_t *d, size_t n) {
     return 0;
   return w > 0 && h > 0;
 }
-/* convert_to_webp: runs input_argv in cwd, pipes it into the encoder and
- * collects the encoder's output in out (cap bytes). Returns 1 on success. */
+/* _classify_image: the format named by the signature, or NULL */
+static const char *mc_classify(const uint8_t *d, size_t n) {
+  if (n >= 8 && !memcmp(d, "\x89PNG\r\n\x1a\n", 8))
+    return "png";
+  if (n >= 3 && !memcmp(d, "\xff\xd8\xff", 3))
+    return "jpeg";
+  if (n >= 6 && (!memcmp(d, "GIF87a", 6) || !memcmp(d, "GIF89a", 6)))
+    return "gif";
+  if (n >= 4 && (!memcmp(d, "II*\0", 4) || !memcmp(d, "MM\0*", 4)))
+    return "tiff";
+  if (mc_webp_valid(d, n))
+    return "webp";
+  if (n >= 18 && !memcmp(d, "BM", 2)) {
+    uint32_t dib = (uint32_t)d[14] | (uint32_t)d[15] << 8 | (uint32_t)d[16] << 16 | (uint32_t)d[17] << 24;
+    if (dib == 12 || dib == 40 || dib == 52 || dib == 56 || dib == 64 || dib == 108 || dib == 124)
+      return "bmp";
+  }
+  return NULL;
+}
+/* Runs input_argv in cwd and writes what it prints to the temporary file in.
+ * prefix receives the first prefix_cap bytes. False on a timeout, an input
+ * over MC_INPUT_MAX or a system error. */
+static int mc_collect(char *const *input_argv, const char *cwd, FILE *in, uint64_t t0, uint8_t *prefix, size_t prefix_cap,
+                      size_t *prefix_n) {
+  int p[2], devnull, ok = 1;
+  size_t total = 0;
+  pid_t pid;
+  *prefix_n = 0;
+  if (pipe(p))
+    return 0;
+  devnull = open("/dev/null", O_RDWR);
+  pid = fork();
+  if (!pid) {
+    if (cwd && chdir(cwd))
+      _exit(127);
+    dup2(devnull, 0);
+    dup2(p[1], 1);
+    dup2(devnull, 2);
+    close(p[0]);
+    close(p[1]);
+    execvp(input_argv[0], input_argv);
+    _exit(127);
+  }
+  close(p[1]);
+  if (devnull >= 0)
+    close(devnull);
+  if (pid < 0) {
+    close(p[0]);
+    return 0;
+  }
+  for (;;) {
+    struct pollfd pf = {p[0], POLLIN, 0};
+    uint8_t tmp[8192];
+    if (poll(&pf, 1, 20) < 0 && errno != EINTR) {
+      ok = 0;
+      break;
+    }
+    if (rngit_idle_hook)
+      rngit_idle_hook();
+    if (pf.revents & (POLLIN | POLLHUP | POLLERR)) {
+      ssize_t r = read(p[0], tmp, sizeof(tmp));
+      if (r < 0 && errno == EINTR)
+        continue;
+      if (r <= 0) {
+        ok = r == 0;
+        break;
+      }
+      total += (size_t)r;
+      if (total > MC_INPUT_MAX || fwrite(tmp, 1, (size_t)r, in) != (size_t)r) {
+        ok = 0;
+        break;
+      }
+      if (*prefix_n < prefix_cap) {
+        size_t take = prefix_cap - *prefix_n;
+        if (take > (size_t)r)
+          take = (size_t)r;
+        memcpy(prefix + *prefix_n, tmp, take);
+        *prefix_n += take;
+      }
+    }
+    if (rngit_monotonic_ms() - t0 > MC_TIMEOUT_MS) {
+      ok = 0;
+      break;
+    }
+  }
+  close(p[0]);
+  if (!ok)
+    kill(pid, SIGKILL);
+  while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+  }
+  return ok;
+}
+/* convert_to_webp: collects the output of input_argv, run in cwd, runs an
+ * encoder on it if it is an image and collects the encoder's output in out
+ * (cap bytes). Returns 1 on success. */
 static int mc_convert_to_webp(char *const *input_argv, const char *cwd, uint8_t *out, size_t cap, size_t *out_n) {
-  int b = mc_select(), p[2], q[2], devnull;
-  pid_t in_pid, enc_pid;
-  size_t got = 0;
+  int b = mc_select(), q[2], devnull, i;
+  pid_t enc_pid;
+  size_t got = 0, prefix_n = 0;
   uint64_t t0, status_ok = 0;
   int open_out = 1, killed = 0, status = 0;
+  uint8_t prefix[64];
+  const char *format, *argv[10];
+  char spec[16];
+  FILE *in;
   *out_n = 0;
   if (b < 0) {
     if (!mc_no_backend_logged) {
@@ -106,47 +212,54 @@ static int mc_convert_to_webp(char *const *input_argv, const char *cwd, uint8_t 
     return 0;
   }
   mc_no_backend_logged = 0;
-  if (pipe(p))
+  in = tmpfile();
+  if (!in)
     return 0;
+  t0 = rngit_monotonic_ms();
+  if (!mc_collect(input_argv, cwd, in, t0, prefix, sizeof(prefix), &prefix_n) || fflush(in) || fseek(in, 0, SEEK_SET)) {
+    log_line("Media conversion failed: the input could not be read within %u seconds and %zu MiB", MC_TIMEOUT_MS / 1000u,
+             MC_INPUT_MAX >> 20);
+    fclose(in);
+    return 0;
+  }
+  format = mc_classify(prefix, prefix_n);
+  if (!format) {
+    log_line("Media conversion failed: Input format is not supported");
+    fclose(in);
+    return 0;
+  }
+  memcpy(argv, mc_backends[b].argv, sizeof(argv));
+  if (!strcmp(mc_backends[b].name, "magick") || !strcmp(mc_backends[b].name, "convert") || !strcmp(mc_backends[b].name, "gm")) {
+    snprintf(spec, sizeof(spec), "%s:-", format);
+    for (i = 0; argv[i]; ++i)
+      if (!strcmp(argv[i], "-")) {
+        argv[i] = spec;
+        break;
+      }
+  }
   if (pipe(q)) {
-    close(p[0]);
-    close(p[1]);
+    fclose(in);
     return 0;
   }
   devnull = open("/dev/null", O_RDWR);
-  in_pid = fork();
-  if (in_pid < 0)
-    goto fail_pipes;
-  if (!in_pid) {
-    if (cwd && chdir(cwd))
-      _exit(127);
-    dup2(devnull, 0);
-    dup2(p[1], 1);
-    dup2(devnull, 2);
-    close(p[0]); close(p[1]); close(q[0]); close(q[1]);
-    execvp(input_argv[0], input_argv);
-    _exit(127);
-  }
   enc_pid = fork();
-  if (enc_pid < 0) {
-    kill(in_pid, SIGKILL);
-    waitpid(in_pid, NULL, 0);
-    goto fail_pipes;
-  }
   if (!enc_pid) {
-    dup2(p[0], 0);
+    dup2(fileno(in), 0);
     dup2(q[1], 1);
     dup2(devnull, 2);
-    close(p[0]); close(p[1]); close(q[0]); close(q[1]);
-    execvp(mc_backends[b].argv[0], (char *const *)mc_backends[b].argv);
+    close(q[0]);
+    close(q[1]);
+    execvp(argv[0], (char *const *)argv);
     _exit(127);
   }
-  close(p[0]);
-  close(p[1]);
   close(q[1]);
   if (devnull >= 0)
     close(devnull);
-  t0 = rngit_monotonic_ms();
+  fclose(in);
+  if (enc_pid < 0) {
+    close(q[0]);
+    return 0;
+  }
   while (open_out) {
     struct pollfd pf = {q[0], POLLIN, 0};
     uint8_t tmp[8192];
@@ -173,11 +286,8 @@ static int mc_convert_to_webp(char *const *input_argv, const char *cwd, uint8_t 
     }
   }
   close(q[0]);
-  if (killed) {
-    kill(in_pid, SIGKILL);
+  if (killed)
     kill(enc_pid, SIGKILL);
-  }
-  waitpid(in_pid, NULL, 0);
   while (waitpid(enc_pid, &status, 0) < 0 && errno == EINTR) {
   }
   status_ok = !killed && WIFEXITED(status) && WEXITSTATUS(status) == 0;
@@ -192,11 +302,6 @@ static int mc_convert_to_webp(char *const *input_argv, const char *cwd, uint8_t 
   }
   *out_n = got;
   return 1;
-fail_pipes:
-  close(p[0]); close(p[1]); close(q[0]); close(q[1]);
-  if (devnull >= 0)
-    close(devnull);
-  return 0;
 }
 
 #endif

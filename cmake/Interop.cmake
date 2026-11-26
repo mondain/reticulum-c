@@ -13,8 +13,8 @@ if(BUILD_TESTING AND RNC_INTEROP_TESTS)
     find_package(Git REQUIRED)
     execute_process(COMMAND ${GIT_EXECUTABLE} -C "${RNC_REFERENCE_DIR}" rev-parse HEAD
         OUTPUT_VARIABLE rns_head OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE rns_git_status)
-    if(NOT rns_git_status EQUAL 0 OR NOT rns_head STREQUAL "cff4d03fdbd6bfb63b765280cd944756ac5cce8d")
-        message(FATAL_ERROR "Live oracle requires RNS 1.6.1 commit cff4d03fdbd6bfb63b765280cd944756ac5cce8d")
+    if(NOT rns_git_status EQUAL 0 OR NOT rns_head STREQUAL "f55c0c6ea618ebae33e7d3ab2e37b200ce0b0d81")
+        message(FATAL_ERROR "Live oracle requires RNS 1.6.1 commit f55c0c6ea618ebae33e7d3ab2e37b200ce0b0d81")
     endif()
     execute_process(COMMAND ${GIT_EXECUTABLE} -C "${RNC_REFERENCE_DIR}" diff HEAD --quiet -- RNS Examples/Channel.py
         RESULT_VARIABLE rns_modified)
