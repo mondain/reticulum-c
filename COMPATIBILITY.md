@@ -1255,6 +1255,17 @@ Network stamps (design: `docs/superpowers/specs/2026-11-24-network-stamps-design
 | `reticulum-c-flash --stamp` against an emulated setup console | material read, stamp found and set, saved, board restarted |
 | PlatformIO builds | the XIAO nRF52840 (309 KB of 815 KB flash) and the T-Beam Supreme build with the stamp console |
 
+Tunnel synthesis, 1.6 form (2026-11-25):
+
+| Check | Result |
+| --- | --- |
+| Node tests (`reticulum_tunnel_peer`, `_peer_blackholed`) | the map is sent and kept, one reverse synthesis, no tunnel from an answer, a second synthesis refused, the 176 byte form on request |
+| Two daemons (`reticulum_node_process_tunnel_peers`) | `status -T` on each side shows the other's identity, version, transport status and costs; `tunnel_extension = No` gets no answer |
+| Against 1.6.1 (`..._tunnel_peers_rns`) | our client with a reference server and a reference client with our server: each side reports the other correctly |
+
+A listener's per interface `destination_cost` and `pr_cost` were not applied to the connections it accepted
+until this change, so a TCP server enforced only the node-wide `[stamps]` costs on them.
+
 Tool stamps (announces and path requests):
 
 | Check | Result |

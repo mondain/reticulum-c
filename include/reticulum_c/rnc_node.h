@@ -294,6 +294,28 @@ typedef struct rnc_tunnel_info {
   uint64_t expires_ms;
   size_t paths;
 } rnc_tunnel_info;
+/* Since RNS 1.6 a synthesis carries a signed map: implementation name and version, whether the node
+ * transports, and the stamp costs the interface requires. A node answers such a synthesis once with its own
+ * (the "reverse" synthesis), on an interface that was given a tunnel hash; the side that asked records the
+ * answer without making a tunnel of it. A second synthesis on one connection is RNC_PROTOCOL. What the peer
+ * said is kept until the interface is removed. */
+typedef struct rnc_tunnel_peer {
+  int has_identity; /* a valid synthesis arrived */
+  int has_info;     /* it carried the 1.6 map: the fields below the identity are set */
+  int has_tunnel;   /* a tunnel was named on this connection, by us or by the peer */
+  uint8_t identity_hash[16], tunnel_id[32];
+  char implementation[32], version[16];
+  int transport;
+  double destination_cost, pr_cost;
+} rnc_tunnel_peer;
+/* `interface_hash` is the one a reverse synthesis names (NULL: do not answer). `extension` 0 sends the form
+ * without the map, 176 bytes: RNS 1.5 accepts only that one. The default is to send the map. */
+rnc_result rnc_node_set_interface_tunnel(rnc_node *node, uint32_t interface_id, const uint8_t interface_hash[32],
+                                         int extension);
+rnc_result rnc_node_interface_tunnel_peer(const rnc_node *node, uint32_t interface_id, rnc_tunnel_peer *peer);
+/* 1 when the transport identity that synthesized on this interface is blackholed: a host drops the connection,
+ * as the reference does. */
+int rnc_node_interface_peer_blackholed(const rnc_node *node, uint32_t interface_id, uint64_t unix_seconds);
 /* Queues the synthesis packet on the interface. Needs the node's identity with
  * its private key (RNC_STATE otherwise) and a configured interface. */
 rnc_result rnc_node_synthesize_tunnel(rnc_node *node, uint32_t interface_id,

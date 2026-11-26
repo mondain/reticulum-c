@@ -373,7 +373,9 @@ typedef struct host_interface {
   rnc_host_status status;
   char address[256], target[256], device[64], group[64],
       local_ip[INET6_ADDRSTRLEN], auto_devices[256], auto_ignored[256];
-  int auto_permanent, i2p_tunneled;
+  int auto_permanent, i2p_tunneled, tunnel_plain;
+  int has_stamp_costs;
+  double destination_cost, pr_cost;
   unsigned auto_scope;
   uint16_t target_port, discovery_port, data_port;
   unsigned baud, kiss_port, ifindex;
@@ -561,6 +563,13 @@ static rnc_result activate(rnc_host *h, host_interface *f) {
       return r;
     }
   }
+  { /* a listener's connections require what the listener was given */
+    const host_interface *from = f->status.parent_id ? find_interface(h, f->status.parent_id) : NULL;
+    const host_interface *costs = f->has_stamp_costs ? f : from && from->has_stamp_costs ? from : NULL;
+    if (costs)
+      (void)rnc_node_set_interface_stamp_costs(h->node, f->status.interface_id, costs->destination_cost,
+                                               costs->pr_cost);
+  }
   f->node_added = 1;
   f->tries = 0;
   f->status.online = 1;
@@ -568,6 +577,9 @@ static rnc_result activate(rnc_host *h, host_interface *f) {
   f->status.bound_port = f->fd >= 0 ? bound_port(f->fd) : 0;
   (void)emit_host(h, RNC_HOST_UP, f->status.interface_id, 0, NULL);
   rnc_logf(RNC_LOG_INFO, "host", "interface %s is up", f->status.name);
+  /* both ends of a link that can carry tunnels: what to name when answering a synthesis, and in which form */
+  if ((f->status.kind == RNC_HOST_TCP_CONNECT || f->status.kind == RNC_HOST_I2P) && !f->kiss)
+    (void)rnc_node_set_interface_tunnel(h->node, f->status.interface_id, f->status.hash, !f->tunnel_plain);
   /* A client that may return from another address names its tunnel to the peer,
    * as the reference's TCP client does after connecting. */
   if (f->status.kind == RNC_HOST_TCP_CONNECT && !f->accepted && !f->kiss)
@@ -1368,6 +1380,26 @@ int rnc_host_link_stamper(void *context, const uint8_t material[48], double cost
   rnc_cleanse_host(job.private_key, sizeof(job.private_key));
   return job.found;
 }
+rnc_result rnc_host_set_interface_stamp_costs(rnc_host *h, uint32_t interface_id, double destination_cost,
+                                              double pr_cost) {
+  host_interface *f = h ? find_interface(h, interface_id) : NULL;
+  size_t i;
+  if (!h || destination_cost > 100 || pr_cost > 100)
+    return RNC_INVALID;
+  if (!f)
+    return RNC_STATE;
+  f->has_stamp_costs = 1;
+  f->destination_cost = destination_cost;
+  f->pr_cost = pr_cost;
+  /* those already up: the interface itself and anything it spawned */
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    const host_interface *k = &h->interfaces[i];
+    if (k->used && k->node_added &&
+        (k->status.interface_id == interface_id || k->status.parent_id == interface_id))
+      (void)rnc_node_set_interface_stamp_costs(h->node, k->status.interface_id, destination_cost, pr_cost);
+  }
+  return RNC_OK;
+}
 rnc_result rnc_host_set_link_stamping(rnc_host *h, unsigned workers, uint64_t max_trials, int always) {
   if (!h || workers > 16u)
     return RNC_INVALID;
@@ -1669,6 +1701,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   f->policy.ingress = c->ingress;
   f->auto_permanent = c->auto_permanent != 0;
   f->i2p_tunneled = c->i2p_tunneled != 0;
+  f->tunnel_plain = c->tunnel_plain != 0;
   f->auto_scope = c->auto_scope ? c->auto_scope : RNC_AUTO_SCOPE_LINK;
   if (!copy_text(f->address, sizeof(f->address), c->address) ||
       !copy_text(f->target, sizeof(f->target), c->target) ||
@@ -3783,6 +3816,19 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
     if ((pf[i].revents & POLLHUP) && DEVICE_KIND(f->status.kind) &&
         !f->pending && f->input_offset == f->input_size)
       disconnect_interface(h, f, 0);
+  }
+  /* a link to a blackholed transport node is torn down, and a client does not return to it */
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    host_interface *f = &h->interfaces[i];
+    if (f->used && f->node_added &&
+        (f->status.kind == RNC_HOST_TCP_CONNECT || f->status.kind == RNC_HOST_I2P) &&
+        rnc_node_interface_peer_blackholed(h->node, f->status.interface_id, unix_seconds)) {
+      rnc_logf(RNC_LOG_INFO, "host", "interface %s leads to a blackholed transport node, closing it",
+               f->status.name);
+      if (!f->accepted)
+        f->gave_up = 1;
+      disconnect_interface(h, f, 0);
+    }
   }
   ingress_control(h);
   egress_control(h);

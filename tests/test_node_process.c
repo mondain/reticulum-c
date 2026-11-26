@@ -2297,7 +2297,13 @@ static void echo_reference(const char *exe, const char *echo, const char *refere
   int dfd;
   live_proc ref;
   const char *at;
+  char announcer[4096];
   CHECK(mkdtemp(base));
+  { /* the reference peers announce: with cheap stamps, as set_announcer_path gives them */
+    const char *old = getenv("PYTHONPATH");
+    CHECK(snprintf(announcer, sizeof(announcer), "%s%s%s", reference, old && *old ? ":" : "", old ? old : "") <
+          (int)sizeof(announcer));
+  }
   CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0);
   CHECK(snprintf(key, sizeof(key), "%s/daemon_id", base) > 0);
   CHECK(snprintf(admin, sizeof(admin), "%s/admin", base) > 0);
@@ -2316,7 +2322,7 @@ static void echo_reference(const char *exe, const char *echo, const char *refere
     char *argv[] = {(char *)python, script, "-s", "--config", dir, NULL};
     char *client[] = {(char *)echo, "--connect", connect, "--identity", id_file, "--count", "3", "client", hash, NULL};
     live_peer_config(dir, sizeof(dir), base, "refserver", port);
-    live_spawn_argv(&ref, reference, argv);
+    live_spawn_argv(&ref, announcer, argv);
     CHECK(live_find(&ref, "Echo server <", 30000, line, sizeof(line)));
     at = strstr(line, "Echo server <");
     CHECK(sscanf(at, "Echo server <%32[0-9a-f]>", hash) == 1);
@@ -2343,7 +2349,7 @@ static void echo_reference(const char *exe, const char *echo, const char *refere
       uint64_t end = now_ms() + 40000;
       int replied = 0;
       live_peer_config(dir, sizeof(dir), base, "refclient", port);
-      live_spawn_argv(&ref, reference, argv);
+      live_spawn_argv(&ref, announcer, argv);
       live_sleep(4000);
       while (now_ms() < end && !replied) {
         live_send(&ref, "\n"); /* Enter: request the path, then send once it is known */
@@ -4165,7 +4171,7 @@ static void tunnel_reference(const char *exe, const char *reference,
       close(fds[0]);
       CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
       close(fds[1]);
-      CHECK(!setenv("PYTHONPATH", reference, 1));
+      CHECK(!set_announcer_path(reference));
       execl(python, python, "-c", reference_tunnel_peer, rdir, "announce", "40",
             (char *)NULL);
       _exit(127);
@@ -4224,7 +4230,7 @@ static void tunnel_reference(const char *exe, const char *reference,
         (void)dup2(devnull, STDOUT_FILENO);
         (void)dup2(devnull, STDERR_FILENO);
       }
-      CHECK(!setenv("PYTHONPATH", reference, 1));
+      CHECK(!set_announcer_path(reference));
       execl(python, python, "-c", reference_tunnel_peer, rdir, "idle", "40",
             (char *)NULL);
       _exit(127);
@@ -4597,6 +4603,149 @@ static void stamps_enforcing_daemon(const char *exe, const char *reference, cons
   live_end(&good);
   stop(daemon, fd);
   puts("node enforcing stamps against reference peers passed");
+}
+
+/* ---- what a tunnel tells each side about the other (RNS 1.6) ------------------------------------------- */
+static int ctl_run(const char *ctl, char *out, size_t size, ...);
+/* `status -T` of a daemon, repeated until it shows every wanted text. */
+static void status_shows(const char *ctl, const char *control, const char *key, const char *const *wanted) {
+  char out[8192];
+  unsigned tries, k;
+  for (tries = 0; tries < 100; ++tries) {
+    int all = ctl_run(ctl, out, sizeof(out), "status", "-T", "--port", control, "--identity", key, NULL) == 0;
+    for (k = 0; all && wanted[k]; ++k)
+      all = strstr(out, wanted[k]) != NULL;
+    if (all)
+      return;
+    usleep(100000);
+  }
+  fprintf(stderr, "status never showed \"%s\" and the rest:\n%s\n", wanted[0], out);
+  CHECK(0);
+}
+/* A reference instance that prints, once, what it knows about the other end of an interface. */
+static const char *reference_tunnel_stats =
+    "import RNS, sys, time\n"
+    "r = RNS.Reticulum(configdir=sys.argv[1], loglevel=1)\n"
+    "print('READY', flush=True)\n"
+    "end = time.time() + 30\n"
+    "while time.time() < end:\n"
+    "    for i in r.get_interface_stats()['interfaces']:\n"
+    "        if i.get('rem_impl'):\n"
+    "            print('REM', i['rem_impl'], '.'.join(map(str, i['rem_vers'])), i['rem_is_tn'],\n"
+    "                  '%.3f' % i['rem_dst_cost'], '%.3f' % i['rem_pr_cost'], flush=True)\n"
+    "            time.sleep(30)\n"
+    "    time.sleep(0.1)\n";
+typedef struct tunnel_daemon {
+  char cfg[300], key[300], admin[300], control[16], id[33];
+  pid_t pid;
+  int fd;
+} tunnel_daemon;
+/* A daemon with one TCP interface, `server` or client to `port`, and an authenticated status port. */
+static void tunnel_node(tunnel_daemon *d, const char *exe, const char *dir, const char *name, int server,
+                        unsigned port, const char *extra) {
+  char text[1024];
+  unsigned data = unused_port(), control = unused_port();
+  CHECK(snprintf(d->cfg, sizeof(d->cfg), "%s/%s", dir, name) > 0);
+  CHECK(snprintf(d->key, sizeof(d->key), "%s/%s_id", dir, name) > 0);
+  CHECK(snprintf(d->admin, sizeof(d->admin), "%s/%s_admin", dir, name) > 0);
+  CHECK(snprintf(d->control, sizeof(d->control), "%u", control) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = %s\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\n[interfaces]\n[[Link]]\ntype = %s\n"
+                 "%s = 127.0.0.1\n%s = %u\n%s",
+                 server ? "Yes" : "No", data, control, server ? "TCPServerInterface" : "TCPClientInterface",
+                 server ? "listen_ip" : "target_host", server ? "listen_port" : "target_port", port, extra) > 0);
+  config_file(d->cfg, text);
+  d->pid = start(exe, d->cfg, d->key, d->admin, &d->fd);
+  ready_line(d->fd, d->id);
+}
+static void tunnel_peers(const char *exe, const char *ctl, const char *reference, const char *python) {
+  char dir[] = "/tmp/rnc-tunnel-peer-XXXXXX", rem_server[80], rem_client[80], mine[64], line[512], rdir[300],
+       rcfg[320], text[1024];
+  tunnel_daemon s, c;
+  unsigned port = unused_port();
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(mine, sizeof(mine), "Rem.Vers. : reticulum-c %s", RNC_VERSION_STRING) > 0);
+  { /* two of our daemons: the client names the tunnel, the server answers */
+    tunnel_node(&s, exe, dir, "s", 1, port, "destination_cost = 14\n");
+    tunnel_node(&c, exe, dir, "c", 0, port, "");
+    CHECK(snprintf(rem_server, sizeof(rem_server), "Rem.Tr.ID : <%s>", s.id) > 0);
+    CHECK(snprintf(rem_client, sizeof(rem_client), "Rem.Tr.ID : <%s>", c.id) > 0);
+    {
+      const char *of_server[] = {rem_client, mine, "no transport", "Rem.Csts. : Dst 23.500, PR 15.801", NULL};
+      const char *of_client[] = {rem_server, mine, "transport enabled", "Rem.Csts. : Dst 14.000, PR 15.801", NULL};
+      status_shows(ctl, s.control, s.key, of_server);
+      status_shows(ctl, c.control, c.key, of_client);
+    }
+    stop(c.pid, c.fd);
+    stop(s.pid, s.fd);
+  }
+  { /* tunnel_extension = No: the old form; the server learns who it is and nothing more, and is not asked to answer */
+    char out[8192];
+    port = unused_port();
+    tunnel_node(&s, exe, dir, "s2", 1, port, "");
+    tunnel_node(&c, exe, dir, "c2", 0, port, "tunnel_extension = No\n");
+    CHECK(snprintf(rem_client, sizeof(rem_client), "Rem.Tr.ID : <%s>", c.id) > 0);
+    {
+      const char *of_server[] = {rem_client, "Unknown implementation", NULL};
+      status_shows(ctl, s.control, s.key, of_server);
+    }
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-T", "--port", c.control, "--identity", c.key, NULL) == 0);
+    CHECK(strstr(out, "Tunnel ID : ") && strstr(out, "Rem.Tr.ID : Unknown"));
+    stop(c.pid, c.fd);
+    stop(s.pid, s.fd);
+  }
+  if (reference) {
+    live_proc peer;
+    /* our client, reference server */
+    port = unused_port();
+    CHECK(snprintf(rdir, sizeof(rdir), "%s/refs", dir) > 0 && !mkdir(rdir, 0700));
+    CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[Server]]\n"
+                   "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+    config_file(rcfg, text);
+    live_spawn(&peer, python, reference, reference_tunnel_stats, rdir);
+    CHECK(live_expect(&peer, "READY", 20000, line, sizeof(line)));
+    tunnel_node(&c, exe, dir, "c3", 0, port, "destination_cost = 14\n");
+    CHECK(live_expect(&peer, "REM", 15000, line, sizeof(line)));
+    { char want[160];
+      CHECK(snprintf(want, sizeof(want), "REM reticulum-c %s False 14.000 15.801", RNC_VERSION_STRING) > 0);
+      if (strcmp(line, want))
+        fprintf(stderr, "reference saw: %s\n", line);
+      CHECK(!strcmp(line, want)); }
+    {
+      const char *of_client[] = {"Rem.Tr.ID : <", "Rem.Vers. : RNS 1.6", "transport enabled",
+                                 "Rem.Csts. : Dst 23.500, PR 15.801", NULL};
+      status_shows(ctl, c.control, c.key, of_client);
+    }
+    stop(c.pid, c.fd);
+    live_end(&peer);
+    /* reference client, our server: it gets our reverse synthesis */
+    port = unused_port();
+    tunnel_node(&s, exe, dir, "s4", 1, port, "destination_cost = 14\n");
+    CHECK(snprintf(rdir, sizeof(rdir), "%s/refc", dir) > 0 && !mkdir(rdir, 0700));
+    CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = No\nshare_instance = No\n[interfaces]\n[[Client]]\n"
+                   "type = TCPClientInterface\nenabled = Yes\ntarget_host = 127.0.0.1\ntarget_port = %u\n", port) > 0);
+    config_file(rcfg, text);
+    live_spawn(&peer, python, reference, reference_tunnel_stats, rdir);
+    CHECK(live_expect(&peer, "REM", 20000, line, sizeof(line)));
+    { char want[160];
+      CHECK(snprintf(want, sizeof(want), "REM reticulum-c %s True 14.000 15.801", RNC_VERSION_STRING) > 0);
+      if (strcmp(line, want))
+        fprintf(stderr, "reference saw: %s\n", line);
+      CHECK(!strcmp(line, want)); }
+    {
+      const char *of_server[] = {"Rem.Tr.ID : <", "Rem.Vers. : RNS 1.6", "no transport", NULL};
+      status_shows(ctl, s.control, s.key, of_server);
+    }
+    live_end(&peer);
+    stop(s.pid, s.fd);
+  }
+  remove_tree(dir);
+  puts("tunnel peer tests passed");
 }
 
 /* ---- reticulum-c-cp (rncp compatible file transfer) --------------------- */
@@ -6554,6 +6703,10 @@ int main(int argc, char **argv) {
     cp_reference(argv[1], argv[3], argv[5]);
   else if (!strcmp(argv[2], "cp_tools") && argc == 4)
     cp_tools(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "tunnel_peers") && argc == 4)
+    tunnel_peers(argv[1], argv[3], NULL, NULL);
+  else if (!strcmp(argv[2], "tunnel_peers_ref") && argc == 6)
+    tunnel_peers(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "tool_stamps") && argc == 7)
     tool_stamps(argv[1], argv[3], argv[4], argv[5], argv[6], NULL, NULL);
   else if (!strcmp(argv[2], "tool_stamps_ref") && argc == 9)

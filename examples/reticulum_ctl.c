@@ -825,9 +825,54 @@ static int name_matches(const val *f, const char *filter) {
 }
 static int discovered_listing(const char *dir, const char *filter, int details, int json, int show_stale,
                               int show_unknown);
+/* The lines of `rnstatus -T`: the tunnel on an interface and what the other end said about itself. */
+static void print_tunnel(const val *f) {
+  const val *id = map_get(f, "tunnel_id"), *v, *vers;
+  const val *clients = map_get(f, "clients");
+  size_t k;
+  if (clients && clients->type == V_UINT) /* a listener: its connections have lines of their own */
+    return;
+  fputs("    Tunnel ID : ", stdout);
+  if (!id || id->type != V_BIN) {
+    puts("None");
+    return;
+  }
+  print_hex(id);
+  v = map_get(f, "remote_transport_id");
+  fputs("\n    Rem.Tr.ID : ", stdout);
+  if (v && v->type == V_BIN) {
+    putchar('<');
+    print_hex(v);
+    puts(">");
+  } else
+    puts("Unknown");
+  fputs("    Rem.Vers. : ", stdout);
+  print_str(map_get(f, "rem_impl"), "Unknown implementation");
+  vers = map_get(f, "rem_vers");
+  if (vers && vers->type == V_ARR && vers->n) {
+    putchar(' ');
+    for (k = 0; k < vers->n; ++k)
+      printf("%s%llu", k ? "." : "", (unsigned long long)as_uint(&vers->kids[k]));
+    v = map_get(f, "rem_is_tn");
+    puts(v && as_uint(v) ? ", transport enabled" : ", no transport");
+  } else
+    puts(", unknown version");
+  fputs("    Rem.Csts. : ", stdout);
+  v = map_get(f, "rem_dst_cost");
+  if (v && v->type == V_REAL)
+    printf("Dst %.3f", as_double(v));
+  else
+    fputs("Dst ?", stdout);
+  v = map_get(f, "rem_pr_cost");
+  if (v && v->type == V_REAL)
+    printf(", PR %.3f\n", as_double(v));
+  else
+    puts(", PR ?");
+}
 static int cmd_status(int argc, char **argv) {
   conn c = {0};
-  int i, json = 0, reverse = 0, link_stats = 0, monitor = 0, discovered = 0, details = 0, show_stale = 0, show_unknown = 0;
+  int i, json = 0, reverse = 0, link_stats = 0, monitor = 0, discovered = 0, details = 0, show_stale = 0, show_unknown = 0,
+      tunnels = 0;
   double interval = 1.0;
   const char *discovery_dir = NULL;
   const char *sort = NULL, *filter = NULL;
@@ -849,6 +894,8 @@ static int cmd_status(int argc, char **argv) {
       reverse = 1;
     else if (!strcmp(argv[i], "-l") || !strcmp(argv[i], "--link-stats"))
       link_stats = 1;
+    else if (!strcmp(argv[i], "-T") || !strcmp(argv[i], "--tunnels"))
+      tunnels = 1;
     else if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--discovered"))
       discovered = 1;
     else if (!strcmp(argv[i], "-D"))
@@ -959,6 +1006,8 @@ static int cmd_status(int argc, char **argv) {
       pretty_rate((double)as_uint(v), a, sizeof(a));
       printf("    Rate      : %s\n", a);
     }
+    if (tunnels)
+      print_tunnel(f);
     v = map_get(f, "rssi");
     if (v && (v->type == V_INT || v->type == V_UINT)) {
       printf("    Signal    : RSSI %lld dBm, SNR %.2f dB, quality %.1f%%\n",
@@ -2953,7 +3002,7 @@ static int cmd_id(int argc, char **argv) {
 }
 
 static void usage(void) {
-  fputs("usage: reticulum-c-ctl status [-j] [--port N] (--identity FILE | --rpc-key HEX | --config FILE)\n"
+  fputs("usage: reticulum-c-ctl status [-j] [-T] [--port N] (--identity FILE | --rpc-key HEX | --config FILE)\n"
         "       reticulum-c-ctl path [-t] [-m HOPS] [-j] [HASH] [-b] [-B HASH [--duration HOURS] [--reason TEXT]] [-U HASH] [--stamp-value N] [connection options]\n"
         "       reticulum-c-ctl id (-g FILE | -i FILE [-p] [-P] [-x] [-X] [-H ASPECTS]\n"
         "                          [-s FILE --raw] [-V SIG -r FILE --raw] [-e FILE] [-d FILE] [-w OUT] [-f])\n",

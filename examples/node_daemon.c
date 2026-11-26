@@ -408,6 +408,12 @@ static int interface_key(interface_config *f, const char *key,
     return text_copy(f->target, sizeof(f->target), value);
   if (!strcmp(key, "device") || !strcmp(key, "interface"))
     return text_copy(f->device, sizeof(f->device), value);
+  if (!strcmp(key, "tunnel_extension")) { /* No: the 1.5 form of tunnel synthesis, for an older server */
+    if (!boolean(value, &b))
+      return 0;
+    f->host.tunnel_plain = !b;
+    return 1;
+  }
   if (!strcmp(key, "i2p_tunneled")) {
     if (!boolean(value, &b))
       return 0;
@@ -1749,7 +1755,7 @@ static int start_node(config *c, const rnc_identity *id, const char *state,
           goto fail;
         continue;
       }
-      (void)rnc_node_set_interface_stamp_costs(*node, c->interfaces[i].interface_id,
+      (void)rnc_host_set_interface_stamp_costs(*host, c->interfaces[i].interface_id,
                                                c->interfaces[i].dst_cost, c->interfaces[i].pr_cost);
       if (rnc_host_get_status(*host, c->interfaces[i].interface_id, &status) ==
           RNC_OK)
@@ -2202,6 +2208,7 @@ static const char *example_config =
     "    enabled = No\n"
     "    target_host = reticulum.example.org\n"
     "    target_port = 4242\n"
+    "    # tunnel_extension = No   (only for a server running RNS 1.5, which refuses the 1.6 form)\n"
     "\n"
     "  # A LoRa radio running RNode firmware (reticulum-c in RNode mode, or the reference RNode firmware)\n"
     "  # on a serial port. Frequency in Hz, bandwidth in Hz, transmit power in dBm.\n"

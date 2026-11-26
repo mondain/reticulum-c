@@ -17,6 +17,9 @@ extern "C" {
 #include <reticulum_c/rnc_profile_mcu.h>
 #endif
 
+/* The release this header belongs to (checked against the other version places). */
+#define RNC_VERSION_STRING "0.6.0"
+#define RNC_IMPLEMENTATION_NAME "reticulum-c"
 #define RNC_MTU 500u
 #ifndef RNC_MAX_MTU
 #define RNC_MAX_MTU 4096u

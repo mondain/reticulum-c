@@ -9,13 +9,14 @@ package compatibility all read it, and so do the firmware build scripts. SOVERSI
 (the ABI number) is separate, also in CMakeLists.txt; raise it only for an
 incompatible ABI change.
 
-Four more files repeat the version because their tools read them directly:
+Five more files repeat the version because their tools read them directly:
 
 ```text
 library.json                                        (PlatformIO library)
 idf_component.yml                                   (ESP-IDF, repository root)
 mcu/esp-idf/components/reticulum_c/idf_component.yml
 mcu/app/rnc_mcu_app.h                               (fallback RNC_MCU_VERSION)
+include/reticulum_c/rnc.h                           (RNC_VERSION_STRING)
 ```
 
 When bumping, change all of them in the same pull request.

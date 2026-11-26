@@ -1,3 +1,4 @@
+#include <reticulum_c/rnc_netstamp.h>
 #include <reticulum_c/rnc_node.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +50,11 @@ static rnc_packet take_send(rnc_node *n, uint32_t iface) {
   CHECK(0);
   return none;
 }
+/* The receiver takes one synthesis per connection: a repeat comes after a reconnect. */
+static void reconnect(rnc_node *n) {
+  CHECK(rnc_node_remove_interface(n, 1) == RNC_OK);
+  CHECK(rnc_node_add_interface(n, 1, 1000000) == RNC_OK);
+}
 static rnc_packet synthesis(pair *p, const uint8_t *hash) {
   CHECK(rnc_node_synthesize_tunnel(p->a, 1, hash, p->now) == RNC_OK);
   return take_send(p->a, 1);
@@ -66,8 +72,8 @@ static void establish(void) {
   uint8_t id[32];
   setup(&p);
   syn = synthesis(&p, p.hash);
-  /* a broadcast PLAIN data packet, 64 + 32 + 16 + 64 bytes */
-  CHECK((syn.flags & 0x0f) == 0x08 && syn.data_size == 176);
+  /* a broadcast PLAIN data packet, 64 + 32 + 16 + 64 bytes and the signed 1.6 extension map */
+  CHECK((syn.flags & 0x0f) == 0x08 && syn.data_size > 176);
   CHECK(rnc_node_input(p.b, 1, &syn, 1700000000, p.now) == RNC_OK);
   CHECK(rnc_node_tunnel_count(p.b) == 1);
   CHECK(rnc_node_tunnel_at(p.b, 0, &t) == RNC_OK);
@@ -77,6 +83,7 @@ static void establish(void) {
   CHECK(rnc_node_tunnel_at(p.b, 1, &t) == RNC_AGAIN);
   /* the same tunnel again is the same entry, with a fresh timeout */
   p.now += 5000;
+  reconnect(p.b);
   syn = synthesis(&p, p.hash);
   CHECK(rnc_node_input(p.b, 1, &syn, 1700000005, p.now) == RNC_OK);
   CHECK(rnc_node_tunnel_count(p.b) == 1);
@@ -86,6 +93,7 @@ static void establish(void) {
   {
     uint8_t other[32];
     memset(other, 0x99, 32);
+    reconnect(p.b);
     syn = synthesis(&p, other);
     CHECK(rnc_node_input(p.b, 1, &syn, 1700000005, p.now) == RNC_OK);
     CHECK(rnc_node_tunnel_count(p.b) == 2);
@@ -338,6 +346,79 @@ static void rejects_bad_extension(void) {
   rnc_node_free(p.a);
   rnc_node_free(p.b);
 }
+/* The 1.6 extension: what a synthesis tells the peer, the reverse synthesis, and what each side keeps. */
+static void peer_info(void) {
+  pair p;
+  rnc_packet syn, reply, old;
+  rnc_tunnel_peer peer;
+  uint8_t b_hash[32], id[32];
+  rnc_node_event e;
+  memset(b_hash, 0x77, sizeof(b_hash));
+  setup(&p);
+  CHECK(rnc_node_set_interface_stamp_costs(p.a, 1, 14.0, 9.0) == RNC_OK);
+  CHECK(rnc_node_set_interface_tunnel(p.b, 1, b_hash, 1) == RNC_OK);
+  CHECK(rnc_node_interface_tunnel_peer(p.b, 1, &peer) == RNC_OK && !peer.has_identity && !peer.has_info &&
+        !peer.has_tunnel);
+  syn = synthesis(&p, p.hash);
+  CHECK(rnc_node_input(p.b, 1, &syn, 1700000000, p.now) == RNC_OK);
+  CHECK(rnc_node_interface_tunnel_peer(p.b, 1, &peer) == RNC_OK && peer.has_identity && peer.has_info);
+  CHECK(!memcmp(peer.identity_hash, p.a_id.hash, 16));
+  CHECK(!strcmp(peer.implementation, "reticulum-c") && !strcmp(peer.version, RNC_VERSION_STRING));
+  CHECK(!peer.transport && peer.destination_cost == 14.0 && peer.pr_cost == 9.0);
+  expected_id(&p, p.hash, id);
+  CHECK(peer.has_tunnel && !memcmp(peer.tunnel_id, id, 32) && rnc_node_tunnel_count(p.b) == 1);
+  /* the receiver answers with its own synthesis, and the one that asked records it without making a tunnel */
+  reply = take_send(p.b, 1);
+  CHECK(reply.data_size > 176 && !memcmp(reply.data, p.b_id.public_key, 64) && !memcmp(reply.data + 64, b_hash, 32));
+  CHECK(rnc_node_input(p.a, 1, &reply, 1700000000, p.now) == RNC_OK);
+  CHECK(rnc_node_tunnel_count(p.a) == 0);
+  CHECK(rnc_node_interface_tunnel_peer(p.a, 1, &peer) == RNC_OK && peer.has_info && peer.transport &&
+        !memcmp(peer.identity_hash, p.b_id.hash, 16));
+  CHECK(peer.destination_cost == rnc_netstamp_quantize(23.5) && peer.pr_cost == rnc_netstamp_quantize(15.8));
+  CHECK(peer.has_tunnel && !memcmp(peer.tunnel_id, id, 32)); /* the tunnel it named itself */
+  while (rnc_node_poll(p.a, &e) == RNC_OK)
+    CHECK(e.type != RNC_NODE_SEND); /* no answer to an answer */
+  /* a second synthesis on a connection is a violation */
+  CHECK(rnc_node_input(p.b, 1, &syn, 1700000001, p.now) == RNC_PROTOCOL);
+  /* the connection goes and what was known about the peer with it */
+  CHECK(rnc_node_remove_interface(p.b, 1) == RNC_OK && rnc_node_add_interface(p.b, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_interface_tunnel_peer(p.b, 1, &peer) == RNC_OK && !peer.has_identity && !peer.has_tunnel);
+  /* the form without the extension, for a 1.5 peer: 176 bytes, and nothing is answered */
+  CHECK(rnc_node_set_interface_tunnel(p.b, 1, b_hash, 1) == RNC_OK);
+  CHECK(rnc_node_set_interface_tunnel(p.a, 1, NULL, 0) == RNC_OK);
+  old = synthesis(&p, p.hash);
+  CHECK(old.data_size == 176);
+  while (rnc_node_poll(p.b, &e) == RNC_OK)
+    ;
+  CHECK(rnc_node_input(p.b, 1, &old, 1700000002, p.now) == RNC_OK);
+  while (rnc_node_poll(p.b, &e) == RNC_OK)
+    CHECK(e.type != RNC_NODE_SEND);
+  CHECK(rnc_node_interface_tunnel_peer(p.b, 1, &peer) == RNC_OK && peer.has_identity && !peer.has_info);
+  rnc_node_free(p.a);
+  rnc_node_free(p.b);
+}
+/* A blackholed transport node gets no tunnel and no answer, and the host is told to drop the connection. */
+static void peer_blackholed(void) {
+  pair p;
+  rnc_packet syn;
+  rnc_node_event e;
+  uint8_t b_hash[32];
+  memset(b_hash, 0x77, sizeof(b_hash));
+  setup(&p);
+  CHECK(rnc_node_set_interface_tunnel(p.b, 1, b_hash, 1) == RNC_OK);
+  CHECK(!rnc_node_interface_peer_blackholed(p.b, 1, 1700000000));
+  CHECK(rnc_node_blackhole(p.b, p.a_id.hash, 0, "test", 1700000000) == RNC_OK);
+  while (rnc_node_poll(p.b, &e) == RNC_OK)
+    ;
+  syn = synthesis(&p, p.hash);
+  CHECK(rnc_node_input(p.b, 1, &syn, 1700000000, p.now) == RNC_OK);
+  CHECK(rnc_node_tunnel_count(p.b) == 0);
+  while (rnc_node_poll(p.b, &e) == RNC_OK)
+    CHECK(e.type != RNC_NODE_SEND);
+  CHECK(rnc_node_interface_peer_blackholed(p.b, 1, 1700000000));
+  rnc_node_free(p.a);
+  rnc_node_free(p.b);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "establish"))
@@ -356,6 +437,10 @@ int main(int argc, char **argv) {
     accepts_extension();
   else if (!strcmp(argv[1], "extension_reject"))
     rejects_bad_extension();
+  else if (!strcmp(argv[1], "peer"))
+    peer_info();
+  else if (!strcmp(argv[1], "peer_blackholed"))
+    peer_blackholed();
   else
     CHECK(0);
   puts("tunnel test passed");

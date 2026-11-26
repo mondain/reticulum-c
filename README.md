@@ -121,6 +121,12 @@ The tools stamp too, with the reference's values, so they work on a network that
 A stamped path request uses the 64 byte form of RNS 1.6; an RNS 1.5.5 transport node forwards it. A
 stamped announce carries 18 more bytes of app data, which software older than 1.6 does not strip.
 
+A TCP client names a tunnel when it connects, so the server can restore the paths it learned once the
+client returns. As in RNS 1.6, that packet also says which implementation and version the node runs,
+whether it transports and what stamps it requires; a server answers with its own, and
+`reticulum-c-ctl status -T` shows what the other end said. A server running RNS 1.5 refuses the longer
+packet, so tunnels to it are lost unless the client's interface says `tunnel_extension = No`.
+
 ## Tools
 
 Built with the examples (`-DRNC_BUILD_EXAMPLES=ON`, the default). Each attaches

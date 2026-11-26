@@ -28,14 +28,15 @@ sh "$script" --root "$src" v9.9.9 2>&1 | grep -q "9.9.9" || fail "the tag mismat
 # 3. a copy where one file is bumped but not the others
 copy() {
   rm -rf "$tmp/tree"
-  mkdir -p "$tmp/tree/mcu/app" "$tmp/tree/mcu/esp-idf/components/reticulum_c" "$tmp/tree/mcu/esp-idf/components/reticulum_c_mcu_app"
+  mkdir -p "$tmp/tree/mcu/app" "$tmp/tree/mcu/esp-idf/components/reticulum_c" "$tmp/tree/mcu/esp-idf/components/reticulum_c_mcu_app" "$tmp/tree/include/reticulum_c"
+  cp "$src/include/reticulum_c/rnc.h" "$tmp/tree/include/reticulum_c/"
   cp "$src/CMakeLists.txt" "$src/library.json" "$src/idf_component.yml" "$tmp/tree/"
   cp "$src/mcu/app/rnc_mcu_app.h" "$tmp/tree/mcu/app/"
   cp "$src"/mcu/esp-idf/components/reticulum_c/idf_component.yml "$tmp/tree/mcu/esp-idf/components/reticulum_c/"
 }
 copy
 sh "$script" --root "$tmp/tree" >"$tmp/out" 2>&1 || fail "the copy should pass: $(cat "$tmp/out")"
-for f in library.json idf_component.yml mcu/esp-idf/components/reticulum_c/idf_component.yml mcu/app/rnc_mcu_app.h CMakeLists.txt; do
+for f in library.json idf_component.yml mcu/esp-idf/components/reticulum_c/idf_component.yml mcu/app/rnc_mcu_app.h include/reticulum_c/rnc.h CMakeLists.txt; do
   copy
   sed "s/$version/99.0.0/" "$tmp/tree/$f" >"$tmp/edited" && cp "$tmp/edited" "$tmp/tree/$f"
   if sh "$script" --root "$tmp/tree" >"$tmp/out" 2>&1; then
