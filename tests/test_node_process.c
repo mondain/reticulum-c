@@ -4399,9 +4399,13 @@ static void stamper(const char *exe) {
   ready_line(fd, id);
   load_probe_destination(key, dest, pub, name_hash);
   rnc_netstamp_announce_material(dest, pub, name_hash, material);
-  /* the search runs in the background; the path response carries the stamp once it is found */
-  for (tries = 0; tries < 8 && !stamped; ++tries)
-    CHECK(ask_path(port, dest, 5, &answer, &ext, &stamped) || tries < 7);
+  /* The search runs in the background, at a lowered priority and for a random time; the path response carries
+   * the stamp once it is found. An unstamped answer comes back at once, so the wait is a time, not a count. */
+  for (tries = 0; tries < 300 && !stamped; ++tries) {
+    (void)ask_path(port, dest, 1, &answer, &ext, &stamped);
+    if (!stamped)
+      CHECK(poll(NULL, 0, 100) == 0);
+  }
   CHECK(stamped && ext.link_cost == 12.5);
   CHECK(rnc_netstamp_valid(material, sizeof(material), ext.stamp, sizeof(ext.stamp), 10.0));
   memcpy(first, ext.stamp, sizeof(first));
