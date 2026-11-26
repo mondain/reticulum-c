@@ -26,6 +26,13 @@ static size_t unhex(const char *s, uint8_t *out, size_t cap) {
   }
   return n;
 }
+static rnc_result rng(void *context, uint8_t *out, size_t size) {
+  static FILE *f;
+  (void)context;
+  if (!f)
+    f = fopen("/dev/urandom", "rb");
+  return f && fread(out, 1, size, f) == size ? RNC_OK : RNC_CRYPTO;
+}
 static void hex(const uint8_t *in, size_t n, char *out) {
   size_t i;
   for (i = 0; i < n; i++)
@@ -34,9 +41,14 @@ static void hex(const uint8_t *in, size_t n, char *out) {
 int main(int argc, char **argv) {
   char cmd[1024];
   FILE *p;
-  unsigned costs = 0, valids = 0, values = 0, exts = 0;
+  unsigned costs = 0, valids = 0, values = 0, exts = 0, identities = 0, ours = 0;
+  rnc_identity mine_id;
+  char mine_hex[129];
   CHECK(argc == 3); /* python executable, tests/netstamp_reference.py */
-  snprintf(cmd, sizeof(cmd), "'%s' '%s'", argv[1], argv[2]);
+  /* one stamped identity of ours for the reference to load */
+  CHECK(rnc_netstamp_identity_generate(&mine_id, 8.0, rng, NULL, 0, NULL) == RNC_OK);
+  hex(mine_id.private_key, 64, mine_hex);
+  snprintf(cmd, sizeof(cmd), "'%s' '%s' %s", argv[1], argv[2], mine_hex);
   p = popen(cmd, "r");
   CHECK(p);
   while (fgets(line, sizeof(line), p)) {
@@ -68,6 +80,22 @@ int main(int argc, char **argv) {
       CHECK(rnc_netstamp_value(material, m, stamp, s) == value);
       ++valids;
       values += valid;
+    } else if (line[0] == 'I' || line[0] == 'J') { /* I: the reference's identity; J: how it reads ours */
+      char prv_hex[129], pub_hex[129], mine[129];
+      uint8_t prv[64];
+      rnc_identity id;
+      double value;
+      CHECK(sscanf(line + 1, " %128s %128s %lf", prv_hex, pub_hex, &value) == 3);
+      CHECK(unhex(prv_hex, prv, sizeof(prv)) == 64);
+      CHECK(rnc_identity_from_private(&id, prv) == RNC_OK);
+      hex(id.public_key, 64, mine);
+      CHECK(!strcmp(mine, pub_hex));
+      CHECK(rnc_netstamp_identity_value(&id) == value);
+      if (line[0] == 'J') {
+        CHECK(value >= 8.0 && !strcmp(prv_hex, mine_hex));
+        ++ours;
+      } else
+        identities += value >= 8.0;
     } else if (line[0] == 'E') {
       char stamp_hex[64], ext_hex[64], mine[64];
       uint8_t stamp[16], ext[RNC_NETSTAMP_EXT_SIZE];
@@ -85,6 +113,7 @@ int main(int argc, char **argv) {
   }
   CHECK(pclose(p) == 0);
   CHECK(costs == 18 && valids > 2000 && values > 500 && values < valids && exts == 4);
+  CHECK(identities >= 3 && ours == 1);
   printf("netstamp reference: %u costs, %u validity checks, %u extensions agree\n", costs, valids, exts);
   return 0;
 }

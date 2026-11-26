@@ -40,6 +40,14 @@ rnc_result rnc_netstamp_find(const void *material, size_t material_size, double 
 rnc_result rnc_netstamp_find_key(const void *material, size_t material_size, double cost,
                                  rnc_random_fn random, void *random_context, uint64_t max_attempts,
                                  uint8_t private_key[32], uint8_t public_key[32], uint64_t *attempts);
+/* A stamped identity (RNS 1.6, Identity(value=n)): a new identity whose X25519 public key, as a stamp over its
+ * own Ed25519 public key, meets `value`. A value of 0 gives an ordinary identity. max_attempts and RNC_TIMEOUT as
+ * for rnc_netstamp_find_key; `identity` is written only on success. The work doubles with each step of value.
+ * Nothing in RNS 1.6 checks this value on the network. */
+rnc_result rnc_netstamp_identity_generate(rnc_identity *identity, double value, rnc_random_fn random,
+                                          void *random_context, uint64_t max_attempts, uint64_t *attempts);
+/* Identity.get_value: the value of any identity's public keys; 0 on error. */
+double rnc_netstamp_identity_value(const rnc_identity *identity);
 /* The announce extension: the last RNC_NETSTAMP_EXT_SIZE bytes of the announce app data (inside the signed
  * data): 0xC1, a reserved flags byte, the stamp, and the destination's link request cost (fraction byte, then
  * integer byte whose top bit is reserved). The stamp material is destination || public key || name hash. */
