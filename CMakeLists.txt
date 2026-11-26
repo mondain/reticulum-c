@@ -789,6 +789,38 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
     endif()
 endif()
 
+# SX1302 concentrator as an RNode (mcu/sx1302): Linux only, opt-in, needs a built
+# Lora-net/sx1302_hal checkout (run `make` in it first). See mcu/sx1302/README.md.
+set(RNC_SX1302_HAL "" CACHE PATH "Built sx1302_hal checkout for reticulum-c-rnode-sx1302")
+if(RNC_SX1302_HAL)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "RNC_SX1302_HAL: the SX1302 RNode needs Linux (spidev, GPIO character device)")
+    endif()
+    foreach(rnc_lgw_file libloragw/libloragw.a libtools/libtinymt32.a libloragw/inc/config.h)
+        if(NOT EXISTS "${RNC_SX1302_HAL}/${rnc_lgw_file}")
+            message(FATAL_ERROR "RNC_SX1302_HAL: ${RNC_SX1302_HAL}/${rnc_lgw_file} missing; run make in sx1302_hal")
+        endif()
+    endforeach()
+    file(GLOB RNC_SX1302_RADIO_SRCS ${CMAKE_SOURCE_DIR}/mcu/radio/*.c)
+    add_executable(reticulum-c-rnode-sx1302 mcu/sx1302/rnode_sx1302.c mcu/sx1302/rnc_sx1302.c
+        ${RNC_SX1302_RADIO_SRCS})
+    target_include_directories(reticulum-c-rnode-sx1302 PRIVATE mcu/radio mcu/sx1302
+        ${RNC_SX1302_HAL}/libloragw/inc)
+    target_link_libraries(reticulum-c-rnode-sx1302 PRIVATE
+        ${RNC_SX1302_HAL}/libloragw/libloragw.a ${RNC_SX1302_HAL}/libtools/libtinymt32.a rt m)
+    target_compile_options(reticulum-c-rnode-sx1302 PRIVATE -Wall -Wextra)
+    install(TARGETS reticulum-c-rnode-sx1302 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    if(BUILD_TESTING)
+        # the modem against a libloragw test double: no concentrator needed
+        add_executable(test_sx1302 mcu/sx1302/tests/test_sx1302.c mcu/sx1302/tests/fake_lgw.c
+            mcu/sx1302/rnc_sx1302.c ${RNC_SX1302_RADIO_SRCS})
+        target_include_directories(test_sx1302 PRIVATE mcu/radio mcu/sx1302 ${RNC_SX1302_HAL}/libloragw/inc)
+        target_link_libraries(test_sx1302 PRIVATE m)
+        add_test(NAME reticulum_sx1302_modem COMMAND test_sx1302)
+        set_tests_properties(reticulum_sx1302_modem PROPERTIES LABELS "mcu;sx1302" TIMEOUT 60)
+    endif()
+endif()
+
 # MCU example firmware (mcu/): the portable application and its host build need the
 # mcu profile; the test that runs it against reticulum-c-node builds the firmware in
 # its own build directory, so it is registered from the default build.
