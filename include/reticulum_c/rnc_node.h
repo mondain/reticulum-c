@@ -269,6 +269,13 @@ int rnc_node_accepts_links(rnc_node *node, const uint8_t destination[16]);
 rnc_result rnc_node_input(rnc_node *node, uint32_t interface_id,
                           const rnc_packet *packet, uint64_t unix_seconds,
                           uint64_t now_ms);
+/* What the last rnc_node_input made of its packet, for traffic statistics as RNS 1.6 keeps them. Only
+ * meaningful after a call that returned RNC_OK; a packet refused with an error is discarded traffic too. */
+#define RNC_INPUT_FILTERED 1u /* discarded: a duplicate, a rejected or stale announce, not for this node */
+#define RNC_INPUT_HEARD 2u    /* with FILTERED: an announce that still counts as heard (stale, or held back) */
+#define RNC_INPUT_LINK_RX 4u  /* link traffic received from a peer, for a local link or one forwarded */
+#define RNC_INPUT_LINK_TX 8u  /* link traffic forwarded on to a peer */
+unsigned rnc_node_input_class(const rnc_node *node);
 rnc_result rnc_node_send(rnc_node *node, const rnc_packet *packet,
                          uint64_t unix_seconds, uint64_t now_ms);
 rnc_result rnc_node_tick(rnc_node *node, uint64_t unix_seconds,
@@ -431,7 +438,8 @@ rnc_result rnc_node_destination_link_cost(const rnc_node *node, const uint8_t de
  * the destination is not local, its cost is 0, or the request's encryption key meets the cost as a stamped key
  * over destination || signature key; RNC_AUTH when it does not; RNC_PROTOCOL when the request is too short. */
 rnc_result rnc_node_check_link_request(const rnc_node *node, const uint8_t destination[16], const rnc_packet *request);
-/* Announces, and path requests, dropped on an interface for a missing or insufficient stamp. */
+/* Announces discarded on an interface (a missing or insufficient stamp, a blackholed identity, nothing newer
+ * than the known path), and path requests discarded for their stamp. */
 rnc_result rnc_node_interface_filtered(const rnc_node *node, uint32_t interface_id, uint64_t *announces);
 rnc_result rnc_node_interface_filtered_requests(const rnc_node *node, uint32_t interface_id, uint64_t *requests);
 /* Known-destination store (Identity.recall). Every valid, fresh announce for

@@ -456,6 +456,7 @@ typedef struct host_interface {
 } host_interface;
 struct rnc_host {
   rnc_node *node;
+  rnc_host_totals totals;
   unsigned stamp_workers;   /* link request stamp search threads; 0 = one per core */
   uint64_t stamp_trials;    /* key trials before giving up; 0 = 2^26 */
   host_interface interfaces[RNC_HOST_SLOTS];
@@ -2001,6 +2002,12 @@ rnc_result rnc_host_get_status(const rnc_host *h, uint32_t id,
     }
   return RNC_AGAIN;
 }
+rnc_result rnc_host_get_totals(const rnc_host *h, rnc_host_totals *totals) {
+  if (!h || !totals)
+    return RNC_INVALID;
+  *totals = h->totals;
+  return RNC_OK;
+}
 rnc_result rnc_host_status_at(const rnc_host *h, size_t index,
                               rnc_host_status *out) {
   if (!h || !out)
@@ -2146,6 +2153,50 @@ static rnc_result pump_node(rnc_host *h) {
     h->held = 0;
   }
 }
+static void count_filtered(rnc_host *h, host_interface *f, size_t wire_size) {
+  f->status.filtered_bytes += wire_size;
+  if (!f->status.local)
+    h->totals.filtered_bytes += wire_size;
+}
+/* Right after rnc_node_input returned r (not RNC_AGAIN) for a packet from f. */
+static void count_input(rnc_host *h, host_interface *f, const rnc_packet *p, size_t wire_size, rnc_result r) {
+  rnc_path_request request;
+  unsigned what;
+  size_t bare;
+  int announce = (p->flags & 3u) == RNC_ANNOUNCE;
+  if (r != RNC_OK) {
+    ++f->status.dropped_packets;
+    count_filtered(h, f, wire_size);
+    return;
+  }
+  what = rnc_node_input_class(h->node);
+  ++f->status.rx_packets;
+  ++f->ic_packets;
+  f->ic_bytes += wire_size;
+  f->last_heard = h->now;
+  if (what & RNC_INPUT_FILTERED) {
+    count_filtered(h, f, wire_size);
+    if (announce && (what & RNC_INPUT_HEARD))
+      ++f->status.rx_announces;
+    return;
+  }
+  f->status.rx_bytes += wire_size;
+  if (!f->status.local)
+    h->totals.rx_bytes += wire_size;
+  if (announce) {
+    ++f->status.rx_announces;
+    f->status.rx_announce_bytes += wire_size;
+  } else if (rnc_path_request_decode(p, &request) == RNC_OK) {
+    ++f->status.rx_path_requests;
+    f->status.rx_path_request_bytes += wire_size;
+  }
+  /* the link counters leave the access code out, as the reference's do */
+  bare = f->has_ifac && wire_size > f->status.ifac_size ? wire_size - f->status.ifac_size : wire_size;
+  if (what & RNC_INPUT_LINK_RX)
+    h->totals.link_rx_bytes += bare;
+  if (what & RNC_INPUT_LINK_TX)
+    h->totals.link_tx_bytes += bare;
+}
 static rnc_result input_packet(rnc_host *h, host_interface *f,
                                const uint8_t *data, size_t size,
                                uint64_t unix_seconds) {
@@ -2158,6 +2209,7 @@ static rnc_result input_packet(rnc_host *h, host_interface *f,
     if (r != RNC_OK) {
       ++f->status.dropped_packets;
       ++f->status.ifac_violations;
+      count_filtered(h, f, wire_size);
       return RNC_OK;
     }
     data = raw;
@@ -2165,12 +2217,14 @@ static rnc_result input_packet(rnc_host *h, host_interface *f,
   }
   if (size > f->status.mtu) {
     ++f->status.dropped_packets;
+    count_filtered(h, f, wire_size);
     return RNC_OK;
   }
   r = rnc_packet_decode(data, size, &p);
   if (r != RNC_OK) {
     ++f->status.dropped_packets;
     ++f->status.protocol_violations;
+    count_filtered(h, f, wire_size);
     return RNC_OK;
   }
   r = rnc_node_input(h->node, f->status.interface_id, &p, unix_seconds, h->now);
@@ -2180,24 +2234,7 @@ static rnc_result input_packet(rnc_host *h, host_interface *f,
     f->pending_wire_size = wire_size;
     return RNC_AGAIN;
   }
-  if (r == RNC_OK) {
-    ++f->status.rx_packets;
-    f->status.rx_bytes += wire_size;
-    ++f->ic_packets;
-    f->ic_bytes += wire_size;
-    if ((p.flags & 3u) == RNC_ANNOUNCE) {
-      ++f->status.rx_announces;
-      f->status.rx_announce_bytes += wire_size;
-    } else {
-      rnc_path_request request;
-      if (rnc_path_request_decode(&p, &request) == RNC_OK) {
-        ++f->status.rx_path_requests;
-        f->status.rx_path_request_bytes += wire_size;
-      }
-    }
-    f->last_heard = h->now;
-  } else
-    ++f->status.dropped_packets;
+  count_input(h, f, &p, wire_size, r);
   return pump_node(h);
 }
 static void accept_tcp(rnc_host *h, host_interface *parent) {
@@ -3242,11 +3279,7 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
     if (r == RNC_AGAIN)
       return RNC_OK;
     f->pending = 0;
-    if (r == RNC_OK) {
-      ++f->status.rx_packets;
-      f->last_heard = h->now;
-    } else
-      ++f->status.dropped_packets;
+    count_input(h, f, &f->pending_packet, f->pending_wire_size, r);
     r = pump_node(h);
     if (r != RNC_OK)
       return r;
@@ -3478,6 +3511,8 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
       if (delivered) {
         ++f->status.tx_packets;
         f->status.tx_bytes += q->wire_size;
+        if (!f->status.local)
+          h->totals.tx_bytes += q->wire_size;
         if (q->announce) {
           ++f->status.tx_announces;
           f->status.tx_announce_bytes += q->wire_size;
@@ -3526,10 +3561,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
                            unix_seconds, now);
         if (r != RNC_AGAIN) {
           f->pending = 0;
-          if (r == RNC_OK)
-            ++f->status.rx_packets;
-          else
-            ++f->status.dropped_packets;
+          count_input(h, f, &f->pending_packet, f->pending_wire_size, r);
         }
       }
       if (now - f->last_heard >= RNC_HOST_AUTO_PEER_TIMEOUT)
@@ -3542,10 +3574,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
                            unix_seconds, now);
         if (r != RNC_AGAIN) {
           f->pending = 0;
-          if (r == RNC_OK)
-            ++f->status.rx_packets;
-          else
-            ++f->status.dropped_packets;
+          count_input(h, f, &f->pending_packet, f->pending_wire_size, r);
         }
       }
       if (now - f->last_heard >= WEAVE_PEER_TIMEOUT_MS)
@@ -3559,10 +3588,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
                            unix_seconds, now);
         if (r != RNC_AGAIN) {
           f->pending = 0;
-          if (r == RNC_OK)
-            ++f->status.rx_packets;
-          else
-            ++f->status.dropped_packets;
+          count_input(h, f, &f->pending_packet, f->pending_wire_size, r);
         }
       }
       /* a radio that never confirms its parameters takes the device down for
@@ -3663,10 +3689,7 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
                          unix_seconds, now);
       if (r != RNC_AGAIN) {
         f->pending = 0;
-        if (r == RNC_OK)
-          ++f->status.rx_packets;
-        else
-          ++f->status.dropped_packets;
+        count_input(h, f, &f->pending_packet, f->pending_wire_size, r);
       }
     }
     if (f->status.kind == RNC_HOST_RNODE && f->fd >= 0 && !f->connecting &&

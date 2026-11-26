@@ -197,6 +197,8 @@ typedef struct rnc_host_status {
   /* path requests (the reference's prxc/ptxc and prxb/ptxb) */
   uint64_t rx_path_requests, tx_path_requests, rx_path_request_bytes, tx_path_request_bytes;
   uint64_t ifac_violations, protocol_violations;
+  /* bytes received here and discarded (rnc_node_input_class, bad IFAC, undecodable); they are not in rx_bytes */
+  uint64_t filtered_bytes;
   /* backpressure on a TCP peer that connected to this host (the reference's Backbone ingress and egress control):
    * reading from it is held back while the host's event queue is deep and it is the busiest producer, and its
    * outgoing queue counts as stalled once nothing drains from it */
@@ -269,6 +271,12 @@ rnc_result rnc_host_add(rnc_host *host, uint32_t interface_id,
 rnc_result rnc_host_remove(rnc_host *host, uint32_t interface_id);
 rnc_result rnc_host_get_status(const rnc_host *host, uint32_t interface_id,
                                rnc_host_status *status);
+/* Running totals over every interface the host has had, closed ones included, local clients' interfaces left
+ * out (the reference's totals). Link traffic is what travels on links: received from a peer, and forwarded on. */
+typedef struct rnc_host_totals {
+  uint64_t rx_bytes, tx_bytes, filtered_bytes, link_rx_bytes, link_tx_bytes;
+} rnc_host_totals;
+rnc_result rnc_host_get_totals(const rnc_host *host, rnc_host_totals *totals);
 rnc_result rnc_host_status_at(const rnc_host *host, size_t index,
                               rnc_host_status *status);
 /* Poll descriptors, feed decoded/IFAC-verified packets, retain bounded output,
