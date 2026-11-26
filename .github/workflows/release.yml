@@ -182,6 +182,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat > notes.md <<'NOTES'
+          ## Security
+
+          Fixed in v0.6.1: `reticulum-c-git` v0.2.0-rc2 to v0.6.0 passed repository files to the image encoder of its media pages without checking their format. With some ImageMagick installations a crafted file can use this to read files that the node's user can read. It applies when the page server is enabled (`serve_nomadnet`), `media_conversion` is on (the default), an encoder is installed and someone else can get a file into a served repository. Upgrade, or set `media_conversion = no` in the `[pages]` section. RNS fixed the same issue in its re-released 1.6.1 on 2026-11-19.
+
+          **Check before upgrading from v0.6.0:** tunnel synthesis is now sent in the RNS 1.6 form, which a server running RNS 1.5 refuses. For a connection to such a server set `tunnel_extension = No` on that interface.
+
           ## Linux builds
 
           Self-contained Linux builds (musl, fully static: OpenSSL and bzip2 are linked in, nothing to install on the device).
