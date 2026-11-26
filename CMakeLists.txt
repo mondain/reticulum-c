@@ -394,6 +394,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             target_link_libraries(reticulum-c-example-${example} PRIVATE reticulum_c_host OpenSSL::Crypto)
             target_compile_options(reticulum-c-example-${example} PRIVATE -Wall -Wextra -Wpedantic -Werror)
         endforeach()
+        add_executable(reticulum-c-example-link examples/example_link.c)
+        add_executable(reticulum-c-example-identify examples/example_identify.c)
+        foreach(example link identify)
+            target_link_libraries(reticulum-c-example-${example} PRIVATE reticulum_c_host OpenSSL::Crypto)
+            target_compile_options(reticulum-c-example-${example} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        endforeach()
         add_executable(reticulum-c-git examples/reticulum_git.c)
         target_link_libraries(reticulum-c-git PRIVATE reticulum_c_host OpenSSL::Crypto)
         target_compile_options(reticulum-c-git PRIVATE -Wall -Wextra -Wpedantic -Werror ${RNC_NO_FORMAT_TRUNCATION})
@@ -583,6 +589,10 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                 $<TARGET_FILE:reticulum-c-node> chat_examples $<TARGET_FILE:reticulum-c-example-broadcast>
                 $<TARGET_FILE:reticulum-c-example-group> $<TARGET_FILE:reticulum-c-example-ratchets>)
             set_tests_properties(reticulum_node_process_chat_examples PROPERTIES LABELS network TIMEOUT 120)
+            add_test(NAME reticulum_node_process_link_examples COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> link_examples $<TARGET_FILE:reticulum-c-example-link>
+                $<TARGET_FILE:reticulum-c-example-identify>)
+            set_tests_properties(reticulum_node_process_link_examples PROPERTIES LABELS network TIMEOUT 120)
             add_test(NAME reticulum_node_process_cp_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cp_tools $<TARGET_FILE:reticulum-c-cp>)
             set_tests_properties(reticulum_node_process_cp_tools PROPERTIES LABELS network TIMEOUT 120)
@@ -684,6 +694,13 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-example-ratchets> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_chat_examples_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 180)
+                add_test(NAME reticulum_node_process_link_examples_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> link_examples_ref
+                    $<TARGET_FILE:reticulum-c-example-link> $<TARGET_FILE:reticulum-c-example-identify>
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_link_examples_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 240)
                 add_test(NAME reticulum_node_process_rnid_announce_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> rnid_announce_ref

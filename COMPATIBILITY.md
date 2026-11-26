@@ -1341,3 +1341,15 @@ which has no reference example, a script using the reference's `Destination`.
 Differences from the reference programs: the ratchet server announces by itself instead of on Enter, keeps
 8 old ratchets (the reference keeps 512) and its identity between runs. Broadcast and GROUP packets are not
 routed by transport nodes, so these two connect to each other (`--listen`, `--connect`).
+
+## Link and identify examples (`feature/examples-link-identify`)
+
+`reticulum_node_process_link_examples` runs each between itself through a daemon (lines both ways, close
+from either side, identification, an allow list that refuses and admits);
+`reticulum_node_process_link_examples_rns` runs both against the unmodified `Link.py` and `Identify.py`, as
+client and as server. `example_link.h` holds the link handling for reuse.
+
+Differences from the reference programs: the server announces by itself instead of on Enter and answers
+whichever link a line came on (the reference answers the most recent one); the identify client uses the
+identity in its identity file instead of a new one; `--allow` is an addition. The link server announces no
+link request cost (`Link.py` sets 14.2), and the client stamps a request when the server announces one.
