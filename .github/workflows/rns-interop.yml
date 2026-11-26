@@ -19,7 +19,7 @@ jobs:
       - name: Prepare unmodified RNS 1.6.1 oracle
         run: |
           git clone https://github.com/markqvist/Reticulum.git "$RUNNER_TEMP/rns"
-          git -C "$RUNNER_TEMP/rns" checkout cff4d03fdbd6bfb63b765280cd944756ac5cce8d
+          git -C "$RUNNER_TEMP/rns" checkout f55c0c6ea618ebae33e7d3ab2e37b200ce0b0d81
           python3 -m venv "$RUNNER_TEMP/rns-env"
           "$RUNNER_TEMP/rns-env/bin/pip" install 'cryptography>=3.4.7' 'pyserial==3.5'
           # LXMF supplies the stamp functions RNS uses for interface discovery

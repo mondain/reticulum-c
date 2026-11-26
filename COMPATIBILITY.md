@@ -1058,9 +1058,13 @@ tree, blob, commits, commit, refs, stats, releases, release, work and work
 document pages, plus artifact, download, media and work-document downloads. Files
 `CONFIG/templates/NAME.mu` replace the built-in templates (`{PAGE_CONTENT}`,
 `{NODE_NAME}`, `{VERSION}`, `{NAVIGATION}`, `{GEN_TIME}`); `unicode_icons` and
-`media_conversion` work as in the reference, and images and video are converted
+`media_conversion` work as in the reference, and images are converted
 to WebP with magick, convert, gm, ffmpeg or avconv (or `RNGIT_MEDIA_BACKEND`),
-the original being served when no backend exists. Markdown in READMEs, release
+the original being served when no backend exists. An encoder runs only on content of at most
+32 MiB with a PNG, JPEG, GIF, TIFF, WebP or BMP signature, and ImageMagick and
+GraphicsMagick are told that format, as in the RNS 1.6.1 security fix of
+19 November 2026; anything else is served unconverted. Versions v0.2.0-rc2 to
+v0.6.0 do not check the content: set `media_conversion = no` there. Markdown in READMEs, release
 notes and work documents is converted to micron, and commit signatures made
 with `reticulum-c-git-cs` are shown as the reference shows them.
 
@@ -1278,3 +1282,13 @@ Not covered: a link request round trip against an enforcing reference destinatio
 ESP-IDF example application, the browser flasher against real hardware (a simulated serial device only),
 and any over the air check of a stamped board. Reference 1.6 changes with no wire effect (SQLite storage,
 path table culling, filtering and hop limiter options) are open, listed in the gap list.
+
+## Media conversion security fix (`fix/media-conversion-formats`)
+
+The oracle moved to `f55c0c6ea618ebae33e7d3ab2e37b200ce0b0d81`: RNS 1.6.1 plus the upstream fix of
+19 November 2026 to the media conversion of `rngit` (`docs/security/` in the reference). Repository
+content reached ImageMagick without a format check, which some installations can be made to turn into
+reading local files. `reticulum-c-git` had the same behaviour and now checks the signature, names the
+format to the encoder and caps the input at 32 MiB (`tests/test_rngit_pages.c`, `media_formats`,
+with a recording fake encoder; ImageMagick on the build host accepts the six `format:-` forms).
+The exploit itself was not reproduced here.

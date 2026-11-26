@@ -8,7 +8,7 @@ No Python, Go or Rust stack is linked into the runtime library or installed SDK.
 
 | Reference | Exact snapshot | Use |
 | --- | --- | --- |
-| Reticulum/RNS 1.6.1 | cff4d03fdbd6bfb63b765280cd944756ac5cce8d | Protocol behavior/byte layouts, optional unmodified Channel.py direct/routed live oracle, Resource/service/security differential fixtures and shared-instance RPC process check. |
+| Reticulum/RNS 1.6.1 as re-released on 2026-11-19 (tag `1.6.1` plus the rngit media conversion fix) | f55c0c6ea618ebae33e7d3ab2e37b200ce0b0d81 | Protocol behavior/byte layouts, optional unmodified Channel.py direct/routed live oracle, Resource/service/security differential fixtures and shared-instance RPC process check. |
 | Supplied Reticulum Manual, Release 1.5.5, September 29 2026 | PDF SHA-256 33ad80f0f831c7eab91ee31c4ad21fc1cd573656d23de7c882bcfed1d4534584 | Link/channel/API documentation, reviewed as extracted text. The PDF and extracted manual are not bundled here. |
 | Leviculum | 395edd42fbbffcdfb438fcd80afa17668459d331 | Specification prose/vector snapshot and optional unmodified C-API live oracle. |
 | Vector generator's recorded RNS 1.3.5 | d5e62d4e15c5fe2e170f7bd9e120551671f21a27 | Source identified by the external frozen-vector generator. Older vectors support only the implemented constructions. |
@@ -20,7 +20,7 @@ Passing a frozen vector is not live interoperability certification.
 
 Reference sources:
 
-- [RNS pinned source](https://github.com/markqvist/Reticulum/tree/cff4d03fdbd6bfb63b765280cd944756ac5cce8d)
+- [RNS pinned source](https://github.com/markqvist/Reticulum/tree/f55c0c6ea618ebae33e7d3ab2e37b200ce0b0d81)
 - [Leviculum pinned source](https://codeberg.org/Lew_Palm/leviculum/src/commit/395edd42fbbffcdfb438fcd80afa17668459d331)
 - [Leviculum vector dataset](https://codeberg.org/Lew_Palm/leviculum/src/commit/395edd42fbbffcdfb438fcd80afa17668459d331/docs/src/appendix/reticulum/vectors/vectors.json)
 

@@ -1223,6 +1223,90 @@ static void media_conversion(void) {
   free(oldpath);
   mc_winner = -1;
 }
+/* The encoder sees only content that carries one of the supported image
+ * signatures, and is told which one it is (RNS 1.6.1 media.py). */
+static void media_formats(void) {
+  static const struct {
+    const char *content, *argv; /* content is a printf format; argv NULL: no encoder run */
+  } cases[] = {
+      {"\\211PNG\\r\\n\\032\\n\\000\\000", "png:- webp:-"},
+      {"\\377\\330\\377\\340xxxx", "jpeg:- webp:-"},
+      {"GIF87a..", "gif:- webp:-"},
+      {"GIF89a..", "gif:- webp:-"},
+      {"II*\\000....", "tiff:- webp:-"},
+      {"MM\\000*....", "tiff:- webp:-"},
+      {"RIFF....WEBPVP8X\\012\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000", "webp:- webp:-"},
+      {"BM............\\050\\000\\000\\000....", "bmp:- webp:-"},
+      {"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>", NULL},
+      {"push graphic-context\\nviewbox 0 0 1 1\\n", NULL},
+      {"%%!PS-Adobe-3.0\\n", NULL},
+      {"BM............\\377\\000\\000\\000....", NULL},
+      {"RIFF....WEBP", NULL},
+      {"\\211PNG", NULL},
+      {"", NULL}};
+  char dir[160], script[220], argv_path[220], stdin_path[220], got[128];
+  const char *op = getenv("PATH");
+  char *oldpath = op ? strdup(op) : NULL, *np;
+  uint8_t out[64];
+  size_t i, n, size;
+  FILE *f;
+  CHECK(oldpath);
+  snprintf(dir, sizeof(dir), "%s/recbin", root);
+  sh("mkdir -p %s", dir);
+  snprintf(script, sizeof(script), "%s/magick", dir);
+  snprintf(argv_path, sizeof(argv_path), "%s/argv", dir);
+  snprintf(stdin_path, sizeof(stdin_path), "%s/stdin", dir);
+  f = fopen(script, "w");
+  CHECK(f);
+  fprintf(f, "#!/bin/sh\necho \"$@\" > %s\ncat > %s\n", argv_path, stdin_path);
+  fputs("printf 'RIFF\\044\\000\\000\\000WEBPVP8X\\012\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000'\n", f);
+  fclose(f);
+  chmod(script, 0755);
+  size = strlen(dir) + strlen(oldpath) + 2;
+  np = malloc(size);
+  CHECK(np);
+  snprintf(np, size, "%s:%s", dir, oldpath);
+  CHECK(setenv("PATH", np, 1) == 0);
+  free(np);
+  mc_winner = -1;
+  setenv("RNGIT_MEDIA_BACKEND", "magick", 1);
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    char *argv[] = {"printf", (char *)cases[i].content, NULL};
+    int ok;
+    unlink(argv_path);
+    ok = mc_convert_to_webp(argv, root, out, sizeof(out), &n);
+    f = fopen(argv_path, "r");
+    got[0] = 0;
+    if (f) {
+      CHECK(fgets(got, sizeof(got), f));
+      got[strcspn(got, "\n")] = 0;
+      fclose(f);
+    }
+    if (cases[i].argv ? !ok || strcmp(got, cases[i].argv) : ok || f != NULL) {
+      fprintf(stderr, "media case %zu: ok=%d encoder arguments '%s', expected '%s'\n", i, ok, got,
+              cases[i].argv ? cases[i].argv : "(not run)");
+      CHECK(0);
+    }
+  }
+  /* the encoder gets the whole input, the sniffed start included */
+  {
+    char *argv[] = {"sh", "-c", "printf '\\211PNG\\r\\n\\032\\n'; head -c 200000 /dev/zero", NULL};
+    struct stat st;
+    CHECK(mc_convert_to_webp(argv, root, out, sizeof(out), &n) && n == 33); /* what the fake encoder prints */
+    CHECK(!stat(stdin_path, &st) && st.st_size == 200008);
+  }
+  /* an input over 32 MiB is not converted */
+  {
+    char *argv[] = {"sh", "-c", "printf '\\211PNG\\r\\n\\032\\n'; head -c 33554432 /dev/zero", NULL};
+    unlink(argv_path);
+    CHECK(!mc_convert_to_webp(argv, root, out, sizeof(out), &n) && n == 0);
+    CHECK(access(argv_path, F_OK) != 0);
+  }
+  unsetenv("RNGIT_MEDIA_BACKEND");
+  CHECK(setenv("PATH", oldpath, 1) == 0);
+  free(oldpath);
+  mc_winner = -1;
+}
 static void templates(void) {
   char dir[PATH_MAX + 32], p[PATH_MAX + 64];
   char *t;
@@ -1305,6 +1389,7 @@ int main(void) {
   work_pages();
   downloads_and_media();
   media_conversion();
+  media_formats();
   templates();
   handlers_survive_garbage();
   announce_data();
