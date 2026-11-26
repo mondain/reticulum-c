@@ -1330,3 +1330,14 @@ and neither its tools nor ours offer it. The search is on one thread and the cal
 
 Verified with `reticulum_netstamp_identity_stamp` and, against the reference in both directions,
 `reticulum_netstamp_rns` (public keys and values agree).
+
+## Broadcast, GROUP and ratchet examples (`feature/examples-plain-group-ratchets`)
+
+`reticulum_node_process_chat_examples` runs the three between themselves (a GROUP member with another key
+hears nothing; the ratchet file is kept across a server restart), `reticulum_node_process_chat_examples_rns`
+runs each against the unmodified reference in both directions: `Broadcast.py`, `Ratchets.py`, and for GROUP,
+which has no reference example, a script using the reference's `Destination`.
+
+Differences from the reference programs: the ratchet server announces by itself instead of on Enter, keeps
+8 old ratchets (the reference keeps 512) and its identity between runs. Broadcast and GROUP packets are not
+routed by transport nodes, so these two connect to each other (`--listen`, `--connect`).

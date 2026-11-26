@@ -6819,6 +6819,219 @@ static void traffic_stats(const char *exe, const char *ctl, const char *cp, cons
   puts(reference ? "unmodified RNS rnstatus shows the traffic statistics" : "node traffic statistics passed");
 }
 
+/* ---- the broadcast, group and ratchet examples ---------------------------------------------------------- */
+/* Both sides of a chat example have printed their ready line; a line typed on one appears on the other. */
+static void chat_says(live_proc *from, live_proc *to, const char *text) {
+  char line[2048], typed[256], wanted[256];
+  CHECK(snprintf(typed, sizeof(typed), "%s\n", text) > 0 && snprintf(wanted, sizeof(wanted), "Received data: %s", text) > 0);
+  live_send(from, typed);
+  CHECK(live_find(to, wanted, 10000, line, sizeof(line)));
+}
+static void chat_start(live_proc *p, const char *pythonpath, char *const argv[], const char *ready) {
+  char line[2048];
+  live_spawn_argv(p, pythonpath, argv);
+  CHECK(live_find(p, ready, 20000, line, sizeof(line)));
+}
+static void ratchet_ping(const char *ratchets, const char *connect, const char *identity, const char *hash) {
+  char out[8192];
+  char *client[] = {(char *)ratchets, "--connect", (char *)connect, "--identity", (char *)identity, "--count", "2",
+                    "client", (char *)hash, NULL};
+  const char *at;
+  memset(out, 0, sizeof(out));
+  CHECK(run_cp(ratchets, out, sizeof(out), client) == 0);
+  at = strstr(out, "Valid reply received from");
+  CHECK(at && strstr(at + 1, "Valid reply received from"));
+}
+static void chat_examples(const char *exe, const char *broadcast, const char *group, const char *ratchets) {
+  char dir[] = "/tmp/rnc-ex-XXXXXX", cfg[300], key[300], admin[300], text[1024], ida[300], idb[300], keyfile[300],
+       other[300], listen[40], connect[40], identity[33], line[2048], out[4096], hash[40], store[300];
+  unsigned direct = unused_port(), port = unused_port();
+  live_proc a, b;
+  struct stat st;
+  pid_t daemon;
+  int dfd;
+  const char *at;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(ida, sizeof(ida), "%s/id_a", dir) > 0 && snprintf(idb, sizeof(idb), "%s/id_b", dir) > 0);
+  CHECK(snprintf(keyfile, sizeof(keyfile), "%s/group.key", dir) > 0 && snprintf(other, sizeof(other), "%s/other.key", dir) > 0);
+  CHECK(snprintf(listen, sizeof(listen), "127.0.0.1:%u", direct) > 0);
+  { /* broadcast: PLAIN, between two directly connected peers */
+    char *one[] = {(char *)broadcast, "--listen", listen, "--identity", ida, NULL};
+    char *two[] = {(char *)broadcast, "--connect", listen, "--identity", idb, NULL};
+    chat_start(&a, "", one, "Broadcast example <");
+    chat_start(&b, "", two, "Broadcast example <");
+    chat_says(&b, &a, "hello from b");
+    chat_says(&a, &b, "and from a");
+    live_end(&b);
+    live_end(&a);
+  }
+  { /* group: the same with a shared key; another key hears nothing */
+    char *make[] = {(char *)group, "keygen", keyfile, NULL};
+    char *make_other[] = {(char *)group, "keygen", other, NULL};
+    char *one[] = {(char *)group, "--listen", listen, "--identity", ida, "--key", keyfile, NULL};
+    char *two[] = {(char *)group, "--connect", listen, "--identity", idb, "--key", keyfile, NULL};
+    char *wrong[] = {(char *)group, "--connect", listen, "--identity", idb, "--key", other, NULL};
+    CHECK(run_cp(group, out, sizeof(out), make) == 0 && run_cp(group, out, sizeof(out), make_other) == 0);
+    CHECK(!stat(keyfile, &st) && st.st_size == 128 && (st.st_mode & 0777) == 0600);
+    CHECK(run_cp(group, out, sizeof(out), make) != 0); /* an existing key is not overwritten */
+    chat_start(&a, "", one, "Group example <");
+    chat_start(&b, "", two, "Group example <");
+    chat_says(&b, &a, "for the group");
+    chat_says(&a, &b, "and back");
+    live_end(&b);
+    chat_start(&b, "", wrong, "Group example <");
+    live_send(&b, "from another group\n");
+    CHECK(!live_find(&a, "Received data: from another group", 1500, line, sizeof(line)));
+    live_end(&b);
+    live_end(&a);
+  }
+  /* ratchets: through a transport node, with the ratchet file kept across a restart */
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0 && snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0 &&
+        snprintf(admin, sizeof(admin), "%s/admin", dir) > 0 && snprintf(store, sizeof(store), "%s/ratchets", dir) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  {
+    char *serve[] = {(char *)ratchets, "--connect", connect, "--identity", ida, "--ratchets", store, "server", NULL};
+    unsigned round;
+    for (round = 0; round < 2; ++round) {
+      chat_start(&a, "", serve, "Ratcheted echo server <");
+      CHECK(live_find(&a, "Sent announce from <", 10000, line, sizeof(line)));
+      at = strstr(line, "Sent announce from <");
+      CHECK(at && sscanf(at, "Sent announce from <%32[0-9a-f]>", hash) == 1);
+      CHECK(!stat(store, &st) && st.st_size > 64 && (st.st_mode & 0777) == 0600);
+      ratchet_ping(ratchets, connect, idb, hash);
+      CHECK(live_find(&a, "Received packet from echo client, proof sent", 10000, line, sizeof(line)));
+      live_end(&a);
+    }
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("broadcast, group and ratchet examples passed");
+}
+/* The same examples against the unmodified reference: Broadcast.py, Ratchets.py, and for GROUP, which has no
+ * reference example, the reference's own Destination calls. */
+static const char *reference_group =
+    "import RNS, sys, time\n"
+    "r = RNS.Reticulum(configdir=sys.argv[1], loglevel=1)\n"
+    "key = open(sys.argv[2], 'rb').read()\n"
+    "identity = RNS.Identity(create_keys=False)\n"
+    "identity.load_public_key(key[:64])\n"
+    "inbound = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.GROUP, 'reticulum_c', 'example', 'group')\n"
+    "inbound.load_private_key(key[64:])\n"
+    "def received(data, packet):\n"
+    "    print('Received data: ' + data.decode('utf-8'), flush=True)\n"
+    "    out = RNS.Destination(identity, RNS.Destination.OUT, RNS.Destination.GROUP, 'reticulum_c', 'example', 'group')\n"
+    "    out.load_private_key(key[64:])\n"
+    "    RNS.Packet(out, b'reference heard ' + data).send()\n"
+    "inbound.set_packet_callback(received)\n"
+    "print('READY', flush=True)\n"
+    "time.sleep(60)\n";
+static void chat_reference_config(char *dir, size_t size, const char *base, const char *name, unsigned port) {
+  char path[600], text[600];
+  CHECK(snprintf(dir, size, "%s/%s", base, name) < (int)size && !mkdir(dir, 0700));
+  CHECK(snprintf(path, sizeof(path), "%s/config", dir) < (int)sizeof(path));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = No\n[interfaces]\n[[S]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+  config_file(path, text);
+}
+static void chat_examples_reference(const char *exe, const char *broadcast, const char *group, const char *ratchets,
+                                    const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-exref-XXXXXX", dir[500], script[500], ida[300], idb[300], keyfile[300], connect[40],
+       line[2048], out[4096], cfg[400], key[400], admin[400], text[1024], identity[33], hash[40], store[300], saved[100];
+  unsigned direct = unused_port(), port = unused_port();
+  live_proc ref, mine;
+  pid_t daemon;
+  int dfd, tries;
+  const char *at;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(ida, sizeof(ida), "%s/id_a", base) > 0 && snprintf(idb, sizeof(idb), "%s/id_b", base) > 0);
+  CHECK(snprintf(keyfile, sizeof(keyfile), "%s/group.key", base) > 0);
+  { /* Broadcast.py */
+    char *theirs[] = {(char *)python, script, "--config", dir, NULL};
+    char *ours[] = {(char *)broadcast, "--connect", connect, "--identity", ida, NULL};
+    CHECK(snprintf(script, sizeof(script), "%s/Examples/Broadcast.py", reference) > 0);
+    chat_reference_config(dir, sizeof(dir), base, "broadcast", direct);
+    CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", direct) > 0);
+    chat_start(&ref, reference, theirs, "Broadcast example ");
+    chat_start(&mine, "", ours, "Broadcast example <");
+    live_sleep(500);
+    chat_says(&mine, &ref, "from c");
+    chat_says(&ref, &mine, "from the reference");
+    live_end(&mine);
+    live_end(&ref);
+  }
+  { /* GROUP */
+    char *make[] = {(char *)group, "keygen", keyfile, NULL};
+    char *theirs[] = {(char *)python, "-u", "-c", (char *)reference_group, dir, keyfile, NULL};
+    char *ours[] = {(char *)group, "--connect", connect, "--identity", ida, "--key", keyfile, NULL};
+    direct = unused_port();
+    CHECK(run_cp(group, out, sizeof(out), make) == 0);
+    chat_reference_config(dir, sizeof(dir), base, "group", direct);
+    CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", direct) > 0);
+    chat_start(&ref, reference, theirs, "READY");
+    chat_start(&mine, "", ours, "Group example <");
+    live_sleep(500);
+    chat_says(&mine, &ref, "group from c");
+    CHECK(live_find(&mine, "Received data: reference heard group from c", 10000, line, sizeof(line)));
+    live_end(&mine);
+    live_end(&ref);
+  }
+  /* Ratchets.py, both ways through a transport node */
+  CHECK(snprintf(script, sizeof(script), "%s/Examples/Ratchets.py", reference) > 0);
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0 && snprintf(key, sizeof(key), "%s/daemon_id", base) > 0 &&
+        snprintf(admin, sizeof(admin), "%s/admin", base) > 0 && snprintf(store, sizeof(store), "%s/ratchets", base) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  { /* our client, reference server */
+    char *theirs[] = {(char *)python, script, "-s", "--config", dir, NULL};
+    live_peer_config(dir, sizeof(dir), base, "ratchetserver", port);
+    live_spawn_argv(&ref, reference, theirs);
+    CHECK(live_find(&ref, "Ratcheted echo server <", 30000, line, sizeof(line)));
+    at = strstr(line, "Ratcheted echo server <");
+    CHECK(sscanf(at, "Ratcheted echo server <%32[0-9a-f]>", hash) == 1);
+    live_send(&ref, "\n"); /* the reference server announces on Enter */
+    live_sleep(2000);
+    ratchet_ping(ratchets, connect, ida, hash);
+    live_end(&ref);
+    CHECK(snprintf(saved, sizeof(saved), "/tmp/%s.ratchets", hash) > 0); /* where Ratchets.py keeps them */
+    (void)unlink(saved);
+  }
+  { /* reference client, our server */
+    char *serve[] = {(char *)ratchets, "--connect", connect, "--identity", idb, "--ratchets", store, "server", NULL};
+    char *theirs[] = {(char *)python, script, "--config", dir, "-t", "10", hash, NULL};
+    int replied = 0;
+    chat_start(&mine, "", serve, "Ratcheted echo server <");
+    CHECK(live_find(&mine, "Sent announce from <", 10000, line, sizeof(line)));
+    at = strstr(line, "Sent announce from <");
+    CHECK(at && sscanf(at, "Sent announce from <%32[0-9a-f]>", hash) == 1);
+    live_peer_config(dir, sizeof(dir), base, "ratchetclient", port);
+    live_spawn_argv(&ref, reference, theirs);
+    live_sleep(4000);
+    for (tries = 0; tries < 12 && !replied; ++tries) {
+      live_send(&ref, "\n"); /* Enter: request the path, then send once it is known */
+      replied = live_find(&ref, "Valid reply received from", 3000, line, sizeof(line));
+    }
+    CHECK(replied);
+    CHECK(live_find(&mine, "Received packet from echo client, proof sent", 10000, line, sizeof(line)));
+    live_end(&ref);
+    live_end(&mine);
+  }
+  stop(daemon, dfd);
+  remove_tree(base);
+  puts("broadcast, group and ratchet examples match the reference");
+}
+
 int main(int argc, char **argv) {
   CHECK(argc >= 3 && argc <= 9);
   if (!strcmp(argv[2], "i2p") && argc == 4)
@@ -6854,6 +7067,10 @@ int main(int argc, char **argv) {
     traffic_stats(argv[1], argv[3], argv[4], NULL, NULL);
   else if (!strcmp(argv[2], "traffic_stats_ref") && argc == 7)
     traffic_stats(argv[1], argv[3], argv[4], argv[5], argv[6]);
+  else if (!strcmp(argv[2], "chat_examples") && argc == 6)
+    chat_examples(argv[1], argv[3], argv[4], argv[5]);
+  else if (!strcmp(argv[2], "chat_examples_ref") && argc == 8)
+    chat_examples_reference(argv[1], argv[3], argv[4], argv[5], argv[6], argv[7]);
   else if (!strcmp(argv[2], "tunnel_peers") && argc == 4)
     tunnel_peers(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "tunnel_peers_ref") && argc == 6)

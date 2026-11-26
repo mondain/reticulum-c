@@ -131,6 +131,20 @@ packet, so tunnels to it are lost unless the client's interface says `tunnel_ext
 announces, malformed packets), `-t` adds running totals, and with `-l` the totals say how much was link
 traffic. As in RNS 1.6, discarded bytes are not counted as received.
 
+## Examples
+
+Small programs in `examples/example_*.c`, built as `reticulum-c-example-*`. Each file starts with its
+usage. Where the table says "interoperates", the example has been run against that reference program.
+
+| Example | Shows | Against the reference |
+| --- | --- | --- |
+| `announce` | Announcing, and listening for announces | own destination names, not run against it |
+| `broadcast` | A PLAIN destination between directly connected peers | interoperates with Broadcast.py |
+| `group` | A GROUP destination with a shared key file | interoperates with its `Destination` (it has no example) |
+| `echo` | Encrypted packets with delivery proofs | interoperates with Echo.py |
+| `ratchets` | The same with ratchets, for forward secrecy | interoperates with Ratchets.py |
+| `request` | A request/response service over a link | own destination names, not run against it |
+
 ## Tools
 
 Built with the examples (`-DRNC_BUILD_EXAMPLES=ON`, the default). Each attaches
