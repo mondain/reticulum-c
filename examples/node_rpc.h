@@ -170,8 +170,8 @@ static unsigned mode_number(const rnc_host_status *s) {
  * second), per interface, in a small table; a request in between repeats the figures of the last sample. */
 typedef struct rate_sample {
   uint32_t id;
-  uint64_t at, rxb, txb, arxb, atxb, prxb, ptxb, arxc, atxc, prxc, ptxc;
-  double rxs, txs, arxs, atxs, prxs, ptxs, arxf, atxf, prxf, ptxf;
+  uint64_t at, rxb, txb, arxb, atxb, prxb, ptxb, arxc, atxc, prxc, ptxc, frxb;
+  double rxs, txs, arxs, atxs, prxs, ptxs, arxf, atxf, prxf, ptxf, frxs;
 } rate_sample;
 static rate_sample rate_samples[256];
 static const rate_sample *rate_update(const rnc_host_status *s) {
@@ -196,6 +196,8 @@ static const rate_sample *rate_update(const rnc_host_status *s) {
   } else if (now > r->at && now - r->at >= 1000u) {
     double dt = (double)(now - r->at) / 1000.0;
     r->rxs = (double)(s->rx_bytes - r->rxb) * 8.0 / dt;
+    r->frxs = (double)(s->filtered_bytes - r->frxb) * 8.0 / dt;
+    r->frxb = s->filtered_bytes;
     r->txs = (double)(s->tx_bytes - r->txb) * 8.0 / dt;
     r->arxs = (double)(s->rx_announce_bytes - r->arxb) * 8.0 / dt;
     r->atxs = (double)(s->tx_announce_bytes - r->atxb) * 8.0 / dt;
@@ -219,6 +221,7 @@ static const rate_sample *rate_update(const rnc_host_status *s) {
     return r;
   }
   if (r->at == now && !r->rxb && !r->txb) { /* first sight: the baseline */
+    r->frxb = s->filtered_bytes;
     r->rxb = s->rx_bytes;
     r->txb = s->tx_bytes;
     r->arxb = s->rx_announce_bytes;
@@ -246,7 +249,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
   if (rnc_node_interface_tunnel_peer(node, s->interface_id, &peer) != RNC_OK)
     memset(&peer, 0, sizeof(peer));
   (void)rnc_rpc_write_map(w, 25u + 14u + sizeof(zeros) / sizeof(*zeros) +
-                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u + 7u);
+                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u + 7u + 4u);
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
   key_string(w, "type", kind_name(s));
@@ -274,7 +277,11 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
   key_uint(w, "txdrp", s->dropped_packets);
   key_uint(w, "txbuffered", s->queued_frames);
   key_uint(w, "held_announces", 0);
-  key_uint(w, "afrxc", filtered); /* announces dropped for a missing or insufficient stamp */
+  key_uint(w, "afrxc", filtered); /* announces discarded */
+  key_uint(w, "frxb", s->filtered_bytes);
+  key_uint(w, "ftxb", 0); /* nothing is filtered on the way out */
+  key_real(w, "frxs", rate->frxs);
+  key_real(w, "ftxs", 0);
   key_uint(w, "protocol_violations", s->protocol_violations);
   key_uint(w, "ifac_violations", s->ifac_violations);
   (void)rnc_rpc_write_string(w, "ifac_signature");
@@ -361,35 +368,84 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
     key_nil(w, "rem_pr_cost");
   }
 }
+/* The rates of the running totals, over at least the last second. */
+typedef struct total_rates {
+  uint64_t at;
+  rnc_host_totals last;
+  double rxs, txs, frxs, lrxs, ltxs;
+} total_rates;
+static const total_rates *total_rate_update(const rnc_host_totals *t) {
+  static total_rates r;
+  uint64_t now = monotonic_ms();
+  if (r.at && now - r.at < 1000u)
+    return &r;
+  if (r.at) {
+    double dt = (double)(now - r.at) / 1000.0;
+    r.rxs = (double)(t->rx_bytes - r.last.rx_bytes) * 8.0 / dt;
+    r.txs = (double)(t->tx_bytes - r.last.tx_bytes) * 8.0 / dt;
+    r.frxs = (double)(t->filtered_bytes - r.last.filtered_bytes) * 8.0 / dt;
+    r.lrxs = (double)(t->link_rx_bytes - r.last.link_rx_bytes) * 8.0 / dt;
+    r.ltxs = (double)(t->link_tx_bytes - r.last.link_tx_bytes) * 8.0 / dt;
+  }
+  r.at = now;
+  r.last = *t;
+  return &r;
+}
 static void all_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node, const config *c,
                       const rnc_identity *id, uint64_t uptime) {
   static const char *zeros[] = {
-      "rxs",        "txs",        "arxs",       "atxs",       "arxf",
-      "atxf",       "prxb",       "ptxb",       "prxs",       "ptxs",
-      "prxf",       "ptxf",       "rxpps",      "txpps",      "rxqt",
+      "arxf",       "atxf",       "prxf",       "ptxf",       "rxpps",      "txpps",      "rxqt",
       "rxqd",       "rxqa",       "rxqp",       "rxqil",      "rxqtd",
       "rxqdd",      "rxqad",      "rxqpd",      "rxqild",     "tqpressure",
       "dqpressure", "aqpressure", "pqpressure", "ilqpressure"};
   size_t i, count = 0;
-  uint64_t rxb = 0, txb = 0, arxb = 0, atxb = 0;
+  uint64_t arxb = 0, atxb = 0, prxb = 0, ptxb = 0;
+  double arxs = 0, atxs = 0, prxs = 0, ptxs = 0;
   rnc_host_status s;
+  rnc_host_totals totals = {0};
+  const total_rates *rates;
   for (i = 0; i < RNC_HOST_SLOTS; ++i)
     if (rnc_host_status_at(h, i, &s) == RNC_OK) {
       ++count;
-      rxb += s.rx_bytes;
-      txb += s.tx_bytes;
       arxb += s.rx_announce_bytes;
       atxb += s.tx_announce_bytes;
+      prxb += s.rx_path_request_bytes;
+      ptxb += s.tx_path_request_bytes;
     }
-  (void)rnc_rpc_write_map(w, 7u + sizeof(zeros) / sizeof(*zeros) +
+  (void)rnc_host_get_totals(h, &totals);
+  rates = total_rate_update(&totals);
+  (void)rnc_rpc_write_map(w, 7u + 16u + sizeof(zeros) / sizeof(*zeros) +
                                  (c->transport ? 4u : 0u));
   (void)rnc_rpc_write_string(w, "interfaces");
   (void)rnc_rpc_write_array(w, count);
   for (i = 0; i < RNC_HOST_SLOTS; ++i)
-    if (rnc_host_status_at(h, i, &s) == RNC_OK)
+    if (rnc_host_status_at(h, i, &s) == RNC_OK) {
+      const rate_sample *r;
       interface_stats(w, h, node, &s);
-  key_uint(w, "rxb", rxb);
-  key_uint(w, "txb", txb);
+      r = rate_update(&s);
+      arxs += r->arxs;
+      atxs += r->atxs;
+      prxs += r->prxs;
+      ptxs += r->ptxs;
+    }
+  key_uint(w, "rxb", totals.rx_bytes);
+  key_uint(w, "txb", totals.tx_bytes);
+  key_real(w, "rxs", rates->rxs);
+  key_real(w, "txs", rates->txs);
+  key_uint(w, "frxb", totals.filtered_bytes);
+  key_uint(w, "ftxb", 0);
+  key_real(w, "frxs", rates->frxs);
+  key_real(w, "ftxs", 0);
+  key_uint(w, "lrxb", totals.link_rx_bytes);
+  key_uint(w, "ltxb", totals.link_tx_bytes);
+  key_real(w, "lrxs", rates->lrxs);
+  key_real(w, "ltxs", rates->ltxs);
+  key_uint(w, "prxb", prxb);
+  key_uint(w, "ptxb", ptxb);
+  key_real(w, "arxs", arxs);
+  key_real(w, "atxs", atxs);
+  key_real(w, "prxs", prxs);
+  key_real(w, "ptxs", ptxs);
   key_uint(w, "arxb", arxb);
   key_uint(w, "atxb", atxb);
   key_nil(w, "rss");

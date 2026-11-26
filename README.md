@@ -127,6 +127,10 @@ whether it transports and what stamps it requires; a server answers with its own
 `reticulum-c-ctl status -T` shows what the other end said. A server running RNS 1.5 refuses the longer
 packet, so tunnels to it are lost unless the client's interface says `tunnel_extension = No`.
 
+`reticulum-c-ctl status -F` shows the traffic each interface discarded (duplicates, stale or rejected
+announces, malformed packets), `-t` adds running totals, and with `-l` the totals say how much was link
+traffic. As in RNS 1.6, discarded bytes are not counted as received.
+
 ## Tools
 
 Built with the examples (`-DRNC_BUILD_EXAMPLES=ON`, the default). Each attaches

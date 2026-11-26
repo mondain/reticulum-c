@@ -209,6 +209,7 @@ struct rnc_node {
   node_known known[RNC_NODE_KNOWN];
   node_blackhole blackhole[RNC_NODE_BLACKHOLE];
   const rnc_packet *input_packet;
+  unsigned input_class; /* RNC_INPUT_* of the last rnc_node_input */
   int releasing;
   node_rate rates[RNC_NODE_RATES];
   node_queued queued[RNC_NODE_QUEUE];
@@ -1923,6 +1924,17 @@ static int announce_stamp_prefilter(const rnc_node *n, const node_interface *in,
   rnc_netstamp_announce_material(p->destination, p->data, p->data + 64, material);
   return rnc_netstamp_valid(material, sizeof(material), ext.stamp, sizeof(ext.stamp), cost);
 }
+static int announce_awaited(const rnc_node *n, const uint8_t destination[16], uint64_t now) {
+  size_t i;
+  for (i = 0; i < RNC_NODE_REQUESTS; i++)
+    if (n->requests[i].used && n->requests[i].pending && n->requests[i].expiry > now &&
+        same(n->requests[i].destination, destination))
+      return 1;
+  for (i = 0; i < RNC_NODE_ANNOUNCES; i++)
+    if (n->announces[i].used && same(n->announces[i].destination, destination))
+      return 1;
+  return 0;
+}
 static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
                             uint64_t unix_seconds, uint64_t now) {
   rnc_announce a;
@@ -1939,6 +1951,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
     node_interface *in = interface(n, ingress);
     if (in)
       in->filtered_announces++;
+    n->input_class = RNC_INPUT_FILTERED;
     return RNC_OK;
   }
   r = rnc_announce_verify(p, &a);
@@ -1949,12 +1962,15 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
     node_interface *in = interface(n, ingress);
     if (in)
       in->filtered_announces++;
+    n->input_class = RNC_INPUT_FILTERED;
     return RNC_OK;
   }
   if (rnc_node_is_blackholed(n, a.identity.hash, unix_seconds)) {
     char label[33];
     rnc_logf(RNC_LOG_DEBUG, "node", "dropped announce from blackholed identity %s",
              rnc_hex_label(a.identity.hash, 16, label));
+    interface(n, ingress)->filtered_announces++;
+    n->input_class = RNC_INPUT_FILTERED;
     return RNC_OK;
   }
   if (destination_find(n, p->destination) &&
@@ -1970,6 +1986,7 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
         ingress_limit(in, now)) {
       if (n->input_packet)
         hold_announce(n, ingress, n->input_packet, p->hops);
+      n->input_class = RNC_INPUT_FILTERED | RNC_INPUT_HEARD;
       return RNC_OK;
     }
   }
@@ -1996,6 +2013,13 @@ static rnc_result announced(rnc_node *n, uint32_t ingress, rnc_packet *p,
         n->requests[i].expiry > now && n->requests[i].ingress != ingress &&
         same(n->requests[i].destination, p->destination))
       answers++;
+  /* Transport.announce_prefilter: an announce for a known path that is no newer and takes nothing over is
+   * discarded traffic, unless it answers a request or one of ours is waiting to be passed on. */
+  if (route && !update && p->context != 11 && stamp <= route->route.announced_at &&
+      !announce_awaited(n, p->destination, now)) {
+    interface(n, ingress)->filtered_announces++;
+    n->input_class = RNC_INPUT_FILTERED | RNC_INPUT_HEARD;
+  }
   {
     /* Learning a path does not depend on being able to pass the announce on (the reference learns it
      * and only drops the rebroadcast when its queue is full). So when the queue has no room even after
@@ -2105,8 +2129,10 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
     if (n->requests[i].used && n->requests[i].expiry > now &&
         same(n->requests[i].destination, request.destination) &&
         n->requests[i].tag_size == request.tag_size &&
-        !memcmp(n->requests[i].tag, request.tag, request.tag_size))
+        !memcmp(n->requests[i].tag, request.tag, request.tag_size)) {
+      n->input_class = RNC_INPUT_FILTERED;
       return RNC_OK;
+    }
     if (!n->requests[i].used || n->requests[i].expiry <= now)
       slot = i;
   }
@@ -2119,6 +2145,7 @@ static rnc_result requested(rnc_node *n, uint32_t ingress,
     if (!request.has_stamp || request.tag_size != 16 ||
         !rnc_netstamp_valid(material, sizeof(material), request.stamp, sizeof(request.stamp), cost)) {
       in->filtered_requests++;
+      n->input_class = RNC_INPUT_FILTERED;
       return RNC_OK;
     }
   }
@@ -2635,6 +2662,7 @@ rnc_result rnc_node_send_tracked(rnc_node *n, const rnc_packet *packet,
   memcpy(hash, digest, 32);
   return RNC_OK;
 }
+unsigned rnc_node_input_class(const rnc_node *n) { return n ? n->input_class : 0u; }
 rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
                           const rnc_packet *packet, uint64_t unix_seconds,
                           uint64_t now) {
@@ -2653,6 +2681,7 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
     return RNC_PROTOCOL;
   if (!room(n, interface_count(n) + RNC_NODE_REQUESTS + 2u))
     return RNC_AGAIN;
+  n->input_class = 0;
   p = *packet;
   type = p.flags & 3u;
   /* PATHFINDER_M is 128 hops. The reference counts a hop on arrival and accepts an announce up
@@ -2683,13 +2712,17 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
       emit(n, RNC_NODE_LOCAL, ingress, &p);
       r = RNC_OK;
     }
-  } else if ((p.flags & 0x40u) && !same(p.transport_id, n->id))
+  } else if ((p.flags & 0x40u) && !same(p.transport_id, n->id)) {
+    n->input_class = RNC_INPUT_FILTERED;
     r = RNC_OK;
+  }
   else if ((l = link_find(n, p.destination)) != NULL) {
     if (l->local) {
       if (l->out && l->out != ingress)
         return RNC_PROTOCOL;
       emit(n, RNC_NODE_LOCAL, ingress, &p);
+      if (!(type == RNC_PROOF && p.context == 255) && !interface(n, ingress)->local)
+        n->input_class = RNC_INPUT_LINK_RX;
       r = RNC_OK;
     } else if (type == RNC_PROOF && p.context == 255) {
       if (ingress != l->out || p.hops != l->out_hops)
@@ -2711,6 +2744,8 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
       if (size > interface(n, out)->mtu)
         return RNC_NO_SPACE;
       emit(n, RNC_NODE_SEND, out, &p);
+      n->input_class = (interface(n, ingress)->local ? 0u : RNC_INPUT_LINK_RX) |
+                       (interface(n, out)->local ? 0u : RNC_INPUT_LINK_TX);
       /* This extends routing liveness; endpoints authenticate opaque tokens. */
       l->expiry = after(now, 180000u);
       r = RNC_OK;
@@ -2768,8 +2803,10 @@ rnc_result rnc_node_input(rnc_node *n, uint32_t ingress,
     r = rnc_packet_hash(&p, hash);
     if (r != RNC_OK)
       return r;
-    if (duplicate(n, hash, now))
+    if (duplicate(n, hash, now)) {
+      n->input_class = RNC_INPUT_FILTERED;
       return RNC_OK;
+    }
     r = forward(n, ingress, &p, now);
     if (r == RNC_OK)
       remember(n, hash, now);

@@ -780,6 +780,11 @@ static const sort_def sort_defs[] = {
     {"pvs", NULL, "protocol_violations", NULL},
     {"ivs", NULL, "ifac_violations", NULL},
     {"flt", NULL, "packet_filter_hits", NULL},
+    {"afrxc", NULL, "afrxc", NULL},
+    {"frx", NULL, "frxb", NULL},
+    {"ftx", NULL, "ftxb", NULL},
+    {"frxs", NULL, "frxs", NULL},
+    {"ftxs", NULL, "ftxs", NULL},
     {"gravity", "g", "gravity", NULL},
     {"txdrp", NULL, "txdrp", NULL},
     {"txdrb", NULL, "txdrb", NULL},
@@ -825,6 +830,36 @@ static int name_matches(const val *f, const char *filter) {
 }
 static int discovered_listing(const char *dir, const char *filter, int details, int json, int show_stale,
                               int show_unknown);
+/* "X sent, Y received" for two byte counters, with their rates when there are any. */
+static void print_traffic(const char *label, const val *map, const char *tx, const char *rx, const char *txs,
+                          const char *rxs) {
+  char a[32], b[32], c[32], d[32];
+  double ts = as_double(map_get(map, txs)), rs = as_double(map_get(map, rxs));
+  pretty_size((double)as_uint(map_get(map, tx)), a, sizeof(a));
+  pretty_size((double)as_uint(map_get(map, rx)), b, sizeof(b));
+  printf("%s%s sent, %s received\n", label, a, b);
+  if (ts > 0 || rs > 0) {
+    pretty_rate(ts, c, sizeof(c));
+    pretty_rate(rs, d, sizeof(d));
+    printf("%*s%s sent, %s received\n", (int)strlen(label), "", c, d);
+  }
+}
+/* The totals of `rnstatus -t`, with the filtered and link figures of -F and -l. */
+static void print_totals(const val *root, int filtered, int links) {
+  print_traffic(" Totals    : ", root, "txb", "rxb", "txs", "rxs");
+  if (filtered)
+    print_traffic(" Filtered  : ", root, "ftxb", "frxb", "ftxs", "frxs");
+  if (links && map_get(root, "lrxb")) {
+    /* the share of the data traffic (everything but announces and path requests) that links carry */
+    double drxs = as_double(map_get(root, "rxs")) - as_double(map_get(root, "arxs")) - as_double(map_get(root, "prxs"));
+    double dtxs = as_double(map_get(root, "txs")) - as_double(map_get(root, "atxs")) - as_double(map_get(root, "ptxs"));
+    double lrxs = as_double(map_get(root, "lrxs")), ltxs = as_double(map_get(root, "ltxs"));
+    double rx_share = drxs > 0 ? 100.0 * lrxs / drxs : 0, tx_share = dtxs > 0 ? 100.0 * ltxs / dtxs : 0;
+    print_traffic(" Links     : ", root, "ltxb", "lrxb", "ltxs", "lrxs");
+    printf("             %d%% of data flow sent, %d%% received\n", (int)(tx_share > 100 ? 100 : tx_share),
+           (int)(rx_share > 100 ? 100 : rx_share));
+  }
+}
 /* The lines of `rnstatus -T`: the tunnel on an interface and what the other end said about itself. */
 static void print_tunnel(const val *f) {
   const val *id = map_get(f, "tunnel_id"), *v, *vers;
@@ -872,7 +907,7 @@ static void print_tunnel(const val *f) {
 static int cmd_status(int argc, char **argv) {
   conn c = {0};
   int i, json = 0, reverse = 0, link_stats = 0, monitor = 0, discovered = 0, details = 0, show_stale = 0, show_unknown = 0,
-      tunnels = 0;
+      tunnels = 0, filter_stats = 0, totals = 0;
   double interval = 1.0;
   const char *discovery_dir = NULL;
   const char *sort = NULL, *filter = NULL;
@@ -894,6 +929,10 @@ static int cmd_status(int argc, char **argv) {
       reverse = 1;
     else if (!strcmp(argv[i], "-l") || !strcmp(argv[i], "--link-stats"))
       link_stats = 1;
+    else if (!strcmp(argv[i], "-F") || !strcmp(argv[i], "--filter-stats"))
+      filter_stats = 1;
+    else if (!strcmp(argv[i], "-t") || !strcmp(argv[i], "--totals"))
+      totals = 1;
     else if (!strcmp(argv[i], "-T") || !strcmp(argv[i], "--tunnels"))
       tunnels = 1;
     else if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--discovered"))
@@ -921,7 +960,7 @@ static int cmd_status(int argc, char **argv) {
     }
     else if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--sort")) {
       if (++i >= argc || !sort_key_known(argv[i])) {
-        fprintf(stderr, "Sort by one of rate, traffic, rx, tx, rxs, txs, anns, arx, atx, arxc, atxc, held, prx, ptx, prxc, ptxc, pvs, ivs, flt, gravity, txdrp, txdrb, txbuf\n");
+        fprintf(stderr, "Sort by one of rate, traffic, rx, tx, rxs, txs, anns, arx, atx, arxc, atxc, held, prx, ptx, prxc, ptxc, pvs, ivs, flt, gravity, txdrp, txdrb, txbuf, afrxc, frx, ftx, frxs, ftxs\n");
         return RC_INVALID_ARGS;
       }
       sort = argv[i];
@@ -1020,15 +1059,24 @@ static int cmd_status(int argc, char **argv) {
     pretty_size((double)as_uint(map_get(f, "txb")), a, sizeof(a));
     pretty_size((double)as_uint(map_get(f, "rxb")), b, sizeof(b));
     printf("    Traffic   : %s sent, %s received\n", a, b);
+    if (filter_stats && map_get(f, "frxb"))
+      print_traffic("    Filtered  : ", f, "ftxb", "frxb", "ftxs", "frxs");
     v = map_get(f, "txstalled");
     if (v && as_uint(v))
       puts("    Egress    : stalled, nothing is draining to this peer");
     v = map_get(f, "ingress_gated");
     if (v && as_uint(v))
       puts("    Ingress   : throttled, reading from this peer is held back");
-    printf("    Announces : %llu sent, %llu received\n",
+    printf("    Announces : %llu sent, %llu received",
            (unsigned long long)as_uint(map_get(f, "atxc")),
            (unsigned long long)as_uint(map_get(f, "arxc")));
+    if (filter_stats && as_uint(map_get(f, "afrxc")))
+      printf(", %llu filtered", (unsigned long long)as_uint(map_get(f, "afrxc")));
+    putchar('\n');
+    putchar('\n');
+  }
+  if (totals) {
+    print_totals(&r.root, filter_stats, link_stats);
     putchar('\n');
   }
   v = map_get(&r.root, "transport_id");
@@ -3002,7 +3050,7 @@ static int cmd_id(int argc, char **argv) {
 }
 
 static void usage(void) {
-  fputs("usage: reticulum-c-ctl status [-j] [-T] [--port N] (--identity FILE | --rpc-key HEX | --config FILE)\n"
+  fputs("usage: reticulum-c-ctl status [-j] [-t] [-F] [-l] [-T] [--port N] (--identity FILE | --rpc-key HEX | --config FILE)\n"
         "       reticulum-c-ctl path [-t] [-m HOPS] [-j] [HASH] [-b] [-B HASH [--duration HOURS] [--reason TEXT]] [-U HASH] [--stamp-value N] [connection options]\n"
         "       reticulum-c-ctl id (-g FILE | -i FILE [-p] [-P] [-x] [-X] [-H ASPECTS]\n"
         "                          [-s FILE --raw] [-V SIG -r FILE --raw] [-e FILE] [-d FILE] [-w OUT] [-f])\n",

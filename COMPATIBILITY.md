@@ -1292,3 +1292,31 @@ reading local files. `reticulum-c-git` had the same behaviour and now checks the
 format to the encoder and caps the input at 32 MiB (`tests/test_rngit_pages.c`, `media_formats`,
 with a recording fake encoder; ImageMagick on the build host accepts the six `format:-` forms).
 The exploit itself was not reproduced here.
+
+## Filtered and link traffic statistics (`feature/traffic-stats`)
+
+The daemon reports the reference's `frxb`, `ftxb`, `frxs`, `ftxs` and `afrxc` per interface and, in the
+totals, those plus `lrxb`, `ltxb`, `lrxs`, `ltxs`. `reticulum-c-ctl status` gained `-F`, `-t` and the
+sort keys `afrxc`, `frx`, `ftx`, `frxs`, `ftxs`.
+
+Behaviour that changed with this:
+
+* Discarded packets are no longer in an interface's received bytes, so those read lower than before.
+* The total received and sent bytes are running totals (closed connections stay counted, local client
+  programs are left out). They were sums over the interfaces open at the time.
+* `afrxc` counts every discarded announce, not only those without a sufficient stamp.
+* The total rates, which were always 0, are filled in.
+
+Library: `rnc_node_input_class`, `rnc_host_get_totals`, and `rnc_host_status.filtered_bytes` (the
+structure grew, so programs using it need a rebuild).
+
+Differences from the reference: a repeated path request is recognised only while the first one is
+remembered, which is when this node answered or passed it on; repeats of link packets are not filtered;
+`ftxb` is 0 here and in the reference, which never increments it; the totals are not split into data,
+announce and path request shares by `ctl`, only the link share is shown.
+
+| Check | What it shows |
+| --- | --- |
+| `reticulum_node_input_class`, `reticulum_node_mesh` | what is classed as discarded, and link traffic at the ends and the routers |
+| `reticulum_node_process_traffic_stats` | a discarded packet and a file transfer through a daemon, read with `ctl` |
+| `reticulum_node_process_traffic_stats_rns` | the unmodified `rnstatus -F -l -t` reads the same daemon |

@@ -125,6 +125,55 @@ static void routing(void) {
     rnc_identity_clear(&ids[i]);
   }
 }
+/* Which input is discarded traffic (rnstatus -F) and which is link traffic (rnstatus -l). */
+static void input_class(void) {
+  rnc_identity src = identity(), bad = identity(), self = identity();
+  rnc_node *n = rnc_node_new(&self, 0, rng, NULL), *router = rnc_node_new(&self, 1, rng, NULL);
+  rnc_packet first, older, newer, response, blocked, request, data;
+  uint8_t tag[16] = {9};
+  uint64_t discarded = 0;
+  CHECK(n && router);
+  CHECK(rnc_node_add_interface(n, 1, 1000000) == RNC_OK && rnc_node_add_interface(n, 2, 1000000) == RNC_OK);
+  CHECK(rnc_announce_create(&src, "class.test", NULL, 0, 900, rng, NULL, &older) == RNC_OK);
+  CHECK(rnc_announce_create(&src, "class.test", NULL, 0, 1000, rng, NULL, &first) == RNC_OK);
+  CHECK(rnc_announce_create(&src, "class.test", NULL, 0, 1001, rng, NULL, &newer) == RNC_OK);
+  CHECK(rnc_node_input(n, 1, &first, 1002, 10) == RNC_OK && rnc_node_input_class(n) == 0);
+  /* the same announce over another interface, or an older one, brings nothing new */
+  CHECK(rnc_node_input(n, 2, &first, 1002, 20) == RNC_OK);
+  CHECK(rnc_node_input_class(n) == (RNC_INPUT_FILTERED | RNC_INPUT_HEARD));
+  CHECK(rnc_node_input(n, 2, &older, 1002, 30) == RNC_OK);
+  CHECK(rnc_node_input_class(n) == (RNC_INPUT_FILTERED | RNC_INPUT_HEARD));
+  CHECK(rnc_node_interface_filtered(n, 2, &discarded) == RNC_OK && discarded == 2);
+  /* a path response is never judged stale */
+  response = first;
+  response.context = 11;
+  CHECK(rnc_node_input(n, 2, &response, 1002, 40) == RNC_OK && rnc_node_input_class(n) == 0);
+  CHECK(rnc_node_input(n, 1, &newer, 1002, 50) == RNC_OK && rnc_node_input_class(n) == 0);
+  CHECK(rnc_announce_create(&bad, "class.bad", NULL, 0, 1000, rng, NULL, &blocked) == RNC_OK);
+  CHECK(rnc_node_blackhole(n, bad.hash, 0, "test", 1002) == RNC_OK);
+  CHECK(rnc_node_input(n, 2, &blocked, 1002, 60) == RNC_OK && rnc_node_input_class(n) == RNC_INPUT_FILTERED);
+  CHECK(rnc_node_interface_filtered(n, 2, &discarded) == RNC_OK && discarded == 3);
+  /* a transport node: forwarded data, then the same packet again */
+  CHECK(rnc_node_add_interface(router, 1, 1000000) == RNC_OK && rnc_node_add_interface(router, 2, 1000000) == RNC_OK);
+  CHECK(rnc_node_input(router, 1, &first, 1002, 10) == RNC_OK);
+  discard(router);
+  memset(&data, 0, sizeof(data));
+  data.flags = 0x50; /* header type 2, in transport */
+  memcpy(data.transport_id, self.hash, 16);
+  memcpy(data.destination, first.destination, 16);
+  data.data_size = 40;
+  CHECK(rnc_node_input(router, 2, &data, 1002, 20) == RNC_OK && rnc_node_input_class(router) == 0);
+  CHECK(rnc_node_input(router, 2, &data, 1002, 30) == RNC_OK && rnc_node_input_class(router) == RNC_INPUT_FILTERED);
+  /* in transport for another instance */
+  data.transport_id[0] ^= 1;
+  CHECK(rnc_node_input(router, 2, &data, 1002, 40) == RNC_OK && rnc_node_input_class(router) == RNC_INPUT_FILTERED);
+  /* a repeated path request */
+  CHECK(rnc_path_request_create(first.destination, NULL, tag, 16, &request) == RNC_OK);
+  CHECK(rnc_node_input(router, 2, &request, 1002, 50) == RNC_OK && rnc_node_input_class(router) == 0);
+  CHECK(rnc_node_input(router, 2, &request, 1002, 60) == RNC_OK && rnc_node_input_class(router) == RNC_INPUT_FILTERED);
+  rnc_node_free(n);
+  rnc_node_free(router);
+}
 static void mesh(void) {
   rnc_identity ids[4];
   rnc_node *nodes[4];
@@ -138,6 +187,7 @@ static void mesh(void) {
   unsigned i, step, delivered = 0, round = 0;
   uint64_t now = 2000;
   int accepted = 0, sent_text = 0, got_text = 0;
+  unsigned classes[4] = {0};
   for (i = 0; i < 4; i++) {
     ids[i] = identity();
     nodes[i] = rnc_node_new(&ids[i], i == 1 || i == 2, rng, NULL);
@@ -210,6 +260,7 @@ static void mesh(void) {
           }
           CHECK(rnc_node_input(nodes[target], iface, &e.packet, 1001, now) ==
                 RNC_OK);
+          classes[target] |= rnc_node_input_class(nodes[target]) & (RNC_INPUT_LINK_RX | RNC_INPUT_LINK_TX);
         } else if (e.type == RNC_NODE_LOCAL) {
           CHECK(i == 0 || i == 3);
           if (i == 3 && (e.packet.flags & 3u) == RNC_LINKREQUEST) {
@@ -241,6 +292,9 @@ static void mesh(void) {
   }
   CHECK(sent_text && got_text == 1 && delivered == 1);
   CHECK(round == 2);
+  /* the ends receive link traffic, the two routers between them receive and forward it */
+  CHECK(classes[0] == RNC_INPUT_LINK_RX && classes[3] == RNC_INPUT_LINK_RX);
+  CHECK(classes[1] == (RNC_INPUT_LINK_RX | RNC_INPUT_LINK_TX) && classes[2] == (RNC_INPUT_LINK_RX | RNC_INPUT_LINK_TX));
   rnc_link_free(links[0]);
   rnc_link_free(links[1]);
   for (i = 0; i < 4; i++) {
@@ -782,6 +836,8 @@ int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "paths"))
     paths();
+  else if (!strcmp(argv[1], "input_class"))
+    input_class();
   else if (!strcmp(argv[1], "routing"))
     routing();
   else if (!strcmp(argv[1], "guards"))

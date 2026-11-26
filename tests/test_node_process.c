@@ -6676,6 +6676,149 @@ static void i2p_reference(const char *exe, const char *fake,
   puts("node I2P interface reference tests passed");
 }
 
+/* ---- filtered and link traffic (rnstatus -F -l -t) ------------------------------------------------------ */
+/* Runs a status program until its output holds every wanted text. */
+static void stats_show(const char *ctl, const char *control, const char *key, const char *option,
+                       const char *const *wanted, char *out, size_t size) {
+  unsigned tries, k;
+  for (tries = 0; tries < 100; ++tries) {
+    int all = ctl_run(ctl, out, size, "status", option, "--port", control, "--identity", key, NULL) == 0;
+    for (k = 0; all && wanted[k]; ++k)
+      all = strstr(out, wanted[k]) != NULL;
+    if (all)
+      return;
+    usleep(100000);
+  }
+  fprintf(stderr, "status %s never showed \"%s\" and the rest:\n%s\n", option, wanted[0], out);
+  CHECK(0);
+}
+static unsigned long long json_number(const char *json, const char *key) {
+  char needle[40];
+  const char *at;
+  CHECK(snprintf(needle, sizeof(needle), "\"%s\":", key) > 0);
+  at = strstr(json, needle);
+  CHECK(at);
+  return strtoull(at + strlen(needle), NULL, 10);
+}
+static void traffic_stats(const char *exe, const char *ctl, const char *cp, const char *reference, const char *python) {
+  char dir[] = "/tmp/rnc-traffic-XXXXXX", rdir[300], storage[300], cfg[320], key[340], admin[300], text[1024],
+       control_arg[16], connect[40], id[33], recv[300], file[300], idl[300], idb[300], hash_b[33], dest[33],
+       listen_out[2048], out[16384];
+  unsigned port = unused_port(), data = unused_port(), control = unused_port();
+  const char *footer;
+  pid_t daemon, listener;
+  int dfd, lfd, raw_fd;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/rns", dir) > 0 && !mkdir(rdir, 0700));
+  CHECK(snprintf(storage, sizeof(storage), "%s/storage", rdir) > 0 && !mkdir(storage, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/transport_identity", storage) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(recv, sizeof(recv), "%s/recv", dir) > 0 && !mkdir(recv, 0700));
+  CHECK(snprintf(file, sizeof(file), "%s/file.bin", dir) > 0);
+  CHECK(snprintf(idl, sizeof(idl), "%s/id_l", dir) > 0);
+  CHECK(snprintf(idb, sizeof(idb), "%s/id_b", dir) > 0);
+  CHECK(snprintf(control_arg, sizeof(control_arg), "%u", control) > 0);
+  CHECK(snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\n[interfaces]\n[[Link]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+                 data, control, port) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, id);
+  /* a packet in transport for some other instance: discarded, counted as filtered and not as received */
+  {
+    rnc_packet p;
+    uint8_t raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+    size_t n, m;
+    const char *shown[] = {"Filtered  : 0 B sent, 135 B received", NULL};
+    memset(&p, 0, sizeof(p));
+    p.flags = 0x50;
+    memset(p.transport_id, 0x5a, 16);
+    memset(p.destination, 0x6b, 16);
+    p.data_size = 100;
+    CHECK(rnc_packet_encode(&p, raw, sizeof(raw), &n) == RNC_OK && n == 135);
+    CHECK(rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK);
+    raw_fd = tcp_connect(port);
+    CHECK(raw_fd >= 0 && write(raw_fd, framed, m) == (ssize_t)m);
+    stats_show(ctl, control_arg, key, "-F", shown, out, sizeof(out));
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "--port", control_arg, "--identity", key, NULL) == 0);
+    CHECK(!strstr(out, "Filtered") && !strstr(out, "Totals"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-j", "--port", control_arg, "--identity", key, NULL) == 0);
+    CHECK(strstr(out, "\"frxb\": 135") && strstr(out, "\"rxb\": 0"));
+    close(raw_fd); /* the totals keep what a closed peer sent */
+  }
+  /* a file through the node: link traffic, received from one side and forwarded to the other */
+  {
+    char *listen_args[] = {(char *)cp, "--connect", connect, "--identity", idl, "-l", "-n", "-s", recv, "-b", "0", NULL};
+    char *send_args[] = {(char *)cp, "--connect", connect, "--identity", idb, "-S", file, dest, NULL};
+    const char *totals[] = {"Totals", "Filtered", "Links", "of data flow", NULL};
+    write_identity(idb, 11, hash_b);
+    big_file_write(file, 20000);
+    listener = spawn_cp(cp, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rncp listening on <", listen_out, sizeof(listen_out), 10);
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_listening(listen_out, dest);
+    CHECK(run_cp(cp, out, sizeof(out), send_args) == 0 && strstr(out, "Transfer complete"));
+    read_until(lfd, "Saved received file to", listen_out, sizeof(listen_out), 20);
+    stop_cp(listener, lfd);
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-t", "-F", "-l", "--port", control_arg, "--identity", key, NULL) == 0);
+    {
+      unsigned k;
+      for (k = 0; totals[k]; ++k)
+        if (!strstr(out, totals[k])) {
+          fprintf(stderr, "status -t -F -l:\n%s\n", out);
+          CHECK(0);
+        }
+    }
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "-j", "--port", control_arg, "--identity", key, NULL) == 0);
+    footer = strstr(out, "\"lrxb\""); /* only the totals have link counters */
+    CHECK(footer);
+    CHECK(json_number(footer, "lrxb") >= 20000 && json_number(footer, "ltxb") >= 20000);
+    footer = strrchr(out, ']');
+    CHECK(footer && json_number(footer, "frxb") >= 135 && json_number(footer, "rxb") >= 20000);
+  }
+  if (reference) { /* the reference's rnstatus reads the same figures */
+    int fds[2], status;
+    pid_t child;
+    size_t used = 0;
+    CHECK(!pipe(fds));
+    child = fork();
+    CHECK(child >= 0);
+    if (!child) {
+      close(fds[0]);
+      CHECK(dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0);
+      close(fds[1]);
+      CHECK(!setenv("PYTHONPATH", reference, 1));
+      execl(python, python, "-m", "RNS.Utilities.rnstatus", "--config", rdir, "-F", "-l", "-t", (char *)NULL);
+      _exit(127);
+    }
+    close(fds[1]);
+    for (;;) {
+      ssize_t n = read(fds[0], out + used, sizeof(out) - 1 - used);
+      CHECK(n >= 0);
+      if (!n)
+        break;
+      used += (size_t)n;
+      CHECK(used < sizeof(out) - 1);
+    }
+    out[used] = 0;
+    close(fds[0]);
+    CHECK(waitpid(child, &status, 0) == child);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) || !strstr(out, "Filtered     :") || !strstr(out, "135 B") ||
+        !strstr(out, "Links        :") || !strstr(out, "of data flow") || !strstr(out, "Totals       :")) {
+      fprintf(stderr, "RNS rnstatus -F -l -t:\n%s\n", out);
+      CHECK(0);
+    }
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts(reference ? "unmodified RNS rnstatus shows the traffic statistics" : "node traffic statistics passed");
+}
+
 int main(int argc, char **argv) {
   CHECK(argc >= 3 && argc <= 9);
   if (!strcmp(argv[2], "i2p") && argc == 4)
@@ -6707,6 +6850,10 @@ int main(int argc, char **argv) {
     cp_reference(argv[1], argv[3], argv[5]);
   else if (!strcmp(argv[2], "cp_tools") && argc == 4)
     cp_tools(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "traffic_stats") && argc == 5)
+    traffic_stats(argv[1], argv[3], argv[4], NULL, NULL);
+  else if (!strcmp(argv[2], "traffic_stats_ref") && argc == 7)
+    traffic_stats(argv[1], argv[3], argv[4], argv[5], argv[6]);
   else if (!strcmp(argv[2], "tunnel_peers") && argc == 4)
     tunnel_peers(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "tunnel_peers_ref") && argc == 6)
