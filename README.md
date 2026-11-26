@@ -145,6 +145,8 @@ usage. Where the table says "interoperates", the example has been run against th
 | `ratchets` | The same with ratchets, for forward secrecy | interoperates with Ratchets.py |
 | `link` | An encrypted link, lines both ways | interoperates with Link.py |
 | `identify` | Identifying over a link, with an allow list | interoperates with Identify.py |
+| `channel` | Typed, reliable messages over a link | interoperates with Channel.py |
+| `buffer` | A byte stream over a link | interoperates with Buffer.py |
 | `request` | A request/response service over a link | own destination names, not run against it |
 
 ## Tools

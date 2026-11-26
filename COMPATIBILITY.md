@@ -1353,3 +1353,15 @@ Differences from the reference programs: the server announces by itself instead 
 whichever link a line came on (the reference answers the most recent one); the identify client uses the
 identity in its identity file instead of a new one; `--allow` is an addition. The link server announces no
 link request cost (`Link.py` sets 14.2), and the client stamps a request when the server announces one.
+
+## Channel and buffer examples (`feature/examples-channel-buffer`)
+
+`reticulum_node_process_stream_examples` runs each between itself (more lines at once than the send window
+holds, a line longer than one message, piped input delivered before the client leaves);
+`reticulum_node_process_stream_examples_rns` runs both against the unmodified `Channel.py` and `Buffer.py`,
+as client and as server.
+
+Differences from the reference programs: a line typed while the send window is full waits instead of being
+refused; the client waits for delivery before closing; the time of a message is printed in UTC; long input is
+limited to 1023 bytes a line. A build without bzip2 cannot read a compressed buffer message, which the
+reference may send for a long write.
