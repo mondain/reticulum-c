@@ -299,10 +299,17 @@ static void terminate(session *s, const char *why, uint64_t now) {
   set_state(s, S_ENDING, now);
   s->end_at = now + 1500u; /* let the error reach the initiator */
 }
+/* The identities of the allowed file, apart from those given with -a: read again for every connection. */
+static char allowed_path[1024];
+static uint8_t file_allowed[32][16];
+static size_t file_allowed_count;
 static int is_allowed(const uint8_t hash[16]) {
   size_t i;
   for (i = 0; i < opt.allowed_count; i++)
     if (!memcmp(opt.allowed[i], hash, 16))
+      return 1;
+  for (i = 0; i < file_allowed_count; i++)
+    if (!memcmp(file_allowed[i], hash, 16))
       return 1;
   return 0;
 }
@@ -624,6 +631,40 @@ static void session_output(session *s, uint64_t now) {
       return;
   }
 }
+/* ~/.config/rnsh/allowed_identities, else ~/.rnsh/allowed_identities, chosen at start as the reference chooses
+ * it: one hash per line, lines of other lengths are ignored. A file that can no longer be read allows nobody
+ * (the reference keeps what it last read), so deleting it revokes. */
+static void load_allowed_file(void) {
+  char line[256];
+  FILE *f;
+  file_allowed_count = 0;
+  if (!allowed_path[0] || !(f = fopen(allowed_path, "r")))
+    return;
+  while (fgets(line, sizeof(line), f)) {
+    size_t n = strcspn(line, "\r\n");
+    line[n] = 0;
+    if (n != 32 || file_allowed_count >= 32 || !hex_decode(line, file_allowed[file_allowed_count], 16))
+      continue; /* discarded, as the reference discards invalid lines */
+    ++file_allowed_count;
+  }
+  fclose(f);
+}
+static void find_allowed_file(void) {
+  static const char *places[] = {"/.config/rnsh/allowed_identities", "/.rnsh/allowed_identities"};
+  const char *home = getenv("HOME");
+  size_t k;
+  for (k = 0; home && k < sizeof(places) / sizeof(*places); ++k) {
+    FILE *f;
+    (void)snprintf(allowed_path, sizeof(allowed_path), "%s%s", home, places[k]);
+    f = fopen(allowed_path, "r");
+    if (f) {
+      fclose(f);
+      load_allowed_file();
+      return;
+    }
+  }
+  allowed_path[0] = 0;
+}
 static rnc_result accept_link(app *a, const rnc_identity *id,
                               const uint8_t destination[16],
                               const rnc_node_event *event, uint64_t now) {
@@ -637,6 +678,7 @@ static rnc_result accept_link(app *a, const rnc_identity *id,
     }
   if (!s)
     return RNC_NO_SPACE;
+  load_allowed_file();
   memset(s, 0, sizeof(*s));
   s->in_fd = s->out_fd = s->err_fd = -1;
   s->link = rnc_link_new(secure_random, NULL);
@@ -729,32 +771,6 @@ static int pump_host(app *a, int listener, uint64_t *unix_out) {
   (void)event;
 }
 
-/* More allowed identities from ~/.config/rnsh/allowed_identities, else ~/.rnsh/allowed_identities, as the
- * reference reads them: one hash per line, lines of other lengths are ignored. */
-static int load_allowed_file(void) {
-  static const char *places[] = {"/.config/rnsh/allowed_identities", "/.rnsh/allowed_identities"};
-  const char *home = getenv("HOME");
-  char path[1024], line[256];
-  FILE *f = NULL;
-  size_t k;
-  if (!home)
-    return 1;
-  for (k = 0; k < sizeof(places) / sizeof(*places) && !f; ++k) {
-    (void)snprintf(path, sizeof(path), "%s%s", home, places[k]);
-    f = fopen(path, "r");
-  }
-  if (!f)
-    return 1;
-  while (fgets(line, sizeof(line), f)) {
-    size_t n = strcspn(line, "\r\n");
-    line[n] = 0;
-    if (n != 32 || opt.allowed_count >= 32 || !hex_decode(line, opt.allowed[opt.allowed_count], 16))
-      continue; /* discarded, as the reference discards invalid lines */
-    ++opt.allowed_count;
-  }
-  fclose(f);
-  return 1;
-}
 static int listen_mode(rnc_identity *id, app *a) {
   uint8_t destination[16];
   uint64_t next_announce = 0;
@@ -765,8 +781,8 @@ static int listen_mode(rnc_identity *id, app *a) {
     return 1;
   for (i = 0; i < SESSIONS; i++)
     sessions[i].in_fd = sessions[i].out_fd = sessions[i].err_fd = -1;
-  (void)load_allowed_file();
-  if (!opt.allowed_count)
+  find_allowed_file();
+  if (!opt.allowed_count && !file_allowed_count)
     fprintf(stderr,
             "Warning: No allowed identities configured, rnsh will not accept "
             "any connections!\n");

@@ -38,6 +38,11 @@ struct rnc_service {
     int rx_ready, rx_response, rx_binding, tx_request;
     uint8_t rx_id[16], tx_id[16];
 };
+/* The request's timeout is for the answer to begin (the reference's RequestReceipt): once the response
+ * Resource is arriving, its own timers decide. */
+static int overdue(const service_pending *p, uint64_t now) {
+    return p->state != RNC_REQUEST_RECEIVING && now >= p->deadline;
+}
 static rnc_result path_hash(const char *path, uint8_t hash[16]) {
     uint8_t full[32];
     size_t n;
@@ -458,7 +463,7 @@ static rnc_result accept_response(rnc_service *s, const uint8_t *binding, const 
     index = slot(s->pending, id);
     if (index < 0)
         return RNC_OK; /* Authenticated late/unknown responses are discarded. */
-    if (s->pending[index].timed_out || now >= s->pending[index].deadline) {
+    if (s->pending[index].timed_out || overdue(&s->pending[index], now)) {
         s->pending[index].timed_out = 1;
         return RNC_OK;
     }
@@ -476,7 +481,7 @@ static rnc_result accept_file_response(rnc_service *s, const uint8_t *id, const 
     int index = slot(s->pending, id);
     if (index < 0)
         return RNC_OK; /* Authenticated late/unknown responses are discarded. */
-    if (s->pending[index].timed_out || now >= s->pending[index].deadline) {
+    if (s->pending[index].timed_out || overdue(&s->pending[index], now)) {
         s->pending[index].timed_out = 1;
         return RNC_OK;
     }
@@ -514,7 +519,7 @@ rnc_result rnc_service_input(rnc_service *s, const rnc_link_event *e, uint64_t n
             int index = slot(s->pending, id);
             if (index < 0)
                 return RNC_AGAIN;
-            if (s->pending[index].timed_out || now >= s->pending[index].deadline) {
+            if (s->pending[index].timed_out || overdue(&s->pending[index], now)) {
                 s->pending[index].timed_out = 1;
                 return RNC_OK;
             }
@@ -610,8 +615,12 @@ rnc_result rnc_service_pump(rnc_service *s, uint64_t now) {
         }
         if (re.type == RNC_RESOURCE_COMPLETE)
             s->rx_ready = 1;
-        else if (re.type == RNC_RESOURCE_FAILED)
+        else if (re.type == RNC_RESOURCE_FAILED) {
+            int index = s->rx_binding && s->rx_response ? slot(s->pending, s->rx_id) : -1;
+            if (index >= 0 && s->pending[index].state == RNC_REQUEST_RECEIVING)
+                s->pending[index].timed_out = 1; /* nothing else would end it now */
             s->rx_binding = 0;
+        }
     }
     if (s->rx_ready) {
         uint8_t *p = malloc(s->max_value + 64u), hash[32];
@@ -684,7 +693,7 @@ rnc_result rnc_service_tick(rnc_service *s, uint64_t now) {
     if (result != RNC_OK)
         return result;
     for (i = 0; i < RNC_SERVICE_PENDING; i++) {
-        if (s->pending[i].used && now >= s->pending[i].deadline)
+        if (s->pending[i].used && overdue(&s->pending[i], now))
             s->pending[i].timed_out = 1;
         if (s->incoming[i].used && now >= s->incoming[i].deadline) {
             remember_request(s, s->incoming[i].id);

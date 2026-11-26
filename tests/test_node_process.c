@@ -5540,6 +5540,7 @@ static void parse_after(const char *text, const char *needle, char hash[33]) {
   memcpy(hash, at + strlen(needle), 32);
   hash[32] = 0;
 }
+static void transport_config(const char *cfg, unsigned port);
 static int x_run(const char *x, const char *connect, char *out, size_t size,
                  const char *identity, ...) {
   char *args[32];
@@ -5837,6 +5838,83 @@ static void examples_test(const char *exe, const char *announce, const char *req
   puts("example tests passed");
 }
 /* The reference rnx against ours, both directions. */
+/* Runs `reticulum-c-x ... DESTINATION COMMAND | tail`, so large output is not captured in this process. */
+static void x_pipe(const char *x, const char *connect, const char *identity, const char *dest, const char *command,
+                   const char *then, char *out, size_t size) {
+  char script[1200];
+  char *args[] = {"/bin/sh", "-c", script, NULL};
+  CHECK(snprintf(script, sizeof(script), "%s --connect %s --identity %s -w 60 %s \"%s\" 2>/dev/null | %s", x, connect, identity, dest,
+                 command, then) < (int)sizeof(script));
+  memset(out, 0, size);
+  CHECK(run_cp("/bin/sh", out, size, args) == 0);
+}
+/* rnx without the old limits: commands run for as long as the client allows and beside each other, and output of
+ * several MiB comes back whole. */
+static void x_limits(const char *exe, const char *x) {
+  char dir[] = "/tmp/rnc-x-lim-XXXXXX", cfg[300], key[300], admin[300], idb[300], idl[300], idc[300], connect[40],
+       hash_b[33], hash_c[33], dest[33], out[8192], listen_out[4096], node_id[33];
+  unsigned port = unused_port();
+  pid_t daemon, listener, slow;
+  int dfd, lfd, sfd, status;
+  time_t started;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0 && snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0 &&
+        snprintf(admin, sizeof(admin), "%s/admin", dir) > 0 && snprintf(idb, sizeof(idb), "%s/id_b", dir) > 0 &&
+        snprintf(idc, sizeof(idc), "%s/id_c", dir) > 0 && snprintf(idl, sizeof(idl), "%s/id_l", dir) > 0 &&
+        snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  write_identity(idb, 21, hash_b);
+  write_identity(idc, 77, hash_c);
+  transport_config(cfg, port);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, node_id);
+  {
+    char *listen_args[] = {(char *)x, "--connect", connect, "--identity", idl, "-l", "-a", hash_b, "-a", hash_c, NULL};
+    listener = spawn_cp(x, &lfd, listen_args);
+    memset(listen_out, 0, sizeof(listen_out));
+    read_until(lfd, "rnx listening for commands on <", listen_out, sizeof(listen_out), 10);
+    read_until(lfd, ">\n", listen_out, sizeof(listen_out), 10);
+    parse_after(listen_out, "rnx listening for commands on <", dest);
+  }
+  { /* a command longer than 25 seconds, and another one answered while it runs */
+    char *slow_args[] = {(char *)x, "--connect", connect, "--identity", idb, "-w", "45", dest,
+                         "sh -c 'sleep 28; echo slept-it-out'", NULL};
+    char slow_out[4096] = "";
+    started = time(NULL);
+    slow = spawn_cp(x, &sfd, slow_args);
+    CHECK(poll(NULL, 0, 3000) == 0);
+    {
+      time_t quick = time(NULL);
+      CHECK(x_run(x, connect, out, sizeof(out), idc, dest, "echo meanwhile", NULL) == 0 && strstr(out, "meanwhile"));
+      CHECK(time(NULL) - quick < 10);
+    }
+    read_until(sfd, "slept-it-out", slow_out, sizeof(slow_out), 45);
+    CHECK(waitpid(slow, &status, 0) == slow && WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(time(NULL) - started >= 27);
+    close(sfd);
+  }
+  /* 5 MiB of output arrives whole */
+  x_pipe(x, connect, idb, dest, "sh -c 'head -c 5242880 /dev/zero | tr \\\\\\\\0 a'", "wc -c", out, sizeof(out));
+  CHECK(strtoul(out, NULL, 10) == 5242880ul);
+  /* both streams large at once share the room */
+  x_pipe(x, connect, idb, dest, "sh -c 'head -c 3000000 /dev/zero; head -c 3000000 /dev/zero 1>&2'", "wc -c", out,
+         sizeof(out));
+  CHECK(strtoul(out, NULL, 10) == 3000000ul);
+  /* more than the request service carries is cut, and said to be */
+  x_pipe(x, connect, idb, dest, "head -c 20000000 /dev/zero", "tail -c 200", out, sizeof(out));
+  {
+    char text[8192];
+    size_t i, n = 0;
+    for (i = 0; i < sizeof(out); ++i)
+      if (out[i])
+        text[n++] = out[i];
+    text[n] = 0;
+    CHECK(strstr(text, "Output truncated before being returned:") && strstr(text, "stdout truncated to 16"));
+  }
+  stop_cp(listener, lfd);
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("x limit tests passed");
+}
 static void x_reference(const char *exe, const char *x, const char *python) {
   char dir[] = "/tmp/rnc-x-ref-XXXXXX", cfg[256], key[256], admin[256],
        refcfg[300], refconf[320], idl[300], ref_l[300], ref_c[300], connect[64],
@@ -5885,6 +5963,17 @@ static void x_reference(const char *exe, const char *x, const char *python) {
     parse_after(listen_out, "rnx listening for commands on <", dest);
     CHECK(run_cp(python, out, sizeof(out), ref_run) == 4 &&
           strstr(out, "from-ours"));
+    { /* 3 MiB to the reference */
+      char script[1500];
+      char *big[] = {"/bin/sh", "-c", script, NULL};
+      CHECK(snprintf(script, sizeof(script),
+                     "%s -u -m RNS.Utilities.rnx --config %s -i %s -w 90 %s "
+                     "\"sh -c 'head -c 3145728 /dev/zero | tr \\\\\\\\0 c'\" | tr -cd c | wc -c",
+                     python, refcfg, ref_c, dest) < (int)sizeof(script));
+      memset(out, 0, sizeof(out));
+      CHECK(run_cp("/bin/sh", out, sizeof(out), big) == 0);
+      CHECK(strtoul(out, NULL, 10) >= 3145728ul); /* the reference's progress text may add a few */
+    }
     stop_cp(listener, lfd);
   }
   /* the reference executes for ours */
@@ -5901,6 +5990,9 @@ static void x_reference(const char *exe, const char *x, const char *python) {
     read_until(lfd, ">", listen_out, sizeof(listen_out), 5);
     parse_after(listen_out, "rnx listening for commands on <", dest);
     CHECK(run_cp(x, out, sizeof(out), run) == 5 && strstr(out, "from-ref"));
+    /* 3 MiB from the reference */
+    x_pipe(x, connect, idl, dest, "sh -c 'head -c 3145728 /dev/zero | tr \\\\0 b'", "wc -c", out, sizeof(out));
+    CHECK(strtoul(out, NULL, 10) == 3145728ul);
     stop_cp(listener, lfd);
   }
   stop(daemon, dfd);
@@ -6183,6 +6275,17 @@ static void sh_tools(const char *exe, const char *sh) {
           strstr(out, "from file"));
     CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "echo", "denied", NULL) != 0 &&
           !strstr(out, "denied\n"));
+    /* the file is read again for every connection: B is added and C taken out without a restart */
+    CHECK(snprintf(listing, sizeof(listing), "%s\n", hash_b) > 0);
+    file_bytes(allowed, listing, strlen(listing));
+    CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, "-T", dest, "--", "echo", "now in", NULL) == 0 &&
+          strstr(out, "now in"));
+    CHECK(sh_run(sh, connect, out, sizeof(out), "", idc, dest, "--", "echo", "now out", NULL) != 0 &&
+          strstr(out, "Identity not allowed"));
+    /* and a deleted file allows nobody */
+    CHECK(!unlink(allowed));
+    CHECK(sh_run(sh, connect, out, sizeof(out), "", idb, dest, "--", "echo", "gone", NULL) != 0 &&
+          strstr(out, "Identity not allowed"));
     stop_cp(listener, lfd);
   }
   stop(daemon, dfd);
@@ -7393,6 +7496,8 @@ int main(int argc, char **argv) {
     ctl_remote_test(argv[1], argv[3]);
   else if (!strcmp(argv[2], "examples") && argc == 6)
     examples_test(argv[1], argv[3], argv[4], argv[5]);
+  else if (!strcmp(argv[2], "x_limits") && argc == 4)
+    x_limits(argv[1], argv[3]);
   else if (!strcmp(argv[2], "x_tools") && argc == 4)
     x_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "cp_ref") && argc == 6)

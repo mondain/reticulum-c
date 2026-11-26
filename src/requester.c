@@ -246,8 +246,13 @@ rnc_result rnc_requester_tick(rnc_requester *r, uint64_t unix_seconds,
     int closed = 0;
     if (!j->used || j->released)
       continue;
-    if (j->state != JOB_CLOSING && now_ms >= j->deadline)
-      job_finish(j, RNC_REQUESTER_FAILED, now_ms);
+    if (j->state != JOB_CLOSING && now_ms >= j->deadline) {
+      /* the timeout is for the answer to begin: one that is arriving is not cut off */
+      rnc_request_state state = RNC_REQUEST_FAILED;
+      if (!j->has_request_id || rnc_service_request_state(j->service, j->request_id, &state, NULL) != RNC_OK ||
+          state != RNC_REQUEST_RECEIVING)
+        job_finish(j, RNC_REQUESTER_FAILED, now_ms);
+    }
     (void)rnc_link_tick(j->link, now_ms);
     while (rnc_link_poll(j->link, &le) == RNC_OK) {
       if (le.type == RNC_LINK_SEND)

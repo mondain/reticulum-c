@@ -1365,3 +1365,26 @@ Differences from the reference programs: a line typed while the send window is f
 refused; the client waits for delivery before closing; the time of a message is printed in UTC; long input is
 limited to 1023 bytes a line. A build without bzip2 cannot read a compressed buffer message, which the
 reference may send for a long write.
+
+## rnx limits and the rnsh allow list (`feature/rnx-limits-rnsh-reload`)
+
+`reticulum-c-x -l` runs each command beside the others (8 at once) while it keeps serving the network, for
+the client's timeout (at most a day), and answers with up to 16 MiB, the ceiling of the request service;
+stdout and stderr share it. Before, a command was stopped at 25 s, the listener served nothing meanwhile and
+each stream was cut at about 32 kB. The reference has no output limit. A listener now holds up to the
+answer's size per running command, and 15 MB each way against the reference peaked at about 70 MB.
+
+Library: the request timeout of `rnc_service` and `rnc_requester` now ends only a request whose answer has
+not begun to arrive, as in the reference. Programs that relied on it to bound a whole transfer must bound it
+themselves (`reticulum-c-x -W` does).
+
+`reticulum-c-sh -l` reads its allowed-identities file again for every connection. Which file is chosen at
+start, as in the reference; unlike the reference, a file that can no longer be read allows nobody. A session
+already open is not closed.
+
+| Check | What it shows |
+| --- | --- |
+| `reticulum_node_process_x_limits` | a 28 s command, another answered meanwhile, 5 MiB of output, both streams large, truncation above 16 MiB |
+| `reticulum_node_process_x_rns` | 3 MiB of output each way with the unmodified `rnx`; 15 MB each way checked by hand, byte for byte one way and whole inside the reference client's output the other |
+| `reticulum_service_slow_response`, `reticulum_service_expiry` | a response arriving past the deadline is delivered; one that stalls times out |
+| `reticulum_node_process_sh_tools` | identities added to, removed from and deleted with the file while the listener runs |
