@@ -7212,6 +7212,162 @@ static void link_examples_reference(const char *exe, const char *linkex, const c
   puts("link and identify examples match the reference");
 }
 
+/* ---- the channel and buffer examples -------------------------------------------------------------------- */
+/* What each of the two programs prints, as server and as client, and how the answer names the way it came. */
+typedef struct stream_example {
+  const char *script, *title, *server_got, *client_got, *over;
+} stream_example;
+static const stream_example stream_examples_list[2] = {
+    {"Channel.py", "Channel example <", "Received data on the link: ", "Received data on the link: ", "link"},
+    {"Buffer.py", "Link buffer example <", "Received data over the buffer: ", "Received data over the link buffer: ", "buffer"}};
+/* `lines` lines typed at once on the client arrive in order and are each answered. */
+static void stream_lines(live_proc *client, live_proc *server, const stream_example *x, const char *tag, unsigned lines) {
+  char wanted[300], typed[2000];
+  size_t used = 0;
+  unsigned i;
+  for (i = 0; i < lines; ++i)
+    used += (size_t)snprintf(typed + used, sizeof(typed) - used, "%s %u\n", tag, i);
+  CHECK(used < sizeof(typed));
+  live_send(client, typed);
+  /* a stream may join lines, so the answers are only asked for one by one when each is its own message */
+  for (i = 0; i < lines; ++i) {
+    CHECK(snprintf(wanted, sizeof(wanted), "%s%s %u", x->server_got, tag, i) > 0);
+    example_says(server, wanted);
+    CHECK(snprintf(wanted, sizeof(wanted), "%sI received \"%s %u\" over the %s", x->client_got, tag, i, x->over) > 0);
+    example_says(client, wanted);
+  }
+}
+static void stream_examples(const char *exe, const char *channel, const char *buffer) {
+  char dir[] = "/tmp/rnc-exs-XXXXXX", cfg[300], key[300], admin[300], ids[300], idc[300], connect[40], node_id[33],
+       line[2048], hash[33], longline[700], out[8192];
+  unsigned port = unused_port(), which;
+  live_proc server, client;
+  pid_t daemon;
+  int dfd;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0 && snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0 &&
+        snprintf(admin, sizeof(admin), "%s/admin", dir) > 0 && snprintf(ids, sizeof(ids), "%s/id_server", dir) > 0 &&
+        snprintf(idc, sizeof(idc), "%s/id_client", dir) > 0 && snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  transport_config(cfg, port);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, node_id);
+  for (which = 0; which < 2; ++which) {
+    const stream_example *x = &stream_examples_list[which];
+    const char *program = which ? buffer : channel;
+    char *serve[] = {(char *)program, "--connect", connect, "--identity", ids, "server", NULL};
+    char *use[] = {(char *)program, "--connect", connect, "--identity", idc, "client", hash, NULL};
+    chat_start(&server, "", serve, x->title);
+    CHECK(live_find(&server, "Sent announce from <", 10000, line, sizeof(line)));
+    hash_after(line, "Sent announce from <", hash);
+    chat_start(&client, "", use, "Link established with server");
+    example_says(&server, "Client connected");
+    stream_lines(&client, &server, x, "first", 1);
+    if (!which) { /* both ends see the time the other put in the message */
+      live_send(&client, "dated\n");
+      example_says(&server, "Received data on the link: dated (message created at 20");
+      example_says(&client, "I received \"dated\" over the link (message created at 20");
+    }
+    if (which) { /* a line longer than one message arrives whole, in pieces */
+      memset(longline, 'z', sizeof(longline));
+      memcpy(longline + sizeof(longline) - 6, "TAIL\n", 6);
+      live_send(&client, longline);
+      example_says(&server, "TAIL");
+      example_says(&client, "TAIL\" over the buffer");
+    } else {
+      stream_lines(&client, &server, x, "burst", 8); /* more than the send window: they wait their turn */
+    }
+    live_send(&client, "quit\n");
+    example_says(&server, "Client disconnected");
+    live_end(&client);
+    live_end(&server);
+  }
+  { /* piped input: everything is delivered before the client leaves */
+    char *serve[] = {(char *)channel, "--connect", connect, "--identity", ids, "server", NULL};
+    char pipeline[900];
+    char *use[] = {"/bin/sh", "-c", pipeline, NULL};
+    chat_start(&server, "", serve, "Channel example <");
+    CHECK(live_find(&server, "Sent announce from <", 10000, line, sizeof(line)));
+    hash_after(line, "Sent announce from <", hash);
+    CHECK(snprintf(pipeline, sizeof(pipeline), "printf 'a\\nb\\nc\\nd\\ne\\n' | %s --connect %s --identity %s client %s",
+                   channel, connect, idc, hash) < (int)sizeof(pipeline));
+    memset(out, 0, sizeof(out));
+    CHECK(run_cp("/bin/sh", out, sizeof(out), use) == 0);
+    example_says(&server, "Received data on the link: e (message created at ");
+    live_end(&server);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("channel and buffer examples passed");
+}
+static void stream_examples_reference(const char *exe, const char *channel, const char *buffer, const char *reference,
+                                      const char *python) {
+  char base[] = "/tmp/rnc-exsref-XXXXXX", cfg[300], key[300], admin[300], ids[300], idc[300], connect[40],
+       node_id[33], line[2048], hash[33], script[500], dir[500], wanted[300];
+  unsigned port = unused_port(), which;
+  live_proc ref, ours;
+  pid_t daemon;
+  int dfd;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0 && snprintf(key, sizeof(key), "%s/daemon_id", base) > 0 &&
+        snprintf(admin, sizeof(admin), "%s/admin", base) > 0 && snprintf(ids, sizeof(ids), "%s/id_server", base) > 0 &&
+        snprintf(idc, sizeof(idc), "%s/id_client", base) > 0 && snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  transport_config(cfg, port);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, node_id);
+  for (which = 0; which < 2; ++which) {
+    const stream_example *x = &stream_examples_list[which];
+    const char *program = which ? buffer : channel;
+    char name[32];
+    CHECK(snprintf(script, sizeof(script), "%s/Examples/%s", reference, x->script) > 0);
+    { /* our client, reference server */
+      char *theirs[] = {(char *)python, "-u", script, "-s", "--config", dir, NULL};
+      char *use[] = {(char *)program, "--connect", connect, "--identity", idc, "client", hash, NULL};
+      char title[80];
+      CHECK(snprintf(name, sizeof(name), "server%u", which) > 0);
+      live_peer_config(dir, sizeof(dir), base, name, port);
+      live_spawn_argv(&ref, reference, theirs);
+      CHECK(snprintf(title, sizeof(title), "%s", x->title) > 0);
+      CHECK(live_find(&ref, title, 30000, line, sizeof(line)));
+      hash_after(line, title, hash);
+      live_send(&ref, "\n");
+      live_sleep(2000);
+      chat_start(&ours, "", use, "Link established with server");
+      live_sleep(1000);
+      stream_lines(&ours, &ref, x, "from c", 1);
+      if (!which)
+        stream_lines(&ours, &ref, x, "more", 2);
+      live_send(&ours, "quit\n");
+      example_says(&ref, "Client disconnected");
+      live_end(&ours);
+      live_end(&ref);
+    }
+    { /* reference client, our server */
+      char *serve[] = {(char *)program, "--connect", connect, "--identity", ids, "server", NULL};
+      char *theirs[] = {(char *)python, "-u", script, "--config", dir, hash, NULL};
+      chat_start(&ours, "", serve, x->title);
+      CHECK(live_find(&ours, "Sent announce from <", 10000, line, sizeof(line)));
+      hash_after(line, "Sent announce from <", hash);
+      CHECK(snprintf(name, sizeof(name), "client%u", which) > 0);
+      live_peer_config(dir, sizeof(dir), base, name, port);
+      live_spawn_argv(&ref, reference, theirs);
+      example_says(&ours, "Client connected");
+      live_sleep(1500);
+      live_send(&ref, "from the reference\n");
+      CHECK(snprintf(wanted, sizeof(wanted), "%sfrom the reference", x->server_got) > 0);
+      example_says(&ours, wanted);
+      CHECK(snprintf(wanted, sizeof(wanted), "I received \"from the reference\" over the %s", x->over) > 0);
+      example_says(&ref, wanted);
+      live_send(&ref, "quit\n");
+      example_says(&ours, "Client disconnected");
+      live_end(&ref);
+      live_end(&ours);
+    }
+  }
+  stop(daemon, dfd);
+  remove_tree(base);
+  puts("channel and buffer examples match the reference");
+}
+
 int main(int argc, char **argv) {
   CHECK(argc >= 3 && argc <= 9);
   if (!strcmp(argv[2], "i2p") && argc == 4)
@@ -7255,6 +7411,10 @@ int main(int argc, char **argv) {
     link_examples(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "link_examples_ref") && argc == 7)
     link_examples_reference(argv[1], argv[3], argv[4], argv[5], argv[6]);
+  else if (!strcmp(argv[2], "stream_examples") && argc == 5)
+    stream_examples(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "stream_examples_ref") && argc == 7)
+    stream_examples_reference(argv[1], argv[3], argv[4], argv[5], argv[6]);
   else if (!strcmp(argv[2], "tunnel_peers") && argc == 4)
     tunnel_peers(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "tunnel_peers_ref") && argc == 6)

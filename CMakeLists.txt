@@ -396,7 +396,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
         endforeach()
         add_executable(reticulum-c-example-link examples/example_link.c)
         add_executable(reticulum-c-example-identify examples/example_identify.c)
-        foreach(example link identify)
+        add_executable(reticulum-c-example-channel examples/example_channel.c)
+        add_executable(reticulum-c-example-buffer examples/example_buffer.c)
+        foreach(example link identify channel buffer)
             target_link_libraries(reticulum-c-example-${example} PRIVATE reticulum_c_host OpenSSL::Crypto)
             target_compile_options(reticulum-c-example-${example} PRIVATE -Wall -Wextra -Wpedantic -Werror)
         endforeach()
@@ -593,6 +595,10 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                 $<TARGET_FILE:reticulum-c-node> link_examples $<TARGET_FILE:reticulum-c-example-link>
                 $<TARGET_FILE:reticulum-c-example-identify>)
             set_tests_properties(reticulum_node_process_link_examples PROPERTIES LABELS network TIMEOUT 120)
+            add_test(NAME reticulum_node_process_stream_examples COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> stream_examples $<TARGET_FILE:reticulum-c-example-channel>
+                $<TARGET_FILE:reticulum-c-example-buffer>)
+            set_tests_properties(reticulum_node_process_stream_examples PROPERTIES LABELS network TIMEOUT 120)
             add_test(NAME reticulum_node_process_cp_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cp_tools $<TARGET_FILE:reticulum-c-cp>)
             set_tests_properties(reticulum_node_process_cp_tools PROPERTIES LABELS network TIMEOUT 120)
@@ -700,6 +706,13 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-example-link> $<TARGET_FILE:reticulum-c-example-identify>
                     "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_link_examples_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 240)
+                add_test(NAME reticulum_node_process_stream_examples_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> stream_examples_ref
+                    $<TARGET_FILE:reticulum-c-example-channel> $<TARGET_FILE:reticulum-c-example-buffer>
+                    "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_stream_examples_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 240)
                 add_test(NAME reticulum_node_process_rnid_announce_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
