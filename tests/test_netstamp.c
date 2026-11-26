@@ -110,6 +110,37 @@ static void find_exhausted(void) {
   CHECK(rnc_netstamp_find(material, 2, 100.5, rng, NULL, 0, stamp, NULL) == RNC_INVALID);
   CHECK(rnc_netstamp_find_key(material, 2, 8.0, rng, NULL, 0, NULL, pub, NULL) == RNC_INVALID);
 }
+/* Identity(value=n): the encryption key is searched until it is a stamp over the signature key. */
+static void identity_stamp(void) {
+  rnc_identity id, loaded, plain, untouched;
+  uint8_t signature[64], cipher[256], clear[64];
+  uint64_t attempts = 0;
+  size_t size, got;
+  memset(&id, 0, sizeof(id));
+  CHECK(rnc_netstamp_identity_generate(&id, 8.0, rng, NULL, 0, &attempts) == RNC_OK && attempts > 0);
+  CHECK(id.has_private && rnc_netstamp_identity_value(&id) >= 8.0);
+  CHECK(rnc_netstamp_valid(id.public_key + 32, 32, id.public_key, 32, 8.0));
+  CHECK(rnc_netstamp_value(id.public_key + 32, 32, id.public_key, 32) == rnc_netstamp_identity_value(&id));
+  /* it is an ordinary identity: the private key loads, signs and decrypts */
+  CHECK(rnc_identity_from_private(&loaded, id.private_key) == RNC_OK && !memcmp(loaded.public_key, id.public_key, 64) &&
+        !memcmp(loaded.hash, id.hash, 16));
+  CHECK(rnc_identity_sign(&id, "stamped", 7, signature) == RNC_OK &&
+        rnc_identity_verify(&id, "stamped", 7, signature) == RNC_OK);
+  CHECK(rnc_identity_encrypt(&id, "secret", 6, rng, NULL, cipher, sizeof(cipher), &size) == RNC_OK);
+  CHECK(rnc_identity_decrypt(&loaded, cipher, size, clear, sizeof(clear), &got) == RNC_OK && got == 6 &&
+        !memcmp(clear, "secret", 6));
+  CHECK(rnc_netstamp_identity_generate(&plain, 0, rng, NULL, 0, NULL) == RNC_OK && plain.has_private);
+  /* running out of attempts, or bad arguments, leave the identity alone */
+  memset(&id, 0xa5, sizeof(id));
+  memset(&untouched, 0xa5, sizeof(untouched));
+  CHECK(rnc_netstamp_identity_generate(&id, 40.0, rng, NULL, 1, NULL) == RNC_TIMEOUT);
+  CHECK(rnc_netstamp_identity_generate(&id, 100.5, rng, NULL, 1, NULL) == RNC_INVALID);
+  CHECK(rnc_netstamp_identity_generate(&id, -1, rng, NULL, 1, NULL) == RNC_INVALID);
+  CHECK(rnc_netstamp_identity_generate(&id, 8.0, NULL, NULL, 1, NULL) == RNC_INVALID);
+  CHECK(rnc_netstamp_identity_generate(NULL, 8.0, rng, NULL, 1, NULL) == RNC_INVALID);
+  CHECK(!memcmp(&id, &untouched, sizeof(id)));
+  CHECK(rnc_netstamp_identity_value(NULL) == 0);
+}
 /* The 18 byte extension at the end of announce app data (Destination._announce): marker 0xC1, a reserved flags
  * byte, the 14 byte stamp, then the announced link request cost as its fraction byte and its integer byte. */
 static void ext_roundtrip(void) {
@@ -176,6 +207,8 @@ int main(int argc, char **argv) {
     find_low_cost();
   else if (!strcmp(argv[1], "find_key_low_cost"))
     find_key_low_cost();
+  else if (!strcmp(argv[1], "identity_stamp"))
+    identity_stamp();
   else if (!strcmp(argv[1], "find_exhausted"))
     find_exhausted();
   else if (!strcmp(argv[1], "ext_roundtrip"))

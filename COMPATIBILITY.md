@@ -1320,3 +1320,13 @@ announce and path request shares by `ctl`, only the link share is shown.
 | `reticulum_node_input_class`, `reticulum_node_mesh` | what is classed as discarded, and link traffic at the ends and the routers |
 | `reticulum_node_process_traffic_stats` | a discarded packet and a file transfer through a daemon, read with `ctl` |
 | `reticulum_node_process_traffic_stats_rns` | the unmodified `rnstatus -F -l -t` reads the same daemon |
+
+## Identity stamps (`feature/identity-stamps`)
+
+`rnc_netstamp_identity_generate` and `rnc_netstamp_identity_value` are the reference's
+`Identity(value=n)` and `Identity.get_value()`: the X25519 public key is searched until it is a stamp of
+that value over the identity's Ed25519 public key. Nothing in RNS 1.6.1 checks the value on the network,
+and neither its tools nor ours offer it. The search is on one thread and the caller bounds it.
+
+Verified with `reticulum_netstamp_identity_stamp` and, against the reference in both directions,
+`reticulum_netstamp_rns` (public keys and values agree).

@@ -5,6 +5,8 @@ tests/test_netstamp_reference.c to compare with this library:
     C cost fp bytes_hex quantized     cost_to_fp, cost_to_bytes, quantize_cost
     V material_hex stamp_hex cost valid value     stamp_valid and stamp_value on the unexpanded workblock
     E stamp_hex link_cost ext_hex     the announce extension Destination._announce builds
+    I private_hex public_hex value    RNS.Identity(value=8) and a plain RNS.Identity, with get_value()
+    J private_hex public_hex value    the stamped identity given as argument, as the reference reads it
 
 PYTHONPATH must contain the reference checkout. Nothing here is reimplemented: every number comes from
 RNS.Stamps and RNS.Identity.
@@ -52,3 +54,10 @@ for link_cost in (0, 12.5, 40, 100):
     cb = Stamps.cost_to_bytes(link_cost)
     ext = bytes([RNS.Identity.EXTPAYLOADMARKER, 0x00]) + stamp + bytes([cb[1], cb[0]])
     print("E %s %r %s" % (stamp.hex(), link_cost, ext.hex()))
+
+for identity in [RNS.Identity(value=8) for _ in range(3)] + [RNS.Identity()]:
+    print("I %s %s %r" % (identity.get_private_key().hex(), identity.get_public_key().hex(), identity.get_value()))
+
+theirs = RNS.Identity(create_keys=False)
+theirs.load_private_key(bytes.fromhex(sys.argv[1]))
+print("J %s %s %r" % (sys.argv[1], theirs.get_public_key().hex(), theirs.get_value()))

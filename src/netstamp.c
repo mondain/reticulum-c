@@ -252,3 +252,36 @@ int rnc_netstamp_link_stamper_run(void *context, const uint8_t material[48], dou
   return rnc_netstamp_find_key(material, 48, cost, c->random, c->random_context, c->max_attempts, private_key,
                                public_key, NULL) == RNC_OK;
 }
+rnc_result rnc_netstamp_identity_generate(rnc_identity *identity, double value, rnc_random_fn random,
+                                          void *random_context, uint64_t max_attempts, uint64_t *attempts) {
+  rnc_identity fresh, stamped;
+  uint8_t key[64], encryption_public[32];
+  rnc_result r;
+  if (!identity || !random || !(value >= 0) || value > RNC_NETSTAMP_COST_CAP)
+    return RNC_INVALID;
+  r = rnc_identity_generate(&fresh, random, random_context);
+  if (r != RNC_OK)
+    return r;
+  if (attempts)
+    *attempts = 0;
+  if (value == 0) {
+    *identity = fresh;
+    rnc_identity_clear(&fresh);
+    return RNC_OK;
+  }
+  /* the signature key stays; the encryption key is the one searched for */
+  memcpy(key, fresh.private_key, 64);
+  r = rnc_netstamp_find_key(fresh.public_key + 32, 32, value, random, random_context, max_attempts, key,
+                            encryption_public, attempts);
+  if (r == RNC_OK)
+    r = rnc_identity_from_private(&stamped, key);
+  if (r == RNC_OK)
+    *identity = stamped;
+  rnc_identity_clear(&stamped);
+  rnc_identity_clear(&fresh);
+  rnc_cleanse(key, sizeof(key));
+  return r;
+}
+double rnc_netstamp_identity_value(const rnc_identity *identity) {
+  return identity ? rnc_netstamp_value(identity->public_key + 32, 32, identity->public_key, 32) : 0;
+}
