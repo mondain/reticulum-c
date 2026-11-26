@@ -143,6 +143,8 @@ usage. Where the table says "interoperates", the example has been run against th
 | `group` | A GROUP destination with a shared key file | interoperates with its `Destination` (it has no example) |
 | `echo` | Encrypted packets with delivery proofs | interoperates with Echo.py |
 | `ratchets` | The same with ratchets, for forward secrecy | interoperates with Ratchets.py |
+| `link` | An encrypted link, lines both ways | interoperates with Link.py |
+| `identify` | Identifying over a link, with an allow list | interoperates with Identify.py |
 | `request` | A request/response service over a link | own destination names, not run against it |
 
 ## Tools

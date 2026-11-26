@@ -7032,6 +7032,186 @@ static void chat_examples_reference(const char *exe, const char *broadcast, cons
   puts("broadcast, group and ratchet examples match the reference");
 }
 
+/* ---- the link and identify examples --------------------------------------------------------------------- */
+static void hash_after(const char *line, const char *prefix, char hash[33]) {
+  const char *at = strstr(line, prefix);
+  CHECK(at && sscanf(at + strlen(prefix), "%32[0-9a-f]", hash) == 1 && strlen(hash) == 32);
+}
+static void example_says(live_proc *p, const char *text) {
+  char line[2048];
+  if (!live_find(p, text, 15000, line, sizeof(line))) {
+    fprintf(stderr, "never saw \"%s\"; unread output:\n%s\n", text, p->buf);
+    CHECK(0);
+  }
+}
+static void transport_config(const char *cfg, unsigned port) {
+  char text[512];
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = No\n[interfaces]\n[[TCP]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n", port) > 0);
+  config_file(cfg, text);
+}
+static void link_examples(const char *exe, const char *linkex, const char *identify) {
+  char dir[] = "/tmp/rnc-exl-XXXXXX", cfg[300], key[300], admin[300], ids[300], idc[300], connect[40], node_id[33],
+       line[2048], hash[33], mine[33], other[33] = "000102030405060708090a0b0c0d0e0f", wanted[256];
+  unsigned port = unused_port();
+  live_proc server, client;
+  pid_t daemon;
+  int dfd;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0 && snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0 &&
+        snprintf(admin, sizeof(admin), "%s/admin", dir) > 0 && snprintf(ids, sizeof(ids), "%s/id_server", dir) > 0 &&
+        snprintf(idc, sizeof(idc), "%s/id_client", dir) > 0 && snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  transport_config(cfg, port);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, node_id);
+  { /* a link: lines both ways, then the client quits; then a server that goes away */
+    char *serve[] = {(char *)linkex, "--connect", connect, "--identity", ids, "server", NULL};
+    char *use[] = {(char *)linkex, "--connect", connect, "--identity", idc, "client", hash, NULL};
+    chat_start(&server, "", serve, "Link example <");
+    CHECK(live_find(&server, "Sent announce from <", 10000, line, sizeof(line)));
+    hash_after(line, "Sent announce from <", hash);
+    chat_start(&client, "", use, "Link established with server");
+    example_says(&server, "Client connected");
+    live_send(&client, "first line\nsecond line\n");
+    example_says(&server, "Received data on the link: first line");
+    example_says(&client, "Received data on the link: I received \"first line\" over the link");
+    example_says(&client, "Received data on the link: I received \"second line\" over the link");
+    live_send(&client, "quit\n");
+    example_says(&server, "Client disconnected");
+    live_end(&client);
+    chat_start(&client, "", use, "Link established with server");
+    example_says(&server, "Client connected");
+    live_end(&server);
+    example_says(&client, "The link was closed by the server, exiting now");
+    live_end(&client);
+  }
+  { /* identification, with and without an allow list */
+    char *serve[] = {(char *)identify, "--connect", connect, "--identity", ids, "server", NULL};
+    char *only_other[] = {(char *)identify, "--connect", connect, "--identity", ids, "--allow", other, "server", NULL};
+    char *only_mine[] = {(char *)identify, "--connect", connect, "--identity", ids, "--allow", other, "--allow", mine,
+                         "server", NULL};
+    char *use[] = {(char *)identify, "--connect", connect, "--identity", idc, "client", hash, NULL};
+    chat_start(&server, "", serve, "Link identification example <");
+    CHECK(live_find(&server, "Sent announce from <", 10000, line, sizeof(line)));
+    hash_after(line, "Sent announce from <", hash);
+    live_spawn_argv(&client, "", use);
+    CHECK(live_find(&client, "Client identity <", 10000, line, sizeof(line)));
+    hash_after(line, "Client identity <", mine);
+    example_says(&client, "identifying to remote peer");
+    CHECK(snprintf(wanted, sizeof(wanted), "Remote identified as: <%s>", mine) > 0);
+    example_says(&server, wanted);
+    live_send(&client, "who am I\n");
+    CHECK(snprintf(wanted, sizeof(wanted), "Received data from <%s>: who am I", mine) > 0);
+    example_says(&server, wanted);
+    CHECK(snprintf(wanted, sizeof(wanted), "I received \"who am I\" over the link from <%s>", mine) > 0);
+    example_says(&client, wanted);
+    live_end(&client);
+    live_end(&server);
+    chat_start(&server, "", only_other, "Link identification example <");
+    example_says(&server, "Sent announce from <");
+    chat_start(&client, "", use, "Client identity <");
+    example_says(&server, "Identity not allowed, closing the link");
+    example_says(&client, "The link was closed by the server, exiting now");
+    live_end(&client);
+    live_end(&server);
+    chat_start(&server, "", only_mine, "Link identification example <");
+    example_says(&server, "Sent announce from <");
+    chat_start(&client, "", use, "identifying to remote peer");
+    live_send(&client, "allowed in\n");
+    example_says(&client, "I received \"allowed in\" over the link from <");
+    live_end(&client);
+    live_end(&server);
+  }
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("link and identify examples passed");
+}
+/* The same against the unmodified Link.py and Identify.py, each in both roles. */
+static void link_examples_reference(const char *exe, const char *linkex, const char *identify, const char *reference,
+                                    const char *python) {
+  static const char *scripts[] = {"Link.py", "Identify.py"};
+  static const char *titles[] = {"Link example", "Link identification example"};
+  static const char *established[] = {"Link established with server", "identifying to remote peer"};
+  char base[] = "/tmp/rnc-exlref-XXXXXX", cfg[300], key[300], admin[300], ids[300], idc[300], connect[40],
+       node_id[33], line[2048], hash[33], mine[33], script[500], dir[500], title[80], wanted[300];
+  unsigned port = unused_port(), which;
+  live_proc ref, ours;
+  pid_t daemon;
+  int dfd;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0 && snprintf(key, sizeof(key), "%s/daemon_id", base) > 0 &&
+        snprintf(admin, sizeof(admin), "%s/admin", base) > 0 && snprintf(ids, sizeof(ids), "%s/id_server", base) > 0 &&
+        snprintf(idc, sizeof(idc), "%s/id_client", base) > 0 && snprintf(connect, sizeof(connect), "127.0.0.1:%u", port) > 0);
+  transport_config(cfg, port);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, node_id);
+  for (which = 0; which < 2; ++which) {
+    const char *program = which ? identify : linkex;
+    CHECK(snprintf(script, sizeof(script), "%s/Examples/%s", reference, scripts[which]) > 0);
+    CHECK(snprintf(title, sizeof(title), "%s <", titles[which]) > 0);
+    { /* our client, reference server */
+      char name[32];
+      char *theirs[] = {(char *)python, "-u", script, "-s", "--config", dir, NULL}; /* -u: callbacks print while input() waits */
+      char *use[] = {(char *)program, "--connect", connect, "--identity", idc, "client", hash, NULL};
+      CHECK(snprintf(name, sizeof(name), "server%u", which) > 0);
+      live_peer_config(dir, sizeof(dir), base, name, port);
+      live_spawn_argv(&ref, reference, theirs);
+      CHECK(live_find(&ref, title, 30000, line, sizeof(line)));
+      hash_after(line, title, hash);
+      live_send(&ref, "\n"); /* the reference server announces on Enter */
+      live_sleep(2000);
+      live_spawn_argv(&ours, "", use);
+      if (which) {
+        CHECK(live_find(&ours, "Client identity <", 10000, line, sizeof(line)));
+        hash_after(line, "Client identity <", mine);
+      }
+      example_says(&ours, established[which]);
+      live_sleep(1000);
+      if (which) {
+        CHECK(snprintf(wanted, sizeof(wanted), "Remote identified as: <%s>", mine) > 0);
+        example_says(&ref, wanted);
+      }
+      live_send(&ours, "from c\n");
+      example_says(&ref, which ? "Received data from <" : "Received data on the link: from c");
+      example_says(&ours, "Received data on the link: I received \"from c\" over the link");
+      live_send(&ours, "quit\n");
+      example_says(&ref, "Client disconnected");
+      live_end(&ours);
+      live_end(&ref);
+    }
+    { /* reference client, our server */
+      char name[32];
+      char *serve[] = {(char *)program, "--connect", connect, "--identity", ids, "server", NULL};
+      char *theirs[] = {(char *)python, "-u", script, "--config", dir, hash, NULL};
+      chat_start(&ours, "", serve, title);
+      CHECK(live_find(&ours, "Sent announce from <", 10000, line, sizeof(line)));
+      hash_after(line, "Sent announce from <", hash);
+      CHECK(snprintf(name, sizeof(name), "client%u", which) > 0);
+      live_peer_config(dir, sizeof(dir), base, name, port);
+      live_spawn_argv(&ref, reference, theirs);
+      if (which) {
+        CHECK(live_find(&ref, "Client created new identity <", 30000, line, sizeof(line)));
+        hash_after(line, "Client created new identity <", mine);
+        CHECK(snprintf(wanted, sizeof(wanted), "Remote identified as: <%s>", mine) > 0);
+        example_says(&ours, wanted);
+      } else
+        example_says(&ours, "Client connected");
+      live_sleep(1500);
+      live_send(&ref, "from the reference\n");
+      example_says(&ours, which ? "Received data from <" : "Received data on the link: from the reference");
+      example_says(&ref, "Received data on the link: I received \"from the reference\" over the link");
+      live_send(&ref, "quit\n");
+      example_says(&ours, "Client disconnected");
+      live_end(&ref);
+      live_end(&ours);
+    }
+  }
+  stop(daemon, dfd);
+  remove_tree(base);
+  puts("link and identify examples match the reference");
+}
+
 int main(int argc, char **argv) {
   CHECK(argc >= 3 && argc <= 9);
   if (!strcmp(argv[2], "i2p") && argc == 4)
@@ -7071,6 +7251,10 @@ int main(int argc, char **argv) {
     chat_examples(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "chat_examples_ref") && argc == 8)
     chat_examples_reference(argv[1], argv[3], argv[4], argv[5], argv[6], argv[7]);
+  else if (!strcmp(argv[2], "link_examples") && argc == 5)
+    link_examples(argv[1], argv[3], argv[4]);
+  else if (!strcmp(argv[2], "link_examples_ref") && argc == 7)
+    link_examples_reference(argv[1], argv[3], argv[4], argv[5], argv[6]);
   else if (!strcmp(argv[2], "tunnel_peers") && argc == 4)
     tunnel_peers(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "tunnel_peers_ref") && argc == 6)
