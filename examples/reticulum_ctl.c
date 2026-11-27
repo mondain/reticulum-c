@@ -1286,17 +1286,15 @@ static void print_hash(const uint8_t *hash) {
 /* Ask the shared instance for a path the way the reference's clients do: as a local client of its data port,
  * send a path request for the destination. The answer arrives in the instance's path table, which the caller
  * polls. */
-static int send_packet(const target *t, const rnc_packet *packet) {
+static int data_connect(const target *t) {
   struct sockaddr_storage addr;
   socklen_t addr_size = sizeof(struct sockaddr_in);
-  uint8_t raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
-  size_t n, m;
-  int fd, ok;
+  int fd;
   memset(&addr, 0, sizeof(addr));
   if (t->unix_name[0]) {
     size_t len = rnc_host_abstract_address(t->unix_name, "", &addr, sizeof(addr));
     if (!len)
-      return 0;
+      return -1;
     addr_size = (socklen_t)len;
   } else {
     struct sockaddr_in *in = (struct sockaddr_in *)&addr;
@@ -1304,13 +1302,25 @@ static int send_packet(const target *t, const rnc_packet *packet) {
     in->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     in->sin_port = htons((uint16_t)t->data_port);
   }
-  if (rnc_packet_encode(packet, raw, sizeof(raw), &n) != RNC_OK ||
-      rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) != RNC_OK)
-    return 0;
   fd = socket(addr.ss_family, SOCK_STREAM, 0);
+  if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, addr_size)) {
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+static int frame_write(int fd, const rnc_packet *packet) {
+  uint8_t raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+  size_t n, m;
+  return rnc_packet_encode(packet, raw, sizeof(raw), &n) == RNC_OK &&
+         rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK &&
+         write_all(fd, framed, m);
+}
+static int send_packet(const target *t, const rnc_packet *packet) {
+  int fd = data_connect(t), ok;
   if (fd < 0)
     return 0;
-  ok = !connect(fd, (struct sockaddr *)&addr, addr_size) && write_all(fd, framed, m);
+  ok = frame_write(fd, packet);
   /* give the instance time to read the request before the connection goes */
   if (ok) {
     struct timespec pause = {0, 100000000L};
@@ -1319,9 +1329,9 @@ static int send_packet(const target *t, const rnc_packet *packet) {
   close(fd);
   return ok;
 }
-static int send_path_request(const target *t, const uint8_t hash[16]) {
+static int path_request_packet(const uint8_t hash[16], rnc_packet *packet) {
+
   uint8_t tag[16];
-  rnc_packet packet;
   if (RAND_bytes(tag, sizeof(tag)) != 1)
     return 0;
   if (stamp_value > 0) { /* the 1.6 form; the transport id only has to name us as the asker */
@@ -1329,11 +1339,66 @@ static int send_path_request(const target *t, const uint8_t hash[16]) {
     memcpy(material, hash, 16);
     memcpy(material + 16, tag, 16);
     if (RAND_bytes(asker, sizeof(asker)) != 1 || !pr_stamp_default_provider(NULL, material, stamp) ||
-        rnc_path_request_create_stamped(hash, asker, tag, sizeof(tag), stamp, &packet) != RNC_OK)
+        rnc_path_request_create_stamped(hash, asker, tag, sizeof(tag), stamp, packet) != RNC_OK)
       return 0;
-  } else if (rnc_path_request_create(hash, NULL, tag, sizeof(tag), &packet) != RNC_OK)
+  } else if (rnc_path_request_create(hash, NULL, tag, sizeof(tag), packet) != RNC_OK)
     return 0;
-  return send_packet(t, &packet);
+  return 1;
+}
+static int send_path_request(const target *t, const uint8_t hash[16]) {
+  rnc_packet packet;
+  return path_request_packet(hash, &packet) && send_packet(t, &packet);
+}
+/* rnid -R: ask the network, as a local client of the shared instance, for the identity behind `hash`, which is a
+ * destination hash or an identity hash (then its rnid.id destination is asked for too, as the reference does). The
+ * first verified announce that matches either way answers. 1: received, 0: timed out, -1: no instance to ask. */
+static int request_identity(const target *t, const uint8_t hash[16], double timeout, rnc_identity *id) {
+  uint8_t name_hash[10], by_identity[16], in[512], frame[RNC_MAX_FRAME + 1u], command;
+  rnc_identity owner;
+  rnc_host_framer framer = {0};
+  rnc_packet request, packet;
+  rnc_announce announce;
+  struct timespec now, end;
+  size_t k, n;
+  int fd, found = 0;
+  memset(&owner, 0, sizeof(owner));
+  memcpy(owner.hash, hash, 16);
+  if (rnc_destination_hash("rnid.id", &owner, name_hash, by_identity) != RNC_OK || (fd = data_connect(t)) < 0)
+    return -1;
+  if (!path_request_packet(hash, &request) || !frame_write(fd, &request) ||
+      !path_request_packet(by_identity, &request) || !frame_write(fd, &request)) {
+    close(fd);
+    return -1;
+  }
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  end.tv_sec += (time_t)timeout;
+  end.tv_nsec += (long)((timeout - (double)(time_t)timeout) * 1e9);
+  while (!found) {
+    struct pollfd p = {fd, POLLIN, 0};
+    double left;
+    ssize_t got;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    left = (double)(end.tv_sec - now.tv_sec) * 1000.0 + (double)(end.tv_nsec - now.tv_nsec) / 1e6;
+    if (left <= 0)
+      break;
+    if (poll(&p, 1, (int)left + 1) <= 0)
+      continue;
+    got = read(fd, in, sizeof(in));
+    if (got <= 0) { /* the instance went away */
+      close(fd);
+      return -1;
+    }
+    for (k = 0; k < (size_t)got && !found; ++k)
+      if (rnc_host_frame_feed(&framer, RNC_HOST_HDLC, in[k], &command, frame, sizeof(frame), &n) == RNC_OK &&
+          rnc_packet_decode(frame, n, &packet) == RNC_OK && (packet.flags & 3u) == RNC_ANNOUNCE &&
+          rnc_announce_verify(&packet, &announce) == RNC_OK &&
+          (!memcmp(announce.destination, hash, 16) || !memcmp(announce.identity.hash, hash, 16))) {
+        *id = announce.identity;
+        found = 1;
+      }
+  }
+  close(fd);
+  return found;
 }
 /* The path table entry for `hash`, or no pool at all; the reply stays alive until reply_free */
 static const val *find_path(const reply *r, const uint8_t hash[16]) {
@@ -2305,7 +2370,7 @@ static int rsg_message(const uint8_t *rsg, size_t size, const uint8_t **message,
 /* 1 valid, 0 invalid or unreadable. `required` is the identity the signature must verify under (NULL: the
  * public key the envelope carries); *signer receives the identity that was used. */
 static int rsg_validate(const uint8_t *rsg, size_t size, const uint8_t hash[32], const rnc_identity *required,
-                        rnc_identity *signer) {
+                        const uint8_t *signer_hash, rnc_identity *signer) {
   static val pool[RSG_POOL];
   val root;
   reader rd;
@@ -2330,7 +2395,8 @@ static int rsg_validate(const uint8_t *rsg, size_t size, const uint8_t hash[32],
     return 0;
   if (required)
     *signer = *required;
-  else if (rnc_identity_from_public(signer, pubkey->p) != RNC_OK)
+  else if (rnc_identity_from_public(signer, pubkey->p) != RNC_OK ||
+           (signer_hash && memcmp(signer->hash, signer_hash, 16)))
     return 0;
   if (memcmp(sig_hash->p, hash, 32))
     return 0;
@@ -2595,7 +2661,7 @@ static int ends_with_nocase(const char *s, const char *suffix) {
   return n >= m && !strcasecmp(s + n - m, suffix);
 }
 /* rnid -V on a .rsm: a signed message that carries its own text. `id` as for validate_file. */
-static int validate_message(const rnc_identity *id, const char *path, int show_meta) {
+static int validate_message(const rnc_identity *id, const uint8_t *signer_hash, const char *path, int show_meta) {
   uint8_t *rsg, hash[32];
   const uint8_t *message;
   size_t size, message_size;
@@ -2610,10 +2676,10 @@ static int validate_message(const rnc_identity *id, const char *path, int show_m
     free(rsg);
     return RC_INVALID_SIGNATURE;
   }
-  if (rnc_hash(message, message_size, hash) != RNC_OK || !rsg_validate(rsg, size, hash, id, &signer)) {
+  if (rnc_hash(message, message_size, hash) != RNC_OK || !rsg_validate(rsg, size, hash, id, signer_hash, &signer)) {
     printf("Invalid signature in %s\n", path);
-    if (id) {
-      hex_encode(id->hash, 16, label);
+    if (id || signer_hash) {
+      hex_encode(id ? id->hash : signer_hash, 16, label);
       printf("The message was NOT signed by <%s>\n", label);
     }
     free(rsg);
@@ -2632,8 +2698,8 @@ static int validate_message(const rnc_identity *id, const char *path, int show_m
 }
 /* rnid -V: a signature file next to the file it covers. `id` is the identity the signature must verify under
  * (NULL: whoever the envelope names). `--raw` signatures are the bare 64 bytes and need `id`. */
-static int validate_file(const rnc_identity *id, const char *validate, const char *read_path, int raw,
-                         int show_meta) {
+static int validate_file(const rnc_identity *id, const uint8_t *signer_hash, const char *validate,
+                         const char *read_path, int raw, int show_meta) {
   char data_path[1024];
   uint8_t *data, *sig, file_hash[32];
   size_t size, sig_size;
@@ -2641,7 +2707,7 @@ static int validate_file(const rnc_identity *id, const char *validate, const cha
   char label[33];
   int rc = RC_OK, valid;
   if (ends_with_nocase(validate, ".rsm"))
-    return validate_message(id, validate, show_meta);
+    return validate_message(id, signer_hash, validate, show_meta);
   if (read_path)
     snprintf(data_path, sizeof(data_path), "%s", read_path);
   else if (ends_with(validate, ".rsg") && strlen(validate) - 4 < sizeof(data_path)) {
@@ -2674,14 +2740,14 @@ static int validate_file(const rnc_identity *id, const char *validate, const cha
       rc = RC_INVALID_SIGNATURE;
     }
   } else {
-    valid = rnc_hash(data, size, file_hash) == RNC_OK && rsg_validate(sig, sig_size, file_hash, id, &signer);
+    valid = rnc_hash(data, size, file_hash) == RNC_OK && rsg_validate(sig, sig_size, file_hash, id, signer_hash, &signer);
     if (valid) {
       hex_encode(signer.hash, 16, label);
       printf("Signature is valid, the file %s was signed by <%s>\n", data_path, label);
     } else {
       printf("Invalid signature %s for file %s\n", validate, data_path);
-      if (id) {
-        hex_encode(id->hash, 16, label);
+      if (id || signer_hash) {
+        hex_encode(id ? id->hash : signer_hash, 16, label);
         printf("This file was NOT signed by <%s>\n", label);
       }
       rc = RC_INVALID_SIGNATURE;
@@ -2887,6 +2953,9 @@ static int cmd_id(int argc, char **argv) {
   const char *import_pub = NULL, *import_prv = NULL, *how = NULL, *sign_message = NULL, *meta_path = NULL,
              *meta_spec = NULL, *announce = NULL, *config_arg = NULL;
   unsigned long data_port_arg = 0;
+  int request = 0, no_cache = 0, fetched = 0;
+  double request_timeout = 15; /* Transport.PATH_REQUEST_TIMEOUT */
+  uint8_t wanted[16];
   int format = FORMAT_HEX, formats = 0, has_sign_message = 0, show_meta = 0;
   for (i = 0; i < argc; ++i) {
     const char *a = argv[i];
@@ -2952,6 +3021,17 @@ static int cmd_id(int argc, char **argv) {
     } else if (!strcmp(a, "--data-port")) {
       if (++i >= argc || !number(argv[i], 65535, &data_port_arg) || !data_port_arg)
         return RC_INVALID_ARGS;
+    } else if (!strcmp(a, "-R") || !strcmp(a, "--request"))
+      request = 1;
+    else if (!strcmp(a, "-N") || !strcmp(a, "--no-cache"))
+      no_cache = 1;
+    else if (!strcmp(a, "-t")) {
+      char *end;
+      if (++i >= argc)
+        return RC_INVALID_ARGS;
+      request_timeout = strtod(argv[i], &end);
+      if (*end || !(request_timeout > 0) || request_timeout > 3600)
+        return RC_INVALID_ARGS;
     } else if (!strcmp(a, "--meta"))
       show_meta = 1;
     else if (!strcmp(a, "--raw"))
@@ -2984,7 +3064,7 @@ static int cmd_id(int argc, char **argv) {
     return rc;
   }
   if (validate && !raw && !identity_path && !import_pub && !import_prv && !print && !sign && !encrypt && !decrypt)
-    return validate_file(NULL, validate, read_path, 0, show_meta); /* the envelope names its signer */
+    return validate_file(NULL, NULL, validate, read_path, 0, show_meta); /* the envelope names its signer */
   if (import_pub || import_prv) {
     const char *text = import_prv ? import_prv : import_pub;
     if (!import_identity(text, import_prv != NULL, &id, &how)) {
@@ -2998,6 +3078,55 @@ static int cmd_id(int argc, char **argv) {
       printf("Reticulum Identity imported from %s input\n", how);
     hex_encode(id.hash, 16, hex);
     printf("Loaded Identity <%s>\n", hex);
+  } else if (identity_path && access(identity_path, F_OK) && strlen(identity_path) == 32 &&
+             hex_decode(identity_path, wanted, 16)) {
+    /* a destination or identity hash. Operations on a key need the identity; -V and -H work with the hash alone. */
+    const int required = print || export_pub || export_prv || announce || sign || has_sign_message || encrypt || decrypt;
+    if (no_cache) {
+      if (required) {
+        puts("Could not resolve identity");
+        return RC_NO_IDENTITY;
+      }
+    } else if (request) {
+      target t;
+      int got;
+      data_target(config_arg, data_port_arg, &t);
+      printf("Requesting unknown Identity for <%s>\n", identity_path);
+      fflush(stdout);
+      got = request_identity(&t, wanted, request_timeout, &id);
+      if (got < 0) {
+        puts("Could not request the identity: could not reach the shared instance");
+        return RC_UNKNOWN_ERROR;
+      }
+      if (got) {
+        fetched = 1;
+        hex_encode(id.hash, 16, hex);
+        printf("Received Identity <%s> for destination <%s> from the network\n", hex, identity_path);
+      } else {
+        puts("Identity request timed out");
+        if (required)
+          return RC_NO_IDENTITY;
+      }
+    } else if (required) { /* nothing keeps a list of known identities here, so there is nothing to recall */
+      printf("Could not recall Identity for <%s>.\n", identity_path);
+      puts("You can query the network for unknown Identities with the -R option.");
+      return RC_NO_IDENTITY;
+    }
+    if (!fetched) {
+      if (aspects) {
+        uint8_t name_hash[10], dest[16];
+        rnc_identity owner;
+        memset(&owner, 0, sizeof(owner));
+        memcpy(owner.hash, wanted, 16);
+        if (rnc_destination_hash(aspects, &owner, name_hash, dest) != RNC_OK) {
+          fprintf(stderr, "Invalid aspects \"%s\"\n", aspects);
+          return RC_INVALID_ASPECTS;
+        }
+        hex_encode(dest, 16, hex);
+        printf("The %s destination for this Identity is <%s>\n", aspects, hex);
+      }
+      return validate ? validate_file(NULL, wanted, validate, read_path, raw, show_meta) : RC_OK;
+    }
   } else {
     if (!identity_path) {
       fprintf(stderr, "No identity specified, use -i\n");
@@ -3107,7 +3236,7 @@ static int cmd_id(int argc, char **argv) {
   if (rc == RC_OK && has_sign_message)
     rc = sign_message_file(&id, sign_message, read_path, write_path, force, formats ? format : -1, meta_path, meta_spec);
   if (rc == RC_OK && validate)
-    rc = validate_file(&id, validate, read_path, raw, show_meta);
+    rc = validate_file(&id, NULL, validate, read_path, raw, show_meta);
   if (rc == RC_OK && encrypt) {
     if (write_path)
       snprintf(out_path, sizeof(out_path), "%s", write_path);
@@ -3144,7 +3273,8 @@ static void usage(void) {
   fputs("usage: reticulum-c-ctl status [-j] [-t] [-F] [-l] [-T] [-A] [-P] [-B] [-b] [-p] [--port N] (--identity FILE | --rpc-key HEX | --config FILE)\n"
         "       reticulum-c-ctl path [-t] [-m HOPS] [-j] [HASH] [-b] [-B HASH [--duration HOURS] [--reason TEXT]] [-U HASH] [--stamp-value N] [connection options]\n"
         "       reticulum-c-ctl id (-g FILE | -i FILE [-p] [-P] [-x] [-X] [-H ASPECTS]\n"
-        "                          [-s FILE --raw] [-V SIG -r FILE --raw] [-e FILE] [-d FILE] [-w OUT] [-f])\n",
+        "                          [-s FILE --raw] [-V SIG -r FILE --raw] [-e FILE] [-d FILE] [-w OUT] [-f])\n"
+        "       reticulum-c-ctl id -i HASH [-R [-t SECONDS]] [-N] ...   (a destination or identity hash in place of FILE)\n",
         stderr);
 }
 int main(int argc, char **argv) {

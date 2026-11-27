@@ -630,6 +630,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                 $<TARGET_FILE:reticulum-c-node> tool_stamps $<TARGET_FILE:reticulum-c-cp>
                 $<TARGET_FILE:reticulum-c-x> $<TARGET_FILE:reticulum-c-sh> $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_tool_stamps PROPERTIES LABELS network TIMEOUT 120)
+            add_test(NAME reticulum_node_process_rnid_request COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> rnid_request $<TARGET_FILE:reticulum-c-ctl>)
+            set_tests_properties(reticulum_node_process_rnid_request PROPERTIES LABELS network TIMEOUT 60)
             add_test(NAME reticulum_node_process_cli_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cli_tools $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
@@ -731,6 +734,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> rnid_announce_ref
                     $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_rnid_announce_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                add_test(NAME reticulum_node_process_rnid_request_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> rnid_request_ref
+                    $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_rnid_request_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 add_test(NAME reticulum_node_process_cp_big_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
