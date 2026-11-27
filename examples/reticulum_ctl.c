@@ -521,7 +521,9 @@ static int get_request(const target *t, const char *method, const uint8_t *dest,
                        long max_hops, reply *out) {
   uint8_t buf[256];
   rnc_rpc_writer w;
-  size_t n, pairs = 1 + (dest ? 1 : 0) + (max_hops > 0 ? 1 : 0);
+  /* the reference's rnsd requires "max_hops" in a path table request, empty or not */
+  const int hops = max_hops > 0 || !strcmp(method, "path_table");
+  size_t n, pairs = 1 + (dest ? 1 : 0) + (hops ? 1 : 0);
   if (remote.hash)
     return remote_get(method, dest, max_hops, out);
   rnc_rpc_writer_init(&w, buf, sizeof(buf));
@@ -532,9 +534,12 @@ static int get_request(const target *t, const char *method, const uint8_t *dest,
     (void)rnc_rpc_write_string(&w, "destination_hash");
     (void)rnc_rpc_write_bin(&w, dest, 16);
   }
-  if (max_hops > 0) {
+  if (hops) {
     (void)rnc_rpc_write_string(&w, "max_hops");
-    (void)rnc_rpc_write_uint(&w, (uint64_t)max_hops);
+    if (max_hops > 0)
+      (void)rnc_rpc_write_uint(&w, (uint64_t)max_hops);
+    else
+      (void)rnc_rpc_write_nil(&w);
   }
   if (rnc_rpc_writer_finish(&w, &n) != RNC_OK)
     return 0;
@@ -1379,14 +1384,17 @@ static int frame_write(int fd, const rnc_packet *packet) {
          rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK &&
          write_all(fd, framed, m);
 }
-static int send_packet(const target *t, const rnc_packet *packet) {
+/* The reference passes a local program's announce on about a second after receiving it, and drops it if the
+ * program has gone by then. */
+#define ANNOUNCE_STAY_MS 3000u
+static int send_packet(const target *t, const rnc_packet *packet, unsigned stay_ms) {
   int fd = data_connect(t), ok;
   if (fd < 0)
     return 0;
   ok = frame_write(fd, packet);
-  /* give the instance time to read the request before the connection goes */
+  /* give the instance time to deal with it before the connection goes */
   if (ok) {
-    struct timespec pause = {0, 100000000L};
+    struct timespec pause = {(time_t)(stay_ms / 1000u), (long)(stay_ms % 1000u) * 1000000L};
     nanosleep(&pause, NULL);
   }
   close(fd);
@@ -1410,7 +1418,7 @@ static int path_request_packet(const uint8_t hash[16], rnc_packet *packet) {
 }
 static int send_path_request(const target *t, const uint8_t hash[16]) {
   rnc_packet packet;
-  return path_request_packet(hash, &packet) && send_packet(t, &packet);
+  return path_request_packet(hash, &packet) && send_packet(t, &packet, 100);
 }
 /* rnid -R: ask the network, as a local client of the shared instance, for the identity behind `hash`, which is a
  * destination hash or an identity hash (then its rnid.id destination is asked for too, as the reference does). The
@@ -3266,7 +3274,7 @@ static int cmd_id(int argc, char **argv) {
       printf("Announcing %s destination <%s> for identity <%s>\n", announce, dest_hex, hex);
       data_target(config_arg, data_port_arg, &t);
       if (rnc_announce_create(&id, announce, NULL, 0, (uint64_t)time(NULL), random_bytes, NULL, &packet) != RNC_OK ||
-          !send_packet(&t, &packet)) {
+          !send_packet(&t, &packet, ANNOUNCE_STAY_MS)) {
         puts("An error ocurred while attempting to send the announce: could not reach the shared instance");
         rc = RC_UNKNOWN_ERROR;
       }
