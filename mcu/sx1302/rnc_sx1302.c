@@ -132,8 +132,9 @@ static int check(rnc_modem *m, const rnc_lora_params *p) {
     return -4;
   if (p->txp_dbm < TXP_MIN_EXTRAPOLATED || p->txp_dbm > TXP_MAX)
     return -5;
-  if (p->freq_hz < 150000000u || p->freq_hz > 1020000000u)
-    return -6; /* the SX1250 range; the regional plan is the operator's responsibility */
+  if (p->freq_hz < 150000000u || p->freq_hz > 1000000000u)
+    return -6; /* from the SX1250's lower limit to libloragw's upper one; the regional plan is the operator's
+                * responsibility */
   return 0;
 }
 
@@ -143,6 +144,9 @@ static struct lgw_tx_gain_s gain_for(int8_t dbm, int *calibrated) {
   size_t i;
   memset(&g, 0, sizeof(g));
   g.rf_power = dbm;
+  /* unused by the SX1250, but lgw_txgain_setconf refuses a value outside 5..15 whatever the radio type; Semtech's
+   * packet forwarder sets 5 for the SX1250 too */
+  g.mix_gain = 5;
   for (i = 0; i < GAIN_N; i++)
     if (GAIN[i].dbm == dbm) {
       g.pa_gain = GAIN[i].pa;

@@ -1,11 +1,14 @@
 # SX1302 concentrator as an RNode (WM1302 Pi HAT)
 
-STATUS: untested on hardware. Built and checked only against a libloragw test double
-(`tests/`) and end to end with `reticulum-c-node` driving it over a pty through that
-double. No frame has gone over the air yet.
+STATUS: untested on hardware; no frame has gone over the air and the concentrator has never
+been started. Checked with sx1302_hal 2.1.0 built on x86-64: the program compiles against it
+and every configuration call is accepted, up to opening the SPI device (`ctest -L sx1302`).
+The modem logic is tested against a libloragw test double (`tests/`), and `reticulum-c-node`
+has driven the program over a pty with a stand-in radio. CI builds none of this, as it needs
+the library: run those tests after a change here.
 
 `reticulum-c-rnode-sx1302` makes an SX1302/SX1250 concentrator (Seeed WM1302 SPI module on
-the WM1302 Pi HAT, tested target: Raspberry Pi 3 Model B) act as an RNode on a pseudo
+the WM1302 Pi HAT, intended target: Raspberry Pi 3 Model B) act as an RNode on a pseudo
 terminal. Any RNode host drives it: `reticulum-c-node` with `type = RNodeInterface`, or the
 reference `rnsd`. It reuses the portable radio core unchanged (`mcu/radio`: air framing and
 split packets, CSMA, airtime budget, the RNode device protocol). Only the chip driver is new:
