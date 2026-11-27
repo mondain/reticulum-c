@@ -1213,6 +1213,24 @@ rnc_result rnc_node_interface_filtered_requests(const rnc_node *n, uint32_t inte
   *requests = in->filtered_requests;
   return RNC_OK;
 }
+rnc_result rnc_node_interface_ingress(const rnc_node *n, uint32_t interface_id, rnc_node_ingress_state *state) {
+  const node_interface *in;
+  size_t i;
+  if (!n || !state)
+    return RNC_INVALID;
+  in = interface((rnc_node *)n, interface_id);
+  if (!in)
+    return RNC_STATE;
+  memset(state, 0, sizeof(*state));
+  for (i = 0; i < RNC_NODE_HELD; i++)
+    if (n->held[i].used && n->held[i].iface == interface_id)
+      state->held_announces++;
+  state->burst_active = in->ic_active;
+  state->burst_since_ms = in->ic_active ? in->ic_activated : 0;
+  state->pr_burst_active = in->pr_active;
+  state->pr_burst_since_ms = in->pr_active ? in->pr_activated : 0;
+  return RNC_OK;
+}
 rnc_result rnc_node_interface_filtered(const rnc_node *n, uint32_t interface_id, uint64_t *announces) {
   const node_interface *in;
   if (!n || !announces)

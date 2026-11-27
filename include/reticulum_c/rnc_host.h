@@ -215,6 +215,9 @@ typedef struct rnc_host_status {
   uint32_t announce_cap_permille;
   int gravity, announces_to_internal; /* the interface's policy, as the management RPC reports it */
   size_t blocked_ips; /* TCP_LISTEN: IPs currently refused for flapping */
+  size_t queued_announces; /* announces waiting for the interface's announce bandwidth cap */
+  /* the configured per destination announce rate limit (seconds, violations); target 0: none */
+  uint32_t announce_rate_target, announce_rate_grace, announce_rate_penalty;
   char i2p_b32[56];   /* I2P: this node's b32 address, without ".b32.i2p" */
 } rnc_host_status;
 typedef struct rnc_host rnc_host;
@@ -275,7 +278,10 @@ rnc_result rnc_host_get_status(const rnc_host *host, uint32_t interface_id,
  * out (the reference's totals). Link traffic is what travels on links: received from a peer, and forwarded on. */
 typedef struct rnc_host_totals {
   uint64_t rx_bytes, tx_bytes, filtered_bytes, link_rx_bytes, link_tx_bytes;
+  uint64_t rx_packets, tx_packets; /* received and not discarded, and sent */
 } rnc_host_totals;
+/* The index-th address a listening interface is refusing for flapping; RNC_AGAIN past the last one. */
+rnc_result rnc_host_blocked_ip(const rnc_host *host, uint32_t interface_id, size_t index, char *out, size_t size);
 rnc_result rnc_host_get_totals(const rnc_host *host, rnc_host_totals *totals);
 rnc_result rnc_host_status_at(const rnc_host *host, size_t index,
                               rnc_host_status *status);

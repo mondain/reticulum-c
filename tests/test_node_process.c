@@ -1685,6 +1685,7 @@ typedef struct live_proc {
   char buf[16384];
   size_t used;
 } live_proc;
+static int ctl_run(const char *ctl, char *out, size_t size, ...);
 static void live_spawn_argv(live_proc *p, const char *pythonpath, char *const argv[]) {
   int to[2], from[2];
   CHECK(!pipe(to) && !pipe(from));
@@ -7524,6 +7525,133 @@ static void stream_examples_reference(const char *exe, const char *channel, cons
   puts("channel and buffer examples match the reference");
 }
 
+/* ---- rnstatus -A, -P, -B, -b, -p ------------------------------------------------------------------------ */
+static void frame_write(int fd, const rnc_packet *p) {
+  uint8_t raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+  size_t n, m;
+  CHECK(rnc_packet_encode(p, raw, sizeof(raw), &n) == RNC_OK &&
+        rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK);
+  CHECK(write(fd, framed, m) == (ssize_t)m);
+}
+static rnc_result flood_random(void *context, uint8_t *out, size_t size) {
+  static FILE *f;
+  (void)context;
+  if (!f)
+    f = fopen("/dev/urandom", "rb");
+  return f && fread(out, 1, size, f) == size ? RNC_OK : RNC_CRYPTO;
+}
+/* new announces from many identities, then many path requests: both exceed the young interface limits */
+static void flood(int fd, unsigned count) {
+  unsigned i;
+  for (i = 0; i < count; ++i) {
+    rnc_identity id;
+    rnc_packet a, request;
+    uint8_t wanted[16], tag[16];
+    CHECK(rnc_identity_generate(&id, flood_random, NULL) == RNC_OK);
+    CHECK(rnc_announce_create(&id, "flood.test", NULL, 0, (uint64_t)time(NULL), flood_random, NULL, &a) == RNC_OK);
+    frame_write(fd, &a);
+    CHECK(flood_random(NULL, wanted, 16) == RNC_OK && flood_random(NULL, tag, 16) == RNC_OK);
+    CHECK(rnc_path_request_create(wanted, NULL, tag, 16, &request) == RNC_OK);
+    frame_write(fd, &request);
+    CHECK(poll(NULL, 0, 5) == 0);
+  }
+}
+static void run_status(const char *ctl, const char *control, const char *key, char *out, size_t size, const char *a,
+                       const char *b, const char *c) {
+  int rc = ctl_run(ctl, out, size, "status", a, "--port", control, "--identity", key, b, c, NULL);
+  if (rc)
+    fprintf(stderr, "status %s exited %d: %s\n", a, rc, out);
+  CHECK(rc == 0);
+}
+static void status_options(const char *exe, const char *ctl, const char *reference, const char *python) {
+  char dir[] = "/tmp/rnc-opts-XXXXXX", rdir[300], storage[300], cfg[320], key[340], admin[300], text[1024],
+       control_arg[16], id[33], out[32768];
+  unsigned port = unused_port(), quiet = unused_port(), data = unused_port(), control = unused_port(), i;
+  pid_t daemon;
+  int dfd, flooder;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/rns", dir) > 0 && !mkdir(rdir, 0700));
+  CHECK(snprintf(storage, sizeof(storage), "%s/storage", rdir) > 0 && !mkdir(storage, 0700));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", rdir) > 0 && snprintf(key, sizeof(key), "%s/transport_identity", storage) > 0 &&
+        snprintf(admin, sizeof(admin), "%s/admin", dir) > 0 && snprintf(control_arg, sizeof(control_arg), "%u", control) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\n[interfaces]\n"
+                 "[[Busy]]\ntype = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n"
+                 "announce_rate_target = 3600\nannounce_rate_grace = 2\nannounce_rate_penalty = 60\n"
+                 "block_fast_flapping = Yes\nfast_flapping_grace = 2\nfast_flapping_threshold = 60\n"
+                 "[[Quiet]]\ntype = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+                 data, control, port, quiet) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, id);
+  flooder = tcp_connect(port);
+  CHECK(flooder >= 0);
+  flood(flooder, 40);
+  CHECK(poll(NULL, 0, 300) == 0);
+  /* -A: held announces, the rate limit, the burst; nothing of it without the option */
+  run_status(ctl, control_arg, key, out, sizeof(out), "-A", NULL, NULL);
+  if (!strstr(out, "Held      : ") || !strstr(out, "Ann. limit: ") || !strstr(out, "Ann. rate : ") || !strstr(out, "burst for ")) {
+    fprintf(stderr, "status -A:\n%s\n", out);
+    CHECK(0);
+  }
+  run_status(ctl, control_arg, key, out, sizeof(out), "-j", NULL, NULL);
+  CHECK(strstr(out, "\"burst_active\": true") && strstr(out, "\"pr_burst_active\": true") &&
+        strstr(out, "\"announce_rate_target\": 3600"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "--port", control_arg, "--identity", key, NULL) == 0);
+  CHECK(!strstr(out, "Held      : ") && !strstr(out, "Ann. rate : ") && !strstr(out, "PR rate   : ") &&
+        !strstr(out, "burst for "));
+  /* -P */
+  run_status(ctl, control_arg, key, out, sizeof(out), "-P", NULL, NULL);
+  CHECK(strstr(out, "Path Rqs. : ") && strstr(out, "PR rate   : ") && strstr(out, "burst for "));
+  /* -B: only the interfaces in a burst */
+  run_status(ctl, control_arg, key, out, sizeof(out), "-B", NULL, NULL);
+  CHECK(strstr(out, "Client on Busy") && !strstr(out, " Quiet\n"));
+  /* totals: -A and -P add their lines, -p the packet rates */
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-t", "-A", "-P", "-p", "--port", control_arg, "--identity", key, NULL) == 0);
+  CHECK(strstr(out, "\n Announces : ") && strstr(out, "\n Path Rqs. : ") && strstr(out, "pps"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-t", "--port", control_arg, "--identity", key, NULL) == 0);
+  CHECK(!strstr(out, "\n Announces : ") && !strstr(out, "\n Path Rqs. : ") && !strstr(out, "pps"));
+  /* connections that come and go get the address blocked; -b names it */
+  for (i = 0; i < 6; ++i) {
+    int fd = tcp_connect(port);
+    CHECK(fd >= 0 && poll(NULL, 0, 100) == 0);
+    close(fd);
+    CHECK(poll(NULL, 0, 100) == 0);
+  }
+  run_status(ctl, control_arg, key, out, sizeof(out), "-a", NULL, NULL);
+  CHECK(strstr(out, "Blocked   : 1 IP") && !strstr(out, "              127.0.0.1"));
+  run_status(ctl, control_arg, key, out, sizeof(out), "-b", NULL, NULL);
+  CHECK(strstr(out, "Blocked   : 1 IP") && strstr(out, "              127.0.0.1\n"));
+  /* what this daemon has no counterpart for is said, not shown as zeros */
+  run_status(ctl, control_arg, key, out, sizeof(out), "-q", NULL, NULL);
+  CHECK(strstr(out, "Queue pressure is not available"));
+  run_status(ctl, control_arg, key, out, sizeof(out), "-z", NULL, NULL);
+  CHECK(strstr(out, "Profiling is not available"));
+  if (reference) {
+    char *args[] = {(char *)python, "-m", "RNS.Utilities.rnstatus", "--config", rdir, "-a", "-A", "-P", "-b", "-t", "-p", NULL};
+    live_proc ref;
+    char line[2048], all[32768] = "";
+    flood(flooder, 10);
+    live_spawn_argv(&ref, reference, args);
+    while (live_expect(&ref, "", 15000, line, sizeof(line)) && strlen(all) + strlen(line) + 2 < sizeof(all)) {
+      strcat(all, line);
+      strcat(all, "\n");
+    }
+    signal(SIGPIPE, SIG_IGN); /* rnstatus has already exited when the helper writes its "quit" */
+    live_end(&ref);
+    if (!strstr(all, "Held      : ") || !strstr(all, "burst") || !strstr(all, "127.0.0.1") || !strstr(all, "pps") ||
+        !strstr(all, "Announces    :") || !strstr(all, "Path Rqs.    :")) {
+      fprintf(stderr, "RNS rnstatus -a -A -P -b -t -p:\n%s\n", all);
+      CHECK(0);
+    }
+  }
+  close(flooder);
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts(reference ? "unmodified RNS rnstatus shows the daemon's ingress state" : "status options passed");
+}
+
 int main(int argc, char **argv) {
   CHECK(argc >= 3 && argc <= 9);
   if (!strcmp(argv[2], "i2p") && argc == 4)
@@ -7573,6 +7701,10 @@ int main(int argc, char **argv) {
     stream_examples(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "stream_examples_ref") && argc == 7)
     stream_examples_reference(argv[1], argv[3], argv[4], argv[5], argv[6]);
+  else if (!strcmp(argv[2], "status_options") && argc == 4)
+    status_options(argv[1], argv[3], NULL, NULL);
+  else if (!strcmp(argv[2], "status_options_ref") && argc == 6)
+    status_options(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "tunnel_peers") && argc == 4)
     tunnel_peers(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "tunnel_peers_ref") && argc == 6)

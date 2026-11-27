@@ -844,9 +844,75 @@ static void print_traffic(const char *label, const val *map, const char *tx, con
     printf("%*s%s sent, %s received\n", (int)strlen(label), "", c, d);
   }
 }
-/* The totals of `rnstatus -t`, with the filtered and link figures of -F and -l. */
-static void print_totals(const val *root, int filtered, int links) {
+/* Which of the optional parts of the status were asked for. */
+typedef struct status_parts {
+  int announces, requests, bursts_only, blocked, packets, queues, profiling;
+} status_parts;
+/* ", burst for N s" when the interface is in one */
+static void print_burst(const val *f, const char *active, const char *since) {
+  const val *a = map_get(f, active);
+  double started = as_double(map_get(f, since)), age;
+  if (!a || !as_uint(a))
+    return;
+  age = started > 0 ? (double)time(NULL) - started : 0;
+  printf(", burst for %.0f s", age > 0 ? age : 0);
+}
+/* The lines rnstatus -A and -P add to an interface, and the addresses it refuses. */
+static void print_ingress(const val *f, const status_parts *parts) {
+  const val *v = map_get(f, "blocked_ips");
+  uint64_t n;
+  size_t k;
+  if (v && as_uint(v)) {
+    printf("    Blocked   : %llu IP%s\n", (unsigned long long)as_uint(v), as_uint(v) == 1 ? "" : "s");
+    v = map_get(f, "blocked_ip_list");
+    for (k = 0; parts->blocked && v && v->type == V_ARR && k < v->n; ++k) {
+      fputs("              ", stdout);
+      print_str(&v->kids[k], "?");
+      putchar('\n');
+    }
+  }
+  if (parts->announces) {
+    n = as_uint(map_get(f, "announce_queue"));
+    if (n)
+      printf("    Queued    : %llu announce%s\n", (unsigned long long)n, n == 1 ? "" : "s");
+    n = as_uint(map_get(f, "held_announces"));
+    if (n)
+      printf("    Held      : %llu announce%s\n", (unsigned long long)n, n == 1 ? "" : "s");
+    n = as_uint(map_get(f, "announce_rate_target"));
+    if (n)
+      printf("    Ann. limit: one per %llu s and destination, grace %llu, penalty %llu s\n", (unsigned long long)n,
+             (unsigned long long)as_uint(map_get(f, "announce_rate_grace")),
+             (unsigned long long)as_uint(map_get(f, "announce_rate_penalty")));
+    printf("    Ann. rate : %.2f/s received, %.2f/s sent", as_double(map_get(f, "incoming_announce_frequency")),
+           as_double(map_get(f, "outgoing_announce_frequency")));
+    print_burst(f, "burst_active", "burst_activated");
+    putchar('\n');
+  }
+  if (parts->requests) {
+    printf("    Path Rqs. : %llu sent, %llu received\n", (unsigned long long)as_uint(map_get(f, "ptxc")),
+           (unsigned long long)as_uint(map_get(f, "prxc")));
+    printf("    PR rate   : %.2f/s received, %.2f/s sent", as_double(map_get(f, "incoming_pr_frequency")),
+           as_double(map_get(f, "outgoing_pr_frequency")));
+    print_burst(f, "pr_burst_active", "pr_burst_activated");
+    putchar('\n');
+  }
+}
+/* The totals of `rnstatus -t`, with the figures of -F, -l, -A, -P and -p. */
+static void print_totals(const val *root, int filtered, int links, const status_parts *parts) {
   print_traffic(" Totals    : ", root, "txb", "rxb", "txs", "rxs");
+  if (parts->packets)
+    printf(" Packets   : %llu pps sent, %llu pps received\n", (unsigned long long)as_uint(map_get(root, "txpps")),
+           (unsigned long long)as_uint(map_get(root, "rxpps")));
+  if (parts->announces) {
+    print_traffic(" Announces : ", root, "atxb", "arxb", "atxs", "arxs");
+    printf("             %.2f/s sent, %.2f/s received\n", as_double(map_get(root, "atxf")),
+           as_double(map_get(root, "arxf")));
+  }
+  if (parts->requests) {
+    print_traffic(" Path Rqs. : ", root, "ptxb", "prxb", "ptxs", "prxs");
+    printf("             %.2f/s sent, %.2f/s received\n", as_double(map_get(root, "ptxf")),
+           as_double(map_get(root, "prxf")));
+  }
   if (filtered)
     print_traffic(" Filtered  : ", root, "ftxb", "frxb", "ftxs", "frxs");
   if (links && map_get(root, "lrxb")) {
@@ -908,6 +974,7 @@ static int cmd_status(int argc, char **argv) {
   conn c = {0};
   int i, json = 0, reverse = 0, link_stats = 0, monitor = 0, discovered = 0, details = 0, show_stale = 0, show_unknown = 0,
       tunnels = 0, filter_stats = 0, totals = 0;
+  status_parts parts = {0};
   double interval = 1.0;
   const char *discovery_dir = NULL;
   const char *sort = NULL, *filter = NULL;
@@ -931,6 +998,22 @@ static int cmd_status(int argc, char **argv) {
       link_stats = 1;
     else if (!strcmp(argv[i], "-F") || !strcmp(argv[i], "--filter-stats"))
       filter_stats = 1;
+    else if (!strcmp(argv[i], "-A") || !strcmp(argv[i], "--announce-stats"))
+      parts.announces = 1;
+    else if (!strcmp(argv[i], "-P") || !strcmp(argv[i], "--pr-stats"))
+      parts.requests = 1;
+    else if (!strcmp(argv[i], "-B") || !strcmp(argv[i], "--burst"))
+      parts.bursts_only = 1;
+    else if (!strcmp(argv[i], "-b") || !strcmp(argv[i], "--blocked-ips"))
+      parts.blocked = 1;
+    else if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--pps"))
+      parts.packets = 1;
+    else if (!strcmp(argv[i], "-q") || !strcmp(argv[i], "--queues"))
+      parts.queues = 1;
+    else if (!strcmp(argv[i], "-z") || !strcmp(argv[i], "--profiling"))
+      parts.profiling = 1;
+    else if (!strcmp(argv[i], "-a") || !strcmp(argv[i], "--all"))
+      ; /* every interface is listed anyway */
     else if (!strcmp(argv[i], "-t") || !strcmp(argv[i], "--totals"))
       totals = 1;
     else if (!strcmp(argv[i], "-T") || !strcmp(argv[i], "--tunnels"))
@@ -1014,7 +1097,10 @@ static int cmd_status(int argc, char **argv) {
   }
   ifaces = map_get(&r.root, "interfaces");
   for (k = 0; ifaces && ifaces->type == V_ARR && k < ifaces->n && shown < 256; ++k)
-    if (name_matches(&ifaces->kids[k], filter))
+    if (parts.bursts_only
+            ? (as_uint(map_get(&ifaces->kids[k], "burst_active")) || as_uint(map_get(&ifaces->kids[k], "pr_burst_active")) ||
+               (filter && name_matches(&ifaces->kids[k], filter)))
+            : name_matches(&ifaces->kids[k], filter))
       order[shown++] = k;
   if (sort) /* a stable insertion sort, largest first as the reference sorts, smallest first with -r */
     for (k = 1; k < shown; ++k) {
@@ -1059,6 +1145,7 @@ static int cmd_status(int argc, char **argv) {
     pretty_size((double)as_uint(map_get(f, "txb")), a, sizeof(a));
     pretty_size((double)as_uint(map_get(f, "rxb")), b, sizeof(b));
     printf("    Traffic   : %s sent, %s received\n", a, b);
+    print_ingress(f, &parts);
     if (filter_stats && map_get(f, "frxb"))
       print_traffic("    Filtered  : ", f, "ftxb", "frxb", "ftxs", "frxs");
     v = map_get(f, "txstalled");
@@ -1076,9 +1163,13 @@ static int cmd_status(int argc, char **argv) {
     putchar('\n');
   }
   if (totals) {
-    print_totals(&r.root, filter_stats, link_stats);
+    print_totals(&r.root, filter_stats, link_stats, &parts);
     putchar('\n');
   }
+  if (parts.queues)
+    puts(" Queue pressure is not available: this daemon has no separate inbound queues");
+  if (parts.profiling)
+    puts(" Profiling is not available: this daemon has no profiler");
   v = map_get(&r.root, "transport_id");
   if (v && v->type == V_BIN) {
     fputs(" Transport Instance <", stdout);
@@ -3050,7 +3141,7 @@ static int cmd_id(int argc, char **argv) {
 }
 
 static void usage(void) {
-  fputs("usage: reticulum-c-ctl status [-j] [-t] [-F] [-l] [-T] [--port N] (--identity FILE | --rpc-key HEX | --config FILE)\n"
+  fputs("usage: reticulum-c-ctl status [-j] [-t] [-F] [-l] [-T] [-A] [-P] [-B] [-b] [-p] [--port N] (--identity FILE | --rpc-key HEX | --config FILE)\n"
         "       reticulum-c-ctl path [-t] [-m HOPS] [-j] [HASH] [-b] [-B HASH [--duration HOURS] [--reason TEXT]] [-U HASH] [--stamp-value N] [connection options]\n"
         "       reticulum-c-ctl id (-g FILE | -i FILE [-p] [-P] [-x] [-X] [-H ASPECTS]\n"
         "                          [-s FILE --raw] [-V SIG -r FILE --raw] [-e FILE] [-d FILE] [-w OUT] [-f])\n",
