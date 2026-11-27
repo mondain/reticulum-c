@@ -284,7 +284,7 @@ endif()
     endforeach()
     add_executable(test_service tests/test_service.c)
     target_link_libraries(test_service PRIVATE reticulum_c)
-    foreach(case inline bulk denial bounds replay recovery backpressure bulk_replay file)
+    foreach(case inline bulk denial bounds replay recovery backpressure bulk_replay file slow_response)
         add_test(NAME reticulum_service_${case} COMMAND test_service ${case})
     endforeach()
     add_executable(test_mtu tests/test_mtu.c)
@@ -581,6 +581,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             add_test(NAME reticulum_node_process_x_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> x_tools $<TARGET_FILE:reticulum-c-x>)
             set_tests_properties(reticulum_node_process_x_tools PROPERTIES LABELS network TIMEOUT 120)
+            add_test(NAME reticulum_node_process_x_limits COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> x_limits $<TARGET_FILE:reticulum-c-x>)
+            set_tests_properties(reticulum_node_process_x_limits PROPERTIES LABELS network TIMEOUT 200)
             add_test(NAME reticulum_node_process_ctl_remote COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> ctl_remote $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_ctl_remote PROPERTIES LABELS network TIMEOUT 120)

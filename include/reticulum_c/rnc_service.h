@@ -54,7 +54,9 @@ rnc_result rnc_service_register(rnc_service *service, const char *path, rnc_serv
                                 const uint8_t (*allowed_identities)[16], size_t allowed_count);
 rnc_result rnc_service_unregister(rnc_service *service, const char *path);
 /* unix_seconds is a finite nonnegative Unix timestamp; now_ms is monotonic.
- * timeout_ms is nonzero. Returns the canonical RNS request ID on success only.
+ * timeout_ms is nonzero; it is the time for the answer to begin, so a response Resource that is arriving
+ * when it passes is still delivered (as the reference's RequestReceipt does) and one that stops arriving
+ * ends in RNC_SERVICE_TIMEOUT by the Resource's own timers. Returns the canonical RNS request ID on success only.
  * Values too large for one encrypted packet automatically use Resources. */
 rnc_result rnc_service_request(rnc_service *service, const char *path, const void *encoded_value,
                                size_t value_size, double unix_seconds, uint64_t now_ms,

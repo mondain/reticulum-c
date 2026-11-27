@@ -107,6 +107,48 @@ static void bulk_test(void) {
     free(s.value);
     sfinish(&s);
 }
+/* The request's timeout is for the answer to begin: a response that is arriving when it passes still arrives
+ * (the reference's RequestReceipt), and one that stops arriving still ends in a timeout. */
+static void slow_response_test(void) {
+    int stalled;
+    for (stalled = 0; stalled < 2; stalled++) {
+        spair s;
+        size_t i;
+        uint64_t started;
+        rnc_request_state state = RNC_REQUEST_SENT;
+        sinit(&s, 60000, RNC_SERVICE_ALLOW_ALL);
+        s.size = 50003;
+        s.value = malloc(s.size);
+        CHECK(s.value);
+        s.value[0] = 0xc5;
+        s.value[1] = (uint8_t)(50000 >> 8);
+        s.value[2] = (uint8_t)50000;
+        for (i = 3; i < s.size; i++)
+            s.value[i] = (uint8_t)(i * 73u);
+        started = s.links.now;
+        CHECK(rnc_service_request(s.a, "/echo", s.value, s.size, 1700000000, s.links.now, 30000, s.id) == RNC_OK);
+        for (i = 0; i < 2000 && state != RNC_REQUEST_RECEIVING; i++) {
+            srun(&s, 1);
+            CHECK(rnc_service_request_state(s.a, s.id, &state, NULL) == RNC_OK);
+        }
+        CHECK(state == RNC_REQUEST_RECEIVING && !s.responses && s.links.now < started + 30000);
+        s.links.now = started + 30001;
+        if (!stalled) {
+            CHECK(rnc_service_tick(s.a, s.links.now) == RNC_OK && rnc_service_tick(s.b, s.links.now) == RNC_OK);
+            srun(&s, 5000);
+            CHECK(s.responses == 1 && !s.timeouts);
+        } else { /* nothing more arrives */
+            for (i = 0; i < 600 && !s.timeouts; i++) {
+                s.links.now += 1000;
+                CHECK(rnc_service_tick(s.a, s.links.now) == RNC_OK && rnc_service_pump(s.a, s.links.now) == RNC_OK);
+                sevents(&s, s.a, 0);
+            }
+            CHECK(s.timeouts == 1 && !s.responses);
+        }
+        free(s.value);
+        sfinish(&s);
+    }
+}
 static void denial_test(void) {
     spair s;
     uint8_t v = 0xc0;
@@ -344,6 +386,8 @@ int main(int argc, char **argv) {
         inline_test();
     else if (!strcmp(argv[1], "bulk"))
         bulk_test();
+    else if (!strcmp(argv[1], "slow_response"))
+        slow_response_test();
     else if (!strcmp(argv[1], "denial"))
         denial_test();
     else if (!strcmp(argv[1], "replay"))
