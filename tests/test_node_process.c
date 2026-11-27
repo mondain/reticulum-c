@@ -3302,6 +3302,203 @@ static size_t file_read(const char *path, char *out, size_t size) {
   close(fd);
   return (size_t)n;
 }
+/* ---- rnid identity requests (-R, -t, -N): identities fetched from the network through the shared instance ------- */
+/* A node on the daemon's TCP interface that announces a destination of the identity filled from `fill`; the
+ * connection stays open so the daemon keeps the path. */
+static void request_identity_of(uint8_t fill, const char *aspects, rnc_identity *id, char dest_hex[33]) {
+  uint8_t key[64], name_hash[10], dest[16];
+  size_t i;
+  for (i = 0; i < 64; ++i)
+    key[i] = (uint8_t)(fill + i * 3u);
+  CHECK(rnc_identity_from_private(id, key) == RNC_OK);
+  CHECK(rnc_destination_hash(aspects, id, name_hash, dest) == RNC_OK);
+  hex_of(dest, 16, dest_hex);
+}
+static int request_announcer(unsigned world, uint8_t fill, const char *aspects, rnc_identity *id, char dest_hex[33]) {
+  uint8_t raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+  size_t n, m;
+  unsigned random = fill;
+  rnc_packet packet;
+  int fd = tcp_connect(world);
+  request_identity_of(fill, aspects, id, dest_hex);
+  CHECK(rnc_announce_create(id, aspects, NULL, 0, (uint64_t)time(NULL), rng, &random, &packet) == RNC_OK);
+  CHECK(rnc_packet_encode(&packet, raw, sizeof(raw), &n) == RNC_OK &&
+        rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK);
+  CHECK(write(fd, framed, m) == (ssize_t)m);
+  return fd;
+}
+static void rnid_request(const char *exe, const char *ctl) {
+  char base[] = "/tmp/rnc-rnidr-XXXXXX", cfg[400], key[400], admin[400], text[1024], identity[33], out[8192],
+       data_arg[16], none_arg[16], dest_a[33], dest_b[33], hash_a[33], hash_b[33], pub_a[129], want[512],
+       a_file[400], b_file[400], plain[400], sealed[400], opened[400], sig[420], msg[400], rsm[420], unknown[33];
+  unsigned data = unused_port(), control = unused_port(), world = unused_port();
+  rnc_identity a, b;
+  uint64_t began;
+  pid_t daemon;
+  int dfd, fa, fb;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/daemon_id", base) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", base) > 0);
+  CHECK(snprintf(a_file, sizeof(a_file), "%s/a.id", base) > 0);
+  CHECK(snprintf(b_file, sizeof(b_file), "%s/b.id", base) > 0);
+  CHECK(snprintf(plain, sizeof(plain), "%s/plain", base) > 0);
+  CHECK(snprintf(sealed, sizeof(sealed), "%s/sealed.rfe", base) > 0);
+  CHECK(snprintf(opened, sizeof(opened), "%s/opened", base) > 0);
+  CHECK(snprintf(sig, sizeof(sig), "%s.rsg", plain) > 0);
+  CHECK(snprintf(msg, sizeof(msg), "%s/note", base) > 0);
+  CHECK(snprintf(rsm, sizeof(rsm), "%s.rsm", msg) > 0);
+  CHECK(snprintf(data_arg, sizeof(data_arg), "%u", data) > 0);
+  CHECK(snprintf(none_arg, sizeof(none_arg), "%u", unused_port()) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\n[interfaces]\n[[World]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+                 data, control, world) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  /* a announces some destination (found by destination hash), b its rnid.id one (found by identity hash too) */
+  fa = request_announcer(world, 11, "example.request.a", &a, dest_a);
+  fb = request_announcer(world, 77, "rnid.id", &b, dest_b);
+  live_sleep(500);
+  hex_of(a.hash, 16, hash_a);
+  hex_of(b.hash, 16, hash_b);
+  hex_of(a.public_key, 64, pub_a);
+  file_bytes(a_file, (const char *)a.private_key, 64);
+  file_bytes(b_file, (const char *)b.private_key, 64);
+
+  /* without -R a hash is not looked up */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-p", "--data-port", data_arg, NULL) == 2);
+  CHECK(snprintf(want, sizeof(want), "Could not recall Identity for <%s>.", dest_a) > 0 && strstr(out, want));
+  CHECK(strstr(out, "You can query the network for unknown Identities with the -R option."));
+  /* by destination hash */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-p", "--data-port", data_arg, NULL) == 0);
+  CHECK(snprintf(want, sizeof(want), "Received Identity <%s> for destination <%s> from the network", hash_a, dest_a) > 0);
+  CHECK(strstr(out, want) && strstr(out, pub_a) && strstr(out, "Not available"));
+  /* by identity hash, which finds the identity's rnid.id destination */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_b, "--request", "-x", "--data-port", data_arg, NULL) == 0);
+  CHECK(snprintf(want, sizeof(want), "Received Identity <%s> for destination <%s> from the network", hash_b, hash_b) > 0);
+  CHECK(strstr(out, want) && strstr(out, "Public identity : "));
+  /* nobody answers */
+  CHECK(snprintf(unknown, sizeof(unknown), "%s", "00112233445566778899aabbccddeeff") > 0);
+  began = now_ms();
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", unknown, "-R", "-t", "1.5", "-p", "--data-port", data_arg, NULL) == 2);
+  CHECK(strstr(out, "Identity request timed out") && now_ms() - began >= 1400 && now_ms() - began < 10000);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", unknown, "-R", "-t", "0", "-p", NULL) == 250);
+  /* -N uses nothing from the network */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-N", "-R", "-p", "--data-port", data_arg, NULL) == 2);
+  CHECK(strstr(out, "Could not resolve identity") && !strstr(out, "Received Identity"));
+  /* no instance to ask */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-p", "--data-port", none_arg, NULL) == 254);
+  CHECK(strstr(out, "could not reach the shared instance"));
+  /* encrypt to a fetched identity; only its owner can open it */
+  file_bytes(plain, "for a only\n", 11);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-e", plain, "-w", sealed, "--data-port", data_arg,
+                NULL) == 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", a_file, "-d", sealed, "-w", opened, NULL) == 0);
+  CHECK(file_contains(opened, "for a only"));
+  /* a fetched identity cannot sign */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-s", plain, "--data-port", data_arg, NULL) == 4);
+  CHECK(access(sig, F_OK));
+  /* checking a signature against a hash needs no request */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", a_file, "-s", plain, NULL) == 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_a, "-V", sig, NULL) == 0);
+  CHECK(snprintf(want, sizeof(want), "was signed by <%s>", hash_a) > 0 && strstr(out, want));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_b, "-V", sig, NULL) == 10);
+  CHECK(snprintf(want, sizeof(want), "This file was NOT signed by <%s>", hash_b) > 0 && strstr(out, want));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", a_file, "-S", "hello", "-w", msg, NULL) == 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_a, "-V", rsm, NULL) == 0 && strstr(out, "hello"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_b, "-V", rsm, NULL) == 10);
+  CHECK(snprintf(want, sizeof(want), "The message was NOT signed by <%s>", hash_b) > 0 && strstr(out, want));
+  /* a destination hash for an identity hash needs none either */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_b, "-H", "rnid.id", NULL) == 0);
+  CHECK(strstr(out, dest_b));
+  /* and an identity file still loads as before */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", a_file, "-p", NULL) == 0 && strstr(out, "Loaded Identity"));
+  close(fa);
+  close(fb);
+  stop(daemon, dfd);
+  remove_tree(base);
+  puts("rnid identity requests work");
+}
+/* rnid -R against a reference rnsd as the shared instance: the reference's rnid and this tool ask it the same
+ * questions and report the same identities with the same lines. */
+static int ctl_run(const char *ctl, char *out, size_t size, ...);
+static void rnid_request_reference(const char *exe, const char *ctl, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-rnidq-XXXXXX", rdir[400], cdir[400], rcfg[500], ccfg[500], text[1024], ours[8192],
+       data_arg[16], dest_a[33], dest_b[33], dest_c[33], hash_a[33], hash_b[33], hash_c[33], pub_a[129], pub_b[129],
+       want[512], line[2048];
+  unsigned data = unused_port(), control = unused_port(), world = unused_port(), which;
+  const char *rpc_key = "8f3c2a1d9e4b7c60a5d1f2837b6e49c0d4a8b1e2f3c5d7a9012b3c4d5e6f7081";
+  rnc_identity a, b, c;
+  live_proc rnsd;
+  int fa, fb, fc;
+  (void)exe;
+  signal(SIGPIPE, SIG_IGN); /* live_end writes to tools that have already exited */
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/rnsd", base) > 0 && !mkdir(rdir, 0700));
+  CHECK(snprintf(cdir, sizeof(cdir), "%s/client", base) > 0 && !mkdir(cdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(ccfg, sizeof(ccfg), "%s/config", cdir) > 0);
+  CHECK(snprintf(data_arg, sizeof(data_arg), "%u", data) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = Yes\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\nrpc_key = %s\n[interfaces]\n[[World]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n"
+                 "[stamps]\ndestination_value = 8\npr_value = 8\n",
+                 data, control, rpc_key, world) > 0);
+  config_file(rcfg, text);
+  /* the client has its own storage, so it knows no identity it has not been told over the network */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\nrpc_key = %s\n[interfaces]\n"
+                 "[stamps]\ndestination_value = 8\npr_value = 8\n",
+                 data, control, rpc_key) > 0);
+  config_file(ccfg, text);
+  live_spawn(&rnsd, python, reference, live_transport, rdir);
+  CHECK(live_expect(&rnsd, "READY", 20000, line, sizeof(line)));
+  fa = request_announcer(world, 11, "example.request.a", &a, dest_a);
+  fb = request_announcer(world, 77, "rnid.id", &b, dest_b);
+  live_sleep(1500);
+  hex_of(a.hash, 16, hash_a);
+  hex_of(b.hash, 16, hash_b);
+  hex_of(a.public_key, 64, pub_a);
+  hex_of(b.public_key, 64, pub_b);
+  request_identity_of(143, "example.request.c", &c, dest_c);
+  /* Identities nobody has announced yet: both tools ask, then the announce arrives. (A reference client of an
+   * instance that already heard one recalls it from the instance without asking, so it must be new to rnsd.) */
+  {
+    char *argv[] = {(char *)python, "-m", "RNS.Utilities.rnid", "--config", cdir, "-i", dest_c, "-R", "-p", NULL};
+    char *mine[] = {(char *)ctl, "id", "-i", dest_c, "-R", "-p", "--data-port", data_arg, NULL};
+    live_proc ref_ask, our_ask;
+    live_spawn_argv(&ref_ask, reference, argv);
+    live_spawn_argv(&our_ask, reference, mine);
+    live_sleep(4000);
+    fc = request_announcer(world, 143, "example.request.c", &c, dest_c);
+    hex_of(c.hash, 16, hash_c);
+    CHECK(snprintf(want, sizeof(want), "Received Identity <%s> for destination <%s> from the network", hash_c, dest_c) >
+          0);
+    CHECK(live_find(&our_ask, want, 20000, line, sizeof(line)));
+    CHECK(live_find(&ref_ask, want, 20000, line, sizeof(line)));
+    live_end(&our_ask);
+    live_end(&ref_ask);
+  }
+  /* ones rnsd already knows, answered from its path table: a by destination hash, then b by identity hash */
+  for (which = 0; which < 2; ++which) {
+    const char *asked = which ? hash_b : dest_a;
+    CHECK(snprintf(want, sizeof(want), "Received Identity <%s> for destination <%s> from the network",
+                   which ? hash_b : hash_a, asked) > 0);
+    CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", asked, "-R", "-p", "--data-port", data_arg, NULL) == 0);
+    CHECK(strstr(ours, want) && strstr(ours, which ? pub_b : pub_a));
+  }
+  close(fa);
+  close(fb);
+  close(fc);
+  live_end(&rnsd);
+  remove_tree(base);
+  puts("rnid identity requests agree with the reference");
+}
 static void write_identity(const char *path, uint8_t fill, char hash[33]);
 /* Metadata for signed messages, with a spec: nested sections, quoting, comments, lists, a trailing comma, an empty
  * value, defaults (including None and a list), and a section only the spec has. */
@@ -7717,6 +7914,10 @@ int main(int argc, char **argv) {
     cli_id_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "cli_tools") && argc == 4)
     cli_tools(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "rnid_request") && argc == 4)
+    rnid_request(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "rnid_request_ref") && argc == 6)
+    rnid_request_reference(argv[1], argv[3], argv[4], argv[5]);
 
   else if (!strcmp(argv[2], "tunnel_persist") && argc == 3)
     tunnel_persistence(argv[1]);
