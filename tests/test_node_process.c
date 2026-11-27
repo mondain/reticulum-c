@@ -3211,12 +3211,21 @@ static void discovery_listen_reference(const char *exe, const char *reference,
   CHECK(snprintf(text, sizeof(text),
                  "[reticulum]\nenable_transport = No\nshare_instance = No\n"
                  "discover_interfaces = yes\nrequired_discovery_value = 8\n"
+                 "[stamps]\ndestination_cost = 8\n" /* what the reference instance below stamps with */
                  "[interfaces]\n[[Up]]\ntype = TCPClientInterface\n"
                  "target_host = 127.0.0.1\ntarget_port = %u\nreconnect_wait = "
                  "1\n",
                  port) > 0);
   config_file(cfg, text);
-  rnsd = start_rnsd(python, reference, rdir);
+  { /* the announce comes a job interval (60 s) after start; searching a full cost network stamp for it on a small
+     * runner can then outlast the wait, so this reference instance stamps cheaply (see set_announcer_path). The
+     * daemon must then require no more than that, or it leaves the stamp in the app data, as the reference does,
+     * and the discovery stamp before it is not found. */
+    const char *old = getenv("PYTHONPATH");
+    char path[4096];
+    CHECK(snprintf(path, sizeof(path), "%s%s%s", reference, old && *old ? ":" : "", old ? old : "") < (int)sizeof(path));
+    rnsd = start_rnsd(python, path, rdir);
+  }
   daemon = start(exe, cfg, key, admin, &fd);
   ready_line(fd, id);
   found = listed_within(admin, "Reference Relay", 110);
