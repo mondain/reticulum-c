@@ -29,4 +29,6 @@ jobs:
           -DRNC_REFERENCE_DIR="$RUNNER_TEMP/rns"
           -DPython3_EXECUTABLE="$RUNNER_TEMP/rns-env/bin/python"
       - run: cmake --build build
+      # the AutoInterface test builds private network namespaces, which this image restricts by default
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: ctest --test-dir build --output-on-failure

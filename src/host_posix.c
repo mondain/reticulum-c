@@ -361,24 +361,38 @@ enum {
 #define WEAVE_RETRY_MS 5000u
 #define WEAVE_DEDUPE_SLOTS 48u
 #define WEAVE_DEDUPE_TTL_MS 750u
+/* AutoInterface: the devices in use, looked over again every PEER_JOB_INTERVAL of the reference */
+#define AUTO_DEVICES 16u
+#define AUTO_RESCAN_MS 4000u
+#define AUTO_ECHO_TIMEOUT_MS 6500u
 enum { WEAVE_IDLE = 0, WEAVE_DISCOVERING, WEAVE_CONNECTING, WEAVE_CONNECTED };
 typedef struct host_flap {
   char ip[INET6_ADDRSTRLEN];
   uint64_t last;
   unsigned count;
 } host_flap;
+typedef struct host_auto_device {
+  unsigned ifindex;
+  char name[64], local_ip[INET6_ADDRSTRLEN];
+  /* when our own multicast announce last came back on it, or when the wait for one began; 0 before that */
+  uint64_t echo_at;
+  int echoed, silent;
+} host_auto_device;
 typedef struct host_interface {
   int used, fd, discovery_fd, unicast_fd, connecting, node_added, accepted,
       has_ifac, ready;
   rnc_host_status status;
   char address[256], target[256], device[64], group[64],
-      local_ip[INET6_ADDRSTRLEN], auto_devices[256], auto_ignored[256];
+      auto_devices[256], auto_ignored[256];
+  host_auto_device adopted[AUTO_DEVICES];
+  unsigned adopted_count;
+  uint64_t rescan_at;
   int auto_permanent, i2p_tunneled, tunnel_plain;
   int has_stamp_costs;
   double destination_cost, pr_cost;
   unsigned auto_scope;
   uint16_t target_port, discovery_port, data_port;
-  unsigned baud, kiss_port, ifindex;
+  unsigned baud, kiss_port;
   uint32_t bitrate;
   rnc_interface_policy policy;
   int flow_control;
@@ -1243,40 +1257,101 @@ static int auto_socket(uint16_t port) {
   }
   return fd;
 }
-static int setup_auto(host_interface *f) {
+static host_auto_device *auto_device(host_interface *f, unsigned ifindex) {
+  unsigned i;
+  for (i = 0; i < f->adopted_count; ++i)
+    if (f->adopted[i].ifindex == ifindex)
+      return &f->adopted[i];
+  return NULL;
+}
+static void auto_membership(host_interface *f, unsigned ifindex, int join) {
+  struct ipv6_mreq group;
+  memset(&group, 0, sizeof(group));
+  group.ipv6mr_multiaddr = ((struct sockaddr_in6 *)&f->multicast)->sin6_addr;
+  group.ipv6mr_interface = ifindex;
+  if (join && setsockopt(f->discovery_fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &group, sizeof(group)) < 0)
+    rnc_logf(RNC_LOG_DEBUG, "host", "%s: could not join the multicast group on device %u: %s", f->status.name, ifindex,
+             strerror(errno));
+  else if (!join)
+    (void)setsockopt(f->discovery_fd, IPPROTO_IPV6, IPV6_LEAVE_GROUP, &group, sizeof(group));
+}
+/* Brings the devices in use in line with the system: every device with a link-local address that the settings
+ * allow. The reference takes the devices present when it starts and follows their address changes; this also takes
+ * up devices that appear later and drops those that go away. */
+static void auto_rescan(rnc_host *h, host_interface *f) {
   struct ifaddrs *all = NULL, *it;
-  struct in6_addr local;
-  struct ipv6_mreq join;
-  struct sockaddr_in6 *m = (struct sockaddr_in6 *)&f->multicast;
-  int found = 0;
+  uint8_t seen[AUTO_DEVICES] = {0};
+  unsigned i;
   if (getifaddrs(&all) < 0)
-    return -1;
+    return;
   for (it = all; it; it = it->ifa_next) {
-    if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET6 ||
-        (f->device[0] && strcmp(f->device, it->ifa_name)) ||
+    struct in6_addr local;
+    char text[INET6_ADDRSTRLEN];
+    unsigned ifindex;
+    host_auto_device *d;
+    if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET6 || (f->device[0] && strcmp(f->device, it->ifa_name)) ||
         !rnc_host_auto_device_allowed(f->auto_devices, f->auto_ignored, it->ifa_name))
       continue;
+#ifdef __APPLE__
+    /* AWDL and tethering devices, as the reference skips them unless they are asked for */
+    if (!f->auto_devices[0] && (!strcmp(it->ifa_name, "awdl0") || !strcmp(it->ifa_name, "llw0") ||
+                                !strcmp(it->ifa_name, "en5")))
+      continue;
+#endif
     local = ((struct sockaddr_in6 *)it->ifa_addr)->sin6_addr;
     if (!IN6_IS_ADDR_LINKLOCAL(&local))
       continue;
-    if (!copy_text(f->device, sizeof(f->device), it->ifa_name))
-      break;
-    f->ifindex = if_nametoindex(it->ifa_name);
-    if (!f->ifindex ||
-        !inet_ntop(AF_INET6, &local, f->local_ip, sizeof(f->local_ip)))
-      break;
-    found = 1;
-    break;
+#ifdef __APPLE__
+    local.s6_addr[2] = local.s6_addr[3] = 0; /* the scope the system embeds in the address */
+#endif
+    ifindex = if_nametoindex(it->ifa_name);
+    if (!ifindex || !inet_ntop(AF_INET6, &local, text, sizeof(text)))
+      continue;
+    d = auto_device(f, ifindex);
+    if (d) {
+      if (seen[d - f->adopted])
+        continue; /* a device's first link-local address is the one used */
+      seen[d - f->adopted] = 1;
+      if (strcmp(d->local_ip, text)) {
+        rnc_logf(RNC_LOG_INFO, "host", "%s: %s has a new link-local address %s", f->status.name, d->name, text);
+        (void)copy_text(d->local_ip, sizeof(d->local_ip), text);
+      }
+    } else if (f->adopted_count < AUTO_DEVICES) {
+      d = &f->adopted[f->adopted_count];
+      memset(d, 0, sizeof(*d));
+      if (!copy_text(d->name, sizeof(d->name), it->ifa_name) || !copy_text(d->local_ip, sizeof(d->local_ip), text))
+        continue;
+      d->ifindex = ifindex;
+      seen[f->adopted_count++] = 1;
+      auto_membership(f, ifindex, 1);
+      rnc_logf(RNC_LOG_INFO, "host", "%s: using %s (%s)", f->status.name, d->name, d->local_ip);
+    }
   }
   freeifaddrs(all);
-  if (!found) {
-    errno = ENODEV;
-    return -1;
+  for (i = 0; i < f->adopted_count;) {
+    size_t k;
+    if (seen[i]) {
+      ++i;
+      continue;
+    }
+    rnc_logf(RNC_LOG_INFO, "host", "%s: %s removed", f->status.name, f->adopted[i].name);
+    auto_membership(f, f->adopted[i].ifindex, 0);
+    for (k = 0; k < RNC_HOST_SLOTS; ++k) { /* and the peers that were reached over it */
+      host_interface *peer = &h->interfaces[k];
+      if (peer->used && peer->status.kind == RNC_HOST_AUTO && peer->status.parent_id == f->status.interface_id &&
+          ((struct sockaddr_in6 *)&peer->peer)->sin6_scope_id == f->adopted[i].ifindex)
+        (void)rnc_host_remove(h, peer->status.interface_id);
+    }
+    memmove(&f->adopted[i], &f->adopted[i + 1], (f->adopted_count - i - 1) * sizeof(f->adopted[0]));
+    memmove(&seen[i], &seen[i + 1], f->adopted_count - i - 1);
+    --f->adopted_count;
   }
+}
+static int setup_auto(rnc_host *h, host_interface *f) {
+  struct sockaddr_in6 *m = (struct sockaddr_in6 *)&f->multicast;
   memset(m, 0, sizeof(*m));
   m->sin6_family = AF_INET6;
   m->sin6_port = htons(f->discovery_port);
-  m->sin6_scope_id = f->ifindex;
   if (rnc_host_auto_group_ex(f->group, f->auto_permanent, f->auto_scope, (uint8_t *)&m->sin6_addr) !=
       RNC_OK) {
     errno = EINVAL;
@@ -1292,17 +1367,49 @@ static int setup_auto(host_interface *f) {
   f->unicast_fd = auto_socket((uint16_t)(f->discovery_port + 1u));
   if (f->unicast_fd < 0)
     return -1;
-  memset(&join, 0, sizeof(join));
-  join.ipv6mr_multiaddr = m->sin6_addr;
-  join.ipv6mr_interface = f->ifindex;
-  if (setsockopt(f->discovery_fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &join,
-                 sizeof(join)) < 0 ||
-      setsockopt(f->discovery_fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, &f->ifindex,
-                 sizeof(f->ifindex)) < 0)
-    return -1;
+  auto_rescan(h, f);
+  f->rescan_at = h->now + AUTO_RESCAN_MS;
+  if (!f->adopted_count)
+    rnc_logf(RNC_LOG_WARNING, "host", "%s: no usable device, so no connectivity until one appears", f->status.name);
   f->status.online = 1;
   f->status.bound_port = f->data_port;
   return 0;
+}
+/* The announce on every device, the look over the devices, and the warnings about multicast that does not return */
+static void auto_tick(rnc_host *h, host_interface *f, uint64_t now) {
+  unsigned i;
+  if (now >= f->rescan_at) {
+    auto_rescan(h, f);
+    f->rescan_at = now + AUTO_RESCAN_MS;
+  }
+  for (i = 0; i < f->adopted_count; ++i) {
+    host_auto_device *d = &f->adopted[i];
+    if (!d->echo_at) /* a device taken while the host was being set up has no clock reading yet */
+      d->echo_at = now;
+    if (!d->silent && now >= d->echo_at + AUTO_ECHO_TIMEOUT_MS) {
+      d->silent = 1;
+      if (d->echoed)
+        rnc_logf(RNC_LOG_WARNING, "host", "%s: multicast echo timeout for %s, carrier lost", f->status.name, d->name);
+      else
+        rnc_logf(RNC_LOG_ERROR, "host",
+                 "%s: no multicast echoes received on %s; the network hardware or a firewall may be blocking "
+                 "multicast",
+                 f->status.name, d->name);
+    }
+  }
+  if (now < f->discover_at)
+    return;
+  for (i = 0; i < f->adopted_count; ++i) {
+    const host_auto_device *d = &f->adopted[i];
+    struct sockaddr_in6 to = *(const struct sockaddr_in6 *)&f->multicast;
+    uint8_t token[32];
+    to.sin6_scope_id = d->ifindex;
+    if (rnc_host_auto_token(f->group, d->local_ip, token) != RNC_OK ||
+        setsockopt(f->discovery_fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, &d->ifindex, sizeof(d->ifindex)) < 0)
+      continue;
+    (void)sendto(f->discovery_fd, token, 32, 0, (struct sockaddr *)&to, sizeof(to));
+  }
+  f->discover_at = now + 1600u;
 }
 static void rnc_cleanse_host(void *p, size_t n) { OPENSSL_cleanse(p, n); }
 /* ---- link request stamps on several threads ---------------------------------------------------------------- */
@@ -1917,7 +2024,7 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
   } else if (c->kind == RNC_HOST_AUTO) {
     f->discovery_port = c->discovery_port ? c->discovery_port : 29716;
     f->data_port = c->data_port ? c->data_port : 42671;
-    if (f->discovery_port == 65535 || setup_auto(f) < 0)
+    if (f->discovery_port == 65535 || setup_auto(h, f) < 0)
       goto fail;
   } else {
     if (c->kind == RNC_HOST_PIPE && !*f->address) {
@@ -2747,6 +2854,25 @@ static host_interface *auto_peer(rnc_host *h, host_interface *parent,
   }
   return NULL;
 }
+/* The same bytes from a second endpoint or device within three quarters of a second are one packet that took two
+ * routes (Weave and AutoInterface). */
+static int recent_duplicate(host_interface *dev, const uint8_t *data,
+                           size_t size, uint64_t now) {
+  uint8_t hash[32];
+  unsigned i;
+  if (rnc_hash(data, size, hash) != RNC_OK)
+    return 0;
+  for (i = 0; i < dev->dedupe_used; ++i)
+    if (!memcmp(dev->dedupe[i], hash, 8) &&
+        now < dev->dedupe_at[i] + WEAVE_DEDUPE_TTL_MS)
+      return 1;
+  memcpy(dev->dedupe[dev->dedupe_next], hash, 8);
+  dev->dedupe_at[dev->dedupe_next] = now;
+  dev->dedupe_next = (dev->dedupe_next + 1u) % WEAVE_DEDUPE_SLOTS;
+  if (dev->dedupe_used < WEAVE_DEDUPE_SLOTS)
+    ++dev->dedupe_used;
+  return 0;
+}
 static void discovery_input(rnc_host *h, host_interface *parent, int fd,
                             int reverse) {
   uint8_t token[64], expected[32];
@@ -2756,17 +2882,28 @@ static void discovery_input(rnc_host *h, host_interface *parent, int fd,
   ssize_t size =
       recvfrom(fd, token, sizeof(token), 0, (struct sockaddr *)&source, &n);
   host_interface *f;
+  host_auto_device *d;
+  unsigned i;
   if (size < 32 || source.sin6_family != AF_INET6 ||
       !IN6_IS_ADDR_LINKLOCAL(&source.sin6_addr))
     return;
-  if (!source.sin6_scope_id)
-    source.sin6_scope_id = parent->ifindex;
-  if (source.sin6_scope_id != parent->ifindex ||
-      !inet_ntop(AF_INET6, &source.sin6_addr, text, sizeof(text)) ||
-      !strcmp(text, parent->local_ip) ||
+  if (!source.sin6_scope_id && parent->adopted_count == 1)
+    source.sin6_scope_id = parent->adopted[0].ifindex;
+  d = auto_device(parent, source.sin6_scope_id);
+  if (!d || !inet_ntop(AF_INET6, &source.sin6_addr, text, sizeof(text)) ||
       rnc_host_auto_token(parent->group, text, expected) != RNC_OK ||
       CRYPTO_memcmp(token, expected, 32))
     return;
+  for (i = 0; i < parent->adopted_count; ++i) /* our own announce coming back, on this device or another of ours */
+    if (!strcmp(text, parent->adopted[i].local_ip)) {
+      host_auto_device *own = &parent->adopted[i];
+      if (own->silent && own->echoed)
+        rnc_logf(RNC_LOG_WARNING, "host", "%s: carrier recovered on %s", parent->status.name, own->name);
+      own->echo_at = h->now;
+      own->echoed = 1;
+      own->silent = 0;
+      return;
+    }
   f = auto_peer(h, parent, &source);
   if (!f) {
     f = empty_interface(h);
@@ -2797,7 +2934,7 @@ static void discovery_input(rnc_host *h, host_interface *parent, int fd,
     f->status.ifac_size = parent->status.ifac_size;
     memcpy(f->status.ifac_signature, parent->status.ifac_signature, 64);
     (void)snprintf(f->status.name, sizeof(f->status.name),
-                   "AutoInterfacePeer[%.40s/%s]", parent->device, text);
+                   "AutoInterfacePeer[%.40s/%s]", d->name, text);
     (void)rnc_hash(f->status.name, strlen(f->status.name), f->status.hash);
     if (activate(h, f) != RNC_OK) {
       OPENSSL_cleanse(f, sizeof(*f));
@@ -2806,7 +2943,7 @@ static void discovery_input(rnc_host *h, host_interface *parent, int fd,
     }
   }
   f->last_heard = h->now;
-  if (reverse && rnc_host_auto_token(parent->group, parent->local_ip,
+  if (reverse && rnc_host_auto_token(parent->group, d->local_ip,
                                      expected) == RNC_OK) {
     source.sin6_port = htons((uint16_t)(parent->discovery_port + 1u));
     (void)sendto(parent->unicast_fd, expected, 32, 0,
@@ -2837,6 +2974,10 @@ static rnc_result receive_datagram(rnc_host *h, host_interface *f,
       ++f->status.dropped_packets;
       return RNC_OK;
     }
+    /* the same packet over a second device, as the reference drops it */
+    if (recent_duplicate(f, data, (size_t)size, h->now))
+      return RNC_OK;
+    peer->last_heard = h->now;
   }
   return input_packet(h, peer, data, (size_t)size, unix_seconds) == RNC_AGAIN
              ? RNC_OK
@@ -3193,25 +3334,6 @@ static host_interface *weave_peer(rnc_host *h, host_interface *dev,
   }
   return c;
 }
-/* The same bytes from a second endpoint within three quarters of a second are
- * one packet that took two routes. */
-static int weave_duplicate(host_interface *dev, const uint8_t *data,
-                           size_t size, uint64_t now) {
-  uint8_t hash[32];
-  unsigned i;
-  if (rnc_hash(data, size, hash) != RNC_OK)
-    return 0;
-  for (i = 0; i < dev->dedupe_used; ++i)
-    if (!memcmp(dev->dedupe[i], hash, 8) &&
-        now < dev->dedupe_at[i] + WEAVE_DEDUPE_TTL_MS)
-      return 1;
-  memcpy(dev->dedupe[dev->dedupe_next], hash, 8);
-  dev->dedupe_at[dev->dedupe_next] = now;
-  dev->dedupe_next = (dev->dedupe_next + 1u) % WEAVE_DEDUPE_SLOTS;
-  if (dev->dedupe_used < WEAVE_DEDUPE_SLOTS)
-    ++dev->dedupe_used;
-  return 0;
-}
 /* The switch answered the discovery with its key and a signature of the id the
  * host announced; the host replies with its own key and a signature of the
  * switch's id. */
@@ -3273,7 +3395,7 @@ static rnc_result weave_frame(rnc_host *h, host_interface *dev,
       !memcmp(f, dev->weave_sw, 4)) {
     host_interface *peer = weave_peer(h, dev, f + n - 8);
     size_t size = n - 13;
-    if (!peer || !size || weave_duplicate(dev, f + 5, size, h->now))
+    if (!peer || !size || recent_duplicate(dev, f + 5, size, h->now))
       return RNC_OK;
     return input_packet(h, peer, f + 5, size, unix_seconds);
   }
@@ -3705,14 +3827,8 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
         }
       }
     }
-    if (f->status.kind == RNC_HOST_AUTO && !f->status.parent_id &&
-        now >= f->discover_at) {
-      uint8_t token[32];
-      if (rnc_host_auto_token(f->group, f->local_ip, token) == RNC_OK)
-        (void)sendto(f->discovery_fd, token, 32, 0,
-                     (struct sockaddr *)&f->multicast, f->multicast_size);
-      f->discover_at = now + 1600u;
-    }
+    if (f->status.kind == RNC_HOST_AUTO && !f->status.parent_id)
+      auto_tick(h, f, now);
     if (f->pending && f->status.kind == RNC_HOST_UDP) {
       r = rnc_node_input(h->node, f->status.interface_id, &f->pending_packet,
                          unix_seconds, now);

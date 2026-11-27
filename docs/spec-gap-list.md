@@ -150,7 +150,8 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 | --- | --- | --- |
 | Auto | IMPL | IPv6 link-local multicast, `group_id`, discovery/data ports, 1.6s announce, 22s peer timeout, per-peer sub-interfaces |
 | Auto | IMPL | `devices` and `ignored_devices` (comma lists; `lo0` always skipped), `discovery_scope` (link, admin, site, organisation, global; an unknown value is refused, where the reference would fail later) and `multicast_address_type` (permanent or temporary) |
-| Auto | MISS | Using several devices at once (the first suitable device is used); Android/Windows specifics; address-change handling |
+| Auto | IMPL | Every suitable device at once (up to 16), address changes followed, the same packet over two devices within 0.75 s taken once, the interface stays open with no usable device, and a warning when multicast does not come back. Beyond the reference: devices that appear later are taken up and removed ones dropped (it looks every 4 s). The multicast warnings are logged once per change, where the reference repeats one every 4 s. Tested over virtual cables between Linux network namespaces, also against a reference peer (`reticulum_node_auto_devices`, `_rns`) |
+| Auto | MISS | Android and Windows specifics; the macOS paths are untested |
 | Backbone / BackboneClient | PART | Verified against the reference in both directions; daemon types map to TCP listen/connect (same HDLC wire format) with 100 Mb/s pacing and fast-flap IP blocking; no epoll data-plane egress/ingress watermarks or `device` binding; the common TCP `prefer_ipv6` option is accepted |
 | TCP server | IMPL | Listen, accept, IPv4/IPv6, DNS |
 | TCP server | IMPL | `prefer_ipv6`, TCP keepalive and user timeout on accepted sockets |
@@ -249,6 +250,6 @@ The repository's executables are `examples/text_peer.c`, the node daemon (`node_
 The original Phase A library list (proofs/receipts, policy/rate controls, recall and link lifecycle) and Phase C management list (blackholes and remote management) have implementations above. Phase B host kinds and Phase D CLI tools also exist, with the explicit omissions in their tables. Their existence does not close the remaining options or validation gaps.
 
 1. Done on 2026-11-15: hop limit, `MODE_INTERNAL`, path-response grace, the RPC rate table, cancelling a pending path response when a neighbour rebroadcasts, and the remote-management `rates` query. Nothing here is open.
-2. Done on 2026-11-15: the host options above. Open: Auto on several devices at once (it uses the first suitable one), address-change handling, the stale-tunnel state of I2P, an RNode over BLE and its statistics, and the RNode Multi and Weave extras of section 4. Emulator-backed host adapters still need validation on real hardware.
+2. Done on 2026-11-15: the host options above. Open: the stale-tunnel state of I2P, an RNode over BLE and its statistics, and the RNode Multi and Weave extras of section 4. Emulator-backed host adapters still need validation on real hardware.
 3. Done on 2026-11-15: the two discovery options and I2P/Weave discovery announcements (section 6).
 4. Done: path drops, rates, status sorting and filtering, `rnid` formats and import, remote queries, `.rsg`, `rncp` large files, filtered and link statistics, and the stand-alone examples. Open: `rnodeconf` firmware work. Keep browser MCU firmware installation distinct from reference `rnodeconf` parity.
