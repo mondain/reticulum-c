@@ -647,6 +647,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-ctl>)
                 set_tests_properties(reticulum_node_auto_devices PROPERTIES
                     LABELS network TIMEOUT 240 SKIP_RETURN_CODE 77)
+                # host names for TCP clients, with a private hosts file and name server
+                add_test(NAME reticulum_node_tcp_names COMMAND sh -c
+                    "unshare -rmn true 2>/dev/null || exit 77; exec unshare -rmn sh \"$0\" \"$@\""
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/tcp_names.sh $<TARGET_FILE:reticulum-c-node>)
+                set_tests_properties(reticulum_node_tcp_names PROPERTIES
+                    LABELS network TIMEOUT 200 SKIP_RETURN_CODE 77)
             endif()
             set_tests_properties(reticulum_node_process_network reticulum_node_process_shared reticulum_node_process_management
                 reticulum_node_process_sources reticulum_node_process_probe reticulum_node_process_netid reticulum_node_process_disc_announce reticulum_node_process_disc_listen reticulum_node_process_disc_autoconnect reticulum_node_process_logging reticulum_node_process_tunnel_persist reticulum_node_process_stamper reticulum_node_process_stamper_shutdown reticulum_node_process_stamper_requests
