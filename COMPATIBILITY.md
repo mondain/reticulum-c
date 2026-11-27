@@ -531,10 +531,15 @@ terminal and on pipes otherwise, as the reference does. It sets `TERM` and
 stdin, stdout and stderr with EOF, and reports the exit code (the signal number
 for a signal). A command that ignores HUP and TERM is killed when the session
 ends. The initiator puts a terminal in raw mode, forwards `SIGWINCH`, and
-recognises `~.` after a newline (`~~` sends a tilde).
+recognises the escapes `~.`, `~~`, `~?` and `~L` after a newline. `~L` turns
+line-interactive mode on and off: what is typed is shown at once and held until
+Enter or a control key (Ctrl-A, C, D, E, L, Q, S, U, Y, Z, Tab or Escape),
+which sends it and wipes the local copy.
 
-Differences: there is no accept-anyone mode; line-interactive mode (`~L`) and
-the allowed-identities file are not implemented; stream data is sent
+Differences: there is no accept-anyone mode; in line mode keys are taken one at
+a time where the reference handles a whole read, so text after an Enter waits
+for the next one, Backspace works on text from the same read and removes a
+whole UTF-8 character, and a line of 4096 bytes is sent; stream data is sent
 uncompressed (compressed data from the reference is understood); the terminal
 attributes the initiator sends are not applied on the pty (the reference does
 not apply them either); the listener runs at most 4 sessions, announces only
@@ -545,7 +550,7 @@ listener only mirrors signals.
 Evidence: process tests with the real binaries (a command, its exit code, stdin,
 stderr, the default program with the remote identity in the environment, 30000
 lines of output through the channel flow control, a pty for terminal clients,
-typing into the shell, the `~.` escape, a program that ignores HUP and TERM,
+typing into the shell, the escapes and line-interactive mode, a program that ignores HUP and TERM,
 an unlisted identity, `-C`), and differential tests against the unmodified
 reference rnsh in both directions. The reference listener's pipe mode fails in
 this test environment (its transmit path reports a bad file descriptor after it
