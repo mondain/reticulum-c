@@ -378,6 +378,16 @@ typedef struct host_auto_device {
   uint64_t echo_at;
   int echoed, silent;
 } host_auto_device;
+/* A host name being looked up on a thread of its own, so that a slow name server does not stop the node. Whoever
+ * finds the other side finished with it frees it. */
+typedef struct host_lookup {
+  pthread_mutex_t lock;
+  int done, abandoned, failed, prefer_ipv6;
+  uint16_t port;
+  struct sockaddr_storage address;
+  socklen_t size;
+  char name[256];
+} host_lookup;
 typedef struct host_interface {
   int used, fd, discovery_fd, unicast_fd, connecting, node_added, accepted,
       has_ifac, ready;
@@ -387,6 +397,10 @@ typedef struct host_interface {
   host_auto_device adopted[AUTO_DEVICES];
   unsigned adopted_count;
   uint64_t rescan_at;
+  /* a TCP target given by name (`address`), looked up again for every connection */
+  int by_name, lookup_ipv6, lookup_reported;
+  uint16_t lookup_port;
+  host_lookup *lookup;
   int auto_permanent, i2p_tunneled, tunnel_plain;
   int has_stamp_costs;
   double destination_cost, pr_cost;
@@ -797,6 +811,114 @@ static int resolve(const char *address, uint16_t port, int socktype,
   *size = (socklen_t)pick->ai_addrlen;
   freeaddrinfo(result);
   return 0;
+}
+static int is_numeric_host(const char *address) {
+  struct addrinfo hints, *result = NULL;
+  if (!address || !*address)
+    return 1;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_flags = AI_NUMERICHOST;
+  hints.ai_socktype = SOCK_STREAM;
+  if (getaddrinfo(address, NULL, &hints, &result) || !result)
+    return 0;
+  freeaddrinfo(result);
+  return 1;
+}
+static void lookup_free(host_lookup *l) {
+  (void)pthread_mutex_destroy(&l->lock);
+  free(l);
+}
+static void *lookup_run(void *argument) {
+  host_lookup *l = argument;
+  struct sockaddr_storage address;
+  socklen_t size = 0;
+  int failed, abandoned;
+  memset(&address, 0, sizeof(address));
+  failed = resolve(l->name, l->port, SOCK_STREAM, 0, AF_UNSPEC, l->prefer_ipv6, &address, &size) < 0;
+  (void)pthread_mutex_lock(&l->lock);
+  l->failed = failed;
+  l->address = address;
+  l->size = size;
+  l->done = 1;
+  abandoned = l->abandoned;
+  (void)pthread_mutex_unlock(&l->lock);
+  if (abandoned)
+    lookup_free(l);
+  return NULL;
+}
+static host_lookup *lookup_start(const char *name, uint16_t port, int prefer_ipv6) {
+  host_lookup *l = calloc(1, sizeof(*l));
+  pthread_attr_t attributes;
+  pthread_t thread;
+  sigset_t all, before;
+  int started = 0;
+  if (!l || strlen(name) >= sizeof(l->name) || pthread_mutex_init(&l->lock, NULL)) {
+    free(l);
+    return NULL;
+  }
+  strcpy(l->name, name);
+  l->port = port;
+  l->prefer_ipv6 = prefer_ipv6;
+  if (!pthread_attr_init(&attributes)) {
+    /* signals stay with the thread that runs the node */
+    (void)sigfillset(&all);
+    (void)pthread_sigmask(SIG_SETMASK, &all, &before);
+    started = !pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED) &&
+              !pthread_create(&thread, &attributes, lookup_run, l);
+    (void)pthread_sigmask(SIG_SETMASK, &before, NULL);
+    (void)pthread_attr_destroy(&attributes);
+  }
+  if (!started) {
+    lookup_free(l);
+    return NULL;
+  }
+  return l;
+}
+static void lookup_abandon(host_interface *f) {
+  host_lookup *l = f->lookup;
+  int done;
+  if (!l)
+    return;
+  f->lookup = NULL;
+  (void)pthread_mutex_lock(&l->lock);
+  done = l->done;
+  l->abandoned = 1;
+  (void)pthread_mutex_unlock(&l->lock);
+  if (done)
+    lookup_free(l);
+}
+/* 1 when `peer` holds a fresh address for a target given by name; 0 while the lookup runs, or when it failed, which
+ * counts as a failed connection attempt */
+static int looked_up(rnc_host *h, host_interface *f) {
+  host_lookup *l = f->lookup;
+  const char *name = f->rnode_tcp ? f->address + 6 : f->address;
+  int done, failed;
+  if (!l) {
+    f->lookup = lookup_start(name, f->lookup_port, f->lookup_ipv6);
+    if (!f->lookup)
+      note_connect_failure(h, f);
+    return 0;
+  }
+  (void)pthread_mutex_lock(&l->lock);
+  done = l->done;
+  failed = l->failed;
+  (void)pthread_mutex_unlock(&l->lock);
+  if (!done)
+    return 0;
+  if (!failed) {
+    f->peer = l->address;
+    f->peer_size = l->size;
+    f->lookup_reported = 0;
+  } else {
+    rnc_logf(f->lookup_reported ? RNC_LOG_DEBUG : RNC_LOG_WARNING, "host", "interface %s: cannot look up %s",
+             f->status.name, name);
+    f->lookup_reported = 1;
+    f->status.last_errno = EINVAL;
+    note_connect_failure(h, f);
+  }
+  f->lookup = NULL;
+  lookup_free(l);
+  return !failed;
 }
 static uint16_t bound_port(int fd) {
   struct sockaddr_storage a;
@@ -1669,6 +1791,7 @@ rnc_result rnc_host_remove(rnc_host *h, uint32_t id) {
     if (h->interfaces[i].used && h->interfaces[i].status.parent_id == id)
       (void)rnc_host_remove(h, h->interfaces[i].status.interface_id);
   disconnect_interface(h, f, 0);
+  lookup_abandon(f);
   free(f->i2p_peers);
   if (f->discovery_fd >= 0)
     close(f->discovery_fd);
@@ -1972,12 +2095,20 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
         goto fail;
       }
       f->peer_size = (socklen_t)len;
-    } else if (!c->port || resolve(c->address, c->port, SOCK_STREAM, 0, AF_UNSPEC,
-                                   c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
+    } else if (!c->port) {
+      r = RNC_INVALID;
+      goto fail;
+    } else if (!is_numeric_host(c->address)) {
+      /* a name: the first step starts looking it up */
+      f->by_name = 1;
+      f->lookup_port = c->port;
+      f->lookup_ipv6 = c->prefer_ipv6;
+    } else if (resolve(c->address, c->port, SOCK_STREAM, 0, AF_UNSPEC,
+                       c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
       r = RNC_INVALID;
       goto fail;
     }
-    if (connect_interface(h, f) < 0) {
+    if (!f->by_name && connect_interface(h, f) < 0) {
       f->status.last_errno = errno;
       note_connect_failure(h, f);
     }
@@ -2034,15 +2165,20 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
     if (c->kind == RNC_HOST_RNODE && !strncasecmp(f->address, "tcp://", 6)) {
       /* a WiFi RNode: connect now, set the radio up when the socket opens */
       f->rnode_tcp = 1;
-      if (resolve(f->address + 6, c->port ? c->port : 7633u, SOCK_STREAM, 0,
-                  AF_UNSPEC, c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
+      if (!is_numeric_host(f->address + 6)) {
+        f->by_name = 1;
+        f->lookup_port = c->port ? c->port : 7633u;
+        f->lookup_ipv6 = c->prefer_ipv6;
+      } else if (resolve(f->address + 6, c->port ? c->port : 7633u, SOCK_STREAM, 0,
+                         AF_UNSPEC, c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
         r = RNC_INVALID;
         goto fail;
-      }
-      f->fd = device_open(f);
-      if (f->fd < 0) {
-        f->status.last_errno = errno;
-        note_connect_failure(h, f);
+      } else {
+        f->fd = device_open(f);
+        if (f->fd < 0) {
+          f->status.last_errno = errno;
+          note_connect_failure(h, f);
+        }
       }
     } else {
       f->fd = device_open(f);
@@ -3787,7 +3923,8 @@ rnc_result rnc_host_step(rnc_host *h, int timeout, uint64_t unix_seconds,
     if (f->fd < 0 && !f->accepted && !f->gave_up && now >= f->retry_at &&
         !(f->sam_role == SAM_CONNECT &&
           !((parent = find_interface(h, f->status.parent_id)) &&
-            parent->i2p_ready))) {
+            parent->i2p_ready)) &&
+        (!f->by_name || looked_up(h, f))) {
       if (f->status.kind == RNC_HOST_TCP_CONNECT ||
           f->status.kind == RNC_HOST_I2P) {
         if (connect_interface(h, f) < 0) {

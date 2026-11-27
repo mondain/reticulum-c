@@ -158,7 +158,7 @@ Host kinds in `rnc_host_kind`: TCP listen/connect, UDP, Auto, Serial, KISS, RNod
 | TCP server | IMPL | `device` (the device's IPv4 address, or IPv6 with `prefer_ipv6`, wins over a given address, as in the reference) and `i2p_tunneled` (I2P dead-peer timings; accepted connections inherit it) |
 | TCP client | IMPL | Connect, auto-reconnect (default 5 s wait, configurable) |
 | TCP client | IMPL | `reconnect_wait`, `max_reconnect_tries`, `connect_timeout`, `prefer_ipv6`, keepalive and user timeout |
-| TCP client | PART | Address resolved once on add; reconnects reuse it |
+| TCP client | IMPL | A target given by name is looked up for every connection attempt, on a thread of its own so that a slow name server does not stop the node; a name that does not resolve leaves the interface retrying. The same for a Wi-Fi RNode (`tcp://name`). Plain addresses are used directly. UDP targets and the I2P SAM bridge are still resolved once (`reticulum_node_tcp_names`, Linux) |
 | TCP client | IMPL | `kiss_framing` (`fixed_mtu` is the existing `mtu`) |
 | TCP client | IMPL | `i2p_tunneled` |
 | UDP | IMPL | Single target (unicast or IPv4 broadcast); receive-only mode. Datagram sockets enable `SO_BROADCAST` in `src/host_posix.c`; this source reconciliation did not exercise broadcast delivery |
