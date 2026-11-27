@@ -5932,7 +5932,7 @@ static void x_limits(const char *exe, const char *x) {
       CHECK(time(NULL) - quick < 10);
     }
     read_until(sfd, "slept-it-out", slow_out, sizeof(slow_out), 45);
-    CHECK(waitpid(slow, &status, 0) == slow && WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(reap(slow, &status) == slow && WIFEXITED(status) && !WEXITSTATUS(status));
     CHECK(time(NULL) - started >= 27);
     close(sfd);
   }
