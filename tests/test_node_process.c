@@ -43,6 +43,50 @@ static void config_file(const char *path, const char *text) {
   CHECK(f);
   CHECK(fputs(text, f) >= 0 && !fclose(f));
 }
+/* Waits for a child that is expected to end. One that has not ended after 60 s is named, with what it was doing,
+ * and killed, so a hang says which process hung instead of only running into the test's timeout. A reference
+ * program is then let go; one of ours not stopping is a failure. */
+static pid_t reap(pid_t pid, int *status) {
+  unsigned waited;
+  char path[64], cmd[600] = "", wchan[64] = "", state[600] = "";
+  FILE *f;
+  size_t n, i;
+  for (waited = 0; waited < 6000; ++waited) {
+    pid_t r = waitpid(pid, status, WNOHANG);
+    struct timespec nap = {0, 10000000};
+    if (r != 0)
+      return r;
+    nanosleep(&nap, NULL);
+  }
+  (void)snprintf(path, sizeof(path), "/proc/%ld/cmdline", (long)pid);
+  if ((f = fopen(path, "r"))) {
+    n = fread(cmd, 1, sizeof(cmd) - 1, f);
+    for (i = 0; i + 1 < n; ++i)
+      if (!cmd[i])
+        cmd[i] = ' ';
+    fclose(f);
+  }
+  (void)snprintf(path, sizeof(path), "/proc/%ld/wchan", (long)pid);
+  if ((f = fopen(path, "r"))) {
+    n = fread(wchan, 1, sizeof(wchan) - 1, f);
+    wchan[n] = 0;
+    fclose(f);
+  }
+  (void)snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+  if ((f = fopen(path, "r"))) {
+    n = fread(state, 1, sizeof(state) - 1, f);
+    state[n] = 0;
+    fclose(f);
+  }
+  fprintf(stderr, "child %ld did not end in 60 s\n  command: %s\n  waiting in: %s\n  stat: %s\n", (long)pid, cmd, wchan, state);
+  (void)kill(pid, SIGKILL);
+  pid = waitpid(pid, status, 0);
+  if (!strstr(cmd, "python")) {
+    fprintf(stderr, "one of this project's programs did not stop\n");
+    exit(1);
+  }
+  return pid;
+}
 static int run_check(const char *exe, const char *config) {
   pid_t p = fork();
   int status;
@@ -51,7 +95,7 @@ static int run_check(const char *exe, const char *config) {
     execl(exe, exe, "--config", config, "--check", (char *)NULL);
     _exit(127);
   }
-  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  CHECK(reap(p, &status) == p && WIFEXITED(status));
   return WEXITSTATUS(status);
 }
 static const char *valid =
@@ -80,7 +124,7 @@ static int run_args(const char *exe, char *const args[], char *out, size_t size)
     used += (size_t)n;
   out[used] = 0;
   close(fds[0]);
-  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  CHECK(reap(p, &status) == p && WIFEXITED(status));
   return WEXITSTATUS(status);
 }
 static void cli(const char *exe) {
@@ -245,7 +289,7 @@ static unsigned admin_status(const char *path) {
 static void stop(pid_t pid, int fd) {
   int status;
   CHECK(!kill(pid, SIGTERM));
-  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+  CHECK(reap(pid, &status) == pid && WIFEXITED(status) &&
         !WEXITSTATUS(status));
   close(fd);
 }
@@ -528,7 +572,7 @@ static void rns_status(const char *python, const char *reference,
   CHECK(tries < 200);
   out[used] = 0;
   close(fds[0]);
-  CHECK(waitpid(child, &status, 0) == child);
+  CHECK(reap(child, &status) == child);
   if (!WIFEXITED(status) || WEXITSTATUS(status) || !strstr(out, "interfaces") ||
       !strstr(out, "LocalInterface[Shared Instance]")) {
     fprintf(stderr, "RNS rnstatus output:\n%s\n", out);
@@ -668,7 +712,7 @@ static void reference_tool(const char *python, const char *reference,
   CHECK(tries < 300);
   out[used] = 0;
   close(fds[0]);
-  CHECK(waitpid(child, &status, 0) == child);
+  CHECK(reap(child, &status) == child);
   if (!WIFEXITED(status) || WEXITSTATUS(status)) {
     fprintf(stderr, "%s failed:\n%s\n", module, out);
     CHECK(0);
@@ -1706,7 +1750,7 @@ static void live_end(live_proc *p) {
   (void)!write(p->in, "quit\n", 5);
   close(p->in);
   (void)kill(p->pid, SIGTERM);
-  CHECK(waitpid(p->pid, &status, 0) == p->pid);
+  CHECK(reap(p->pid, &status) == p->pid);
   close(p->out);
 }
 static void live_sleep(unsigned ms) {
@@ -2211,7 +2255,7 @@ static void capture_run(char *const argv[], const char *pythonpath, char *out, s
     got += (size_t)n;
   out[got] = 0;
   close(pipefd[0]);
-  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+  CHECK(reap(child, &status) == child && WIFEXITED(status) && !WEXITSTATUS(status));
 }
 static void status_discovered(const char *ctl, const char *reference, const char *python) {
   char dir[] = "/tmp/rnc-disc-XXXXXX", store[400], cfg[400], mine[16384], theirs[16384];
@@ -2485,13 +2529,13 @@ static void layout_test(const char *exe, const char *ctl, const char *reference,
       got += (size_t)n;
     close(pipefd[0]);
     line[got] = 0;
-    CHECK(waitpid(tool, &status, 0) == tool && WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(reap(tool, &status) == tool && WIFEXITED(status) && !WEXITSTATUS(status));
     CHECK(strstr(line, "Shared Instance"));
   }
   CHECK(ctl_run(ctl, out, sizeof(out), "status", "--config", dir, NULL) == 0 && strstr(out, "Shared Instance"));
   if (reference)
     rns_status(python, reference, dir);
-  CHECK(kill(child, SIGTERM) == 0 && waitpid(child, &status, 0) == child);
+  CHECK(kill(child, SIGTERM) == 0 && reap(child, &status) == child);
   close(fds[0]);
   remove_tree(home);
 }
@@ -2555,7 +2599,7 @@ static void shared_unix(const char *exe, const char *ctl, const char *reference,
       execl(exe, exe, "--config", second, "--identity", second_key, "--admin", second_admin, (char *)NULL);
       _exit(127);
     }
-    CHECK(waitpid(child, &status, 0) == child);
+    CHECK(reap(child, &status) == child);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) != 0 && WEXITSTATUS(status) != 127);
   }
   if (reference)
@@ -2655,7 +2699,7 @@ static int admin_has_path(const char *path, const char *hash) {
 static void stop_reference(pid_t p, int fd) {
   int status;
   (void)kill(p, SIGKILL);
-  CHECK(waitpid(p, &status, 0) == p);
+  CHECK(reap(p, &status) == p);
   close(fd);
 }
 /* One direction of the Backbone check: the reference announces over its
@@ -2926,7 +2970,7 @@ static void blackhole_source_reference(const char *exe, const char *reference,
   if (!found)
     fprintf(stderr, "daemon never merged the reference's list:\n%s\n", reply);
   (void)kill(publisher, SIGKILL);
-  CHECK(waitpid(publisher, NULL, 0) == publisher);
+  CHECK(reap(publisher, NULL) == publisher);
   close(pfd);
   stop(d, dfd);
   CHECK(found);
@@ -3120,7 +3164,7 @@ static void discovery_announce_reference(const char *exe, const char *reference,
       nanosleep(&t, NULL);
   }
   (void)kill(rnsd, SIGTERM);
-  CHECK(waitpid(rnsd, NULL, 0) == rnsd);
+  CHECK(reap(rnsd, NULL) == rnsd);
   stop(daemon, fd);
   CHECK(found);
   {
@@ -3178,7 +3222,7 @@ static void discovery_listen_reference(const char *exe, const char *reference,
   found = listed_within(admin, "Reference Relay", 110);
   admin_command(admin, "DISCOVERED", reply, sizeof(reply));
   (void)kill(rnsd, SIGTERM);
-  CHECK(waitpid(rnsd, NULL, 0) == rnsd);
+  CHECK(reap(rnsd, NULL) == rnsd);
   stop(daemon, fd);
   if (!found)
     fprintf(stderr, "daemon never listed the reference's interface:\n%s\n", reply);
@@ -3226,7 +3270,7 @@ static int ctl_run(const char *ctl, char *out, size_t size, ...) {
   }
   out[n] = 0;
   close(fds[0]);
-  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  CHECK(reap(p, &status) == p && WIFEXITED(status));
   return WEXITSTATUS(status);
 }
 static void hex_of(const uint8_t *data, size_t size, char *out) {
@@ -3767,7 +3811,7 @@ static void cli_tools(const char *exe, const char *ctl) {
     }
     text_out[used] = 0;
     close(pipefd[0]);
-    CHECK(waitpid(tool, &status, 0) == tool && WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(reap(tool, &status) == tool && WIFEXITED(status) && !WEXITSTATUS(status));
     CHECK(strstr(text_out, "requested") && strstr(text_out, "Path found, destination") && strstr(text_out, other_hash) &&
           strstr(text_out, "is 1 hop away via"));
     /* the instance counted the request it sent to the world interface */
@@ -3879,7 +3923,7 @@ static void cli_tools(const char *exe, const char *ctl) {
           ++redraws;
       }
     }
-    CHECK(kill(tool, SIGTERM) == 0 && waitpid(tool, &status, 0) == tool);
+    CHECK(kill(tool, SIGTERM) == 0 && reap(tool, &status) == tool);
     close(pipefd[0]);
     CHECK(redraws >= 3 && strstr(text_out, "Shared Instance"));
     CHECK(ctl_run(ctl, out, sizeof(out), "status", "-I", "0", "--port", port_arg, "--identity", keypath, NULL) != 0);
@@ -4210,7 +4254,7 @@ static void tunnel_reference(const char *exe, const char *reference,
   CHECK(strstr(reply, "tunnel id=") && strstr(reply, "paths=1"));
   /* the peer leaves: the path through its connection goes, the tunnel keeps it */
   (void)kill(peer, SIGKILL);
-  CHECK(waitpid(peer, NULL, 0) == peer);
+  CHECK(reap(peer, NULL) == peer);
   close(pfd);
   for (waited = 0; waited < 200 && admin_has_path(admin, hash); ++waited) {
     struct timespec t = {0, 100000000};
@@ -4244,7 +4288,7 @@ static void tunnel_reference(const char *exe, const char *reference,
   admin_command(admin, "TUNNELS", reply, sizeof(reply));
   CHECK(!strstr(reply, "interface=0 "));
   (void)kill(peer, SIGKILL);
-  CHECK(waitpid(peer, NULL, 0) == peer);
+  CHECK(reap(peer, NULL) == peer);
   stop(daemon, fd);
   remove_tree(dir);
   puts("unmodified RNS tunnel restored its path in this daemon");
@@ -4435,7 +4479,7 @@ static void stamper_shutdown(const char *exe) {
   { struct timespec w = {1, 0}; nanosleep(&w, NULL); }
   clock_gettime(CLOCK_MONOTONIC, &t0);
   CHECK(!kill(p, SIGTERM));
-  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status) && !WEXITSTATUS(status));
+  CHECK(reap(p, &status) == p && WIFEXITED(status) && !WEXITSTATUS(status));
   clock_gettime(CLOCK_MONOTONIC, &t1);
   CHECK(t1.tv_sec - t0.tv_sec < 3);
   close(fd);
@@ -4810,13 +4854,13 @@ static int run_cp(const char *cp, char *out, size_t size, char *const *args) {
   CHECK(tries < 900);
   out[n] = 0;
   close(fd);
-  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  CHECK(reap(p, &status) == p && WIFEXITED(status));
   return WEXITSTATUS(status);
 }
 static void stop_cp(pid_t pid, int fd) {
   int status;
   CHECK(!kill(pid, SIGTERM));
-  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status));
+  CHECK(reap(pid, &status) == pid && WIFEXITED(status));
   close(fd);
 }
 static void parse_listening(const char *text, char hash[33]) {
@@ -5440,7 +5484,7 @@ static void tool_stamps(const char *exe, const char *cp, const char *x, const ch
     listener = stamp_listener(cp, la, &lfd, dest, lout, sizeof(lout), 1);
     CHECK(run_cp(cp, out, sizeof(out), send) == 0 && strstr(out, "Transfer complete"));
     kill(listener, SIGKILL);
-    CHECK(waitpid(listener, NULL, 0) == listener);
+    CHECK(reap(listener, NULL) == listener);
     close(lfd);
     CHECK(!stat(cache, &st) && (st.st_mode & 077) == 0);
     /* the saved stamp is used by the next run */
@@ -5452,7 +5496,7 @@ static void tool_stamps(const char *exe, const char *cp, const char *x, const ch
     CHECK(run_cp(cp, out, sizeof(out), unstamped) != 0 && !strstr(out, "Transfer complete"));
     CHECK(run_cp(cp, out, sizeof(out), send) == 0 && strstr(out, "Transfer complete"));
     kill(listener, SIGKILL);
-    CHECK(waitpid(listener, NULL, 0) == listener);
+    CHECK(reap(listener, NULL) == listener);
     close(lfd);
   }
   { /* a listener that does not stamp is filtered: nobody finds a path to it */
@@ -5462,7 +5506,7 @@ static void tool_stamps(const char *exe, const char *cp, const char *x, const ch
     listener = stamp_listener(cp, la, &lfd, dest, lout, sizeof(lout), 0);
     CHECK(run_cp(cp, out, sizeof(out), send) != 0 && !strstr(out, "Transfer complete"));
     kill(listener, SIGKILL);
-    CHECK(waitpid(listener, NULL, 0) == listener);
+    CHECK(reap(listener, NULL) == listener);
     close(lfd);
   }
   { /* x */
@@ -5471,7 +5515,7 @@ static void tool_stamps(const char *exe, const char *cp, const char *x, const ch
     listener = stamp_listener(x, la, &lfd, dest, lout, sizeof(lout), 1);
     CHECK(run_cp(x, out, sizeof(out), run) == 0 && strstr(out, "stamped-x"));
     kill(listener, SIGKILL);
-    CHECK(waitpid(listener, NULL, 0) == listener);
+    CHECK(reap(listener, NULL) == listener);
     close(lfd);
   }
   { /* sh */
@@ -5482,7 +5526,7 @@ static void tool_stamps(const char *exe, const char *cp, const char *x, const ch
     listener = stamp_listener(sh, la, &lfd, dest, lout, sizeof(lout), 1);
     CHECK(run_cp(sh, out, sizeof(out), run) == 0 && strstr(out, "stamped-sh"));
     kill(listener, SIGKILL);
-    CHECK(waitpid(listener, NULL, 0) == listener);
+    CHECK(reap(listener, NULL) == listener);
     close(lfd);
   }
   { /* x and sh used the same identity file since: cp's saved stamp is still there */
@@ -5491,7 +5535,7 @@ static void tool_stamps(const char *exe, const char *cp, const char *x, const ch
     listener = stamp_listener(cp, la, &lfd, dest, lout, sizeof(lout), 1);
     CHECK(!strstr(lout, "Generating announce stamp"));
     kill(listener, SIGKILL);
-    CHECK(waitpid(listener, NULL, 0) == listener);
+    CHECK(reap(listener, NULL) == listener);
     close(lfd);
   }
   { /* ctl path: its request, sent into a shared instance, goes on to the enforcing node with its stamp */
@@ -5523,7 +5567,7 @@ static void tool_stamps(const char *exe, const char *cp, const char *x, const ch
                   fkey, "-w", "10", NULL) == 0);
     stop(front, ffd);
     kill(listener, SIGKILL);
-    CHECK(waitpid(listener, NULL, 0) == listener);
+    CHECK(reap(listener, NULL) == listener);
     close(lfd);
   }
   if (reference)
@@ -5793,7 +5837,7 @@ static void examples_test(const char *exe, const char *announce, const char *req
     read_until(bfd, ">\n", out, sizeof(out), 10);
     read_until(afd, "second one", listen_out, sizeof(listen_out), 20);
     CHECK(strstr(listen_out, "heard <") && strstr(listen_out, " hop"));
-    CHECK(waitpid(a, &status, 0) == a && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(reap(a, &status) == a && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     close(afd);
     stop_cp(b, bfd);
   }
@@ -6041,7 +6085,7 @@ static int run_cp_input(const char *cp, char *out, size_t size, char *const *arg
   CHECK(tries < 900);
   out[n] = 0;
   close(out_fds[0]);
-  CHECK(waitpid(p, &status, 0) == p && WIFEXITED(status));
+  CHECK(reap(p, &status) == p && WIFEXITED(status));
   return WEXITSTATUS(status);
 }
 /* Runs a command with a real terminal on stdin, stdout and stderr and returns
@@ -6627,7 +6671,7 @@ static void i2p_daemon(const char *exe, const char *fake) {
   i2p_daemon_pid = 0;
   alarm(0);
   kill(router, SIGKILL);
-  waitpid(router, NULL, 0);
+  reap(router, NULL);
   remove_tree(dir);
   puts("node I2P interface tests passed");
 }
@@ -6765,11 +6809,11 @@ static void i2p_reference_run(const char *exe, const char *fake,
     CHECK(0);
   }
   (void)kill(peer, SIGKILL);
-  CHECK(waitpid(peer, NULL, 0) == peer);
+  CHECK(reap(peer, NULL) == peer);
   close(pfd);
   stop(daemon, fd);
   kill(router, SIGKILL);
-  waitpid(router, NULL, 0);
+  reap(router, NULL);
   remove_tree(dir);
 }
 static void i2p_reference(const char *exe, const char *fake,
@@ -6910,7 +6954,7 @@ static void traffic_stats(const char *exe, const char *ctl, const char *cp, cons
     }
     out[used] = 0;
     close(fds[0]);
-    CHECK(waitpid(child, &status, 0) == child);
+    CHECK(reap(child, &status) == child);
     if (!WIFEXITED(status) || WEXITSTATUS(status) || !strstr(out, "Filtered     :") || !strstr(out, "135 B") ||
         !strstr(out, "Links        :") || !strstr(out, "of data flow") || !strstr(out, "Totals       :")) {
       fprintf(stderr, "RNS rnstatus -F -l -t:\n%s\n", out);
