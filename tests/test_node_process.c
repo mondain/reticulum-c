@@ -3595,6 +3595,86 @@ static void rnid_request_reference(const char *exe, const char *ctl, const char 
   remove_tree(base);
   puts("rnid identity requests agree with the reference");
 }
+/* reticulum-c-ctl against a reference rnsd as the shared instance: path lookups without -m (rnsd requires the
+ * max_hops key even when it is empty), and announces from `id -a`, which rnsd drops if the tool has gone by the
+ * time it passes them on. */
+static int ctl_run(const char *ctl, char *out, size_t size, ...);
+static void ctl_rnsd(const char *ctl, const char *reference, const char *python) {
+  char base[] = "/tmp/rnc-ctlr-XXXXXX", rdir[400], rcfg[500], text[1024], out[8192], dest_a[33], id_file[400],
+       line[256];
+  unsigned data = unused_port(), control = unused_port(), world = unused_port(), i, heard = 0;
+  rnc_identity a;
+  live_proc rnsd;
+  int fa, listener;
+  CHECK(mkdtemp(base));
+  CHECK(snprintf(rdir, sizeof(rdir), "%s/rnsd", base) > 0 && !mkdir(rdir, 0700));
+  CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+  CHECK(snprintf(id_file, sizeof(id_file), "%s/a.id", base) > 0);
+  /* transport off: then rnsd only passes on what a local client hands it */
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\nrpc_key = %s\n[interfaces]\n[[World]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n"
+                 "[stamps]\ndestination_value = 8\npr_value = 8\n",
+                 data, control, test_rpc_key, world) > 0);
+  config_file(rcfg, text);
+  live_spawn(&rnsd, python, reference, live_transport, rdir);
+  CHECK(live_expect(&rnsd, "READY", 20000, line, sizeof(line)));
+  fa = request_announcer(world, 11, "example.request.a", &a, dest_a);
+  live_sleep(1500);
+  /* the path table and a single lookup, neither with -m */
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-t", "--config", rcfg, NULL) == 0);
+  CHECK(strstr(out, dest_a));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", dest_a, "--config", rcfg, NULL) == 0);
+  CHECK(strstr(out, "Path found, destination ") && strstr(out, dest_a));
+  CHECK(ctl_run(ctl, out, sizeof(out), "path", "-t", "-m", "4", "--config", rcfg, NULL) == 0 && strstr(out, dest_a));
+  /* every announce from `id -a` reaches a peer of rnsd */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-g", id_file, NULL) == 0);
+  listener = tcp_connect(world);
+  live_sleep(500);
+  for (i = 0; i < 10; ++i) {
+    char aspects[64], want[33], *at;
+    uint8_t wanted[16], in[1024], frame[RNC_MAX_FRAME + 1u], command;
+    rnc_host_framer framer = {0};
+    uint64_t end;
+    int got = 0;
+    size_t k, n;
+    CHECK(snprintf(aspects, sizeof(aspects), "rnc.ctl.rnsd%u", i) > 0);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", id_file, "-a", aspects, "--config", rcfg, NULL) == 0);
+    at = strstr(out, "destination <");
+    CHECK(at && sscanf(at, "destination <%32[0-9a-f]>", want) == 1);
+    for (k = 0; k < 16; ++k) {
+      unsigned byte;
+      CHECK(sscanf(want + 2 * k, "%2x", &byte) == 1);
+      wanted[k] = (uint8_t)byte;
+    }
+    end = now_ms() + 6000;
+    while (!got && now_ms() < end) {
+      struct pollfd p = {listener, POLLIN, 0};
+      ssize_t r;
+      if (poll(&p, 1, 100) <= 0)
+        continue;
+      r = read(listener, in, sizeof(in));
+      CHECK(r > 0);
+      for (k = 0; k < (size_t)r; ++k) {
+        rnc_packet packet;
+        if (rnc_host_frame_feed(&framer, RNC_HOST_HDLC, in[k], &command, frame, sizeof(frame), &n) == RNC_OK &&
+            rnc_packet_decode(frame, n, &packet) == RNC_OK && (packet.flags & 3u) == RNC_ANNOUNCE &&
+            !memcmp(packet.destination, wanted, 16))
+          got = 1;
+      }
+    }
+    heard += (unsigned)got;
+  }
+  if (heard != 10)
+    fprintf(stderr, "rnsd passed on %u of 10 announces\n", heard);
+  CHECK(heard == 10);
+  close(listener);
+  close(fa);
+  live_end(&rnsd);
+  remove_tree(base);
+  puts("ctl works with a reference rnsd");
+}
 static void write_identity(const char *path, uint8_t fill, char hash[33]);
 /* Metadata for signed messages, with a spec: nested sections, quoting, comments, lists, a trailing comma, an empty
  * value, defaults (including None and a list), and a section only the spec has. */
@@ -8097,6 +8177,8 @@ int main(int argc, char **argv) {
     cli_id_reference(argv[1], argv[3], argv[4]);
   else if (!strcmp(argv[2], "cli_tools") && argc == 4)
     cli_tools(argv[1], argv[3]);
+  else if (!strcmp(argv[2], "ctl_rnsd_ref") && argc == 6)
+    ctl_rnsd(argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "rnid_request") && argc == 4)
     rnid_request(argv[1], argv[3]);
   else if (!strcmp(argv[2], "rnid_request_ref") && argc == 6)

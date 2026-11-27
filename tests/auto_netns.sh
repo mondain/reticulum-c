@@ -120,8 +120,7 @@ time.sleep(20)
   until_true 20 grep -q . "$base/$1/dest" || fail "reference announce from $1"
   dest=$(head -1 "$base/$1/dest")
 }
-# (-m, because rnsd refuses a path table request without max_hops, which this tool leaves out otherwise)
-has_path() { inside "$1" "$ctl" path -t -m 128 --config "$base/$1" | grep -q "$dest"; }
+has_path() { inside "$1" "$ctl" path -t --config "$base/$1" | grep -q "$dest"; }
 # packets the hub has taken in from its peers
 hub_received() {
   python3 -c '
