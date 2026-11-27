@@ -593,6 +593,40 @@ static void write_rate_table(rnc_rpc_writer *w, rnc_node *node, uint64_t now, co
       (void)rnc_rpc_write_real(w, unix_now + ((double)e.timestamps_ms[k] - (double)now) / 1000.0);
   }
 }
+/* destination hash -> the reference's known destination entry [heard, packet hash, public key, app data, last used,
+ * stamp, stamp value, link request cost], as Reticulum.get_known_destinations. Packet hashes and stamps are not
+ * kept here and are None. The reply has to fit one RPC message, so application data is left out of entries once it
+ * would crowd out later ones. */
+#define KNOWN_ENTRY_MAX 112u /* an entry without application data */
+static void write_known(rnc_rpc_writer *w, rnc_node *node, uint64_t now, size_t capacity) {
+  rnc_announce a;
+  uint64_t heard;
+  double cost, unix_now = (double)time(NULL);
+  size_t i, count = 0, used = 8;
+  while (count < (capacity - 8) / KNOWN_ENTRY_MAX && rnc_node_known_at(node, count, &a, &heard, &cost) == RNC_OK)
+    ++count;
+  (void)rnc_rpc_write_map(w, count);
+  for (i = 0; i < count && rnc_node_known_at(node, i, &a, &heard, &cost) == RNC_OK; ++i) {
+    const int app = a.app_size && used + (count - i) * KNOWN_ENTRY_MAX + a.app_size + 3 <= capacity;
+    used += KNOWN_ENTRY_MAX + (app ? a.app_size + 3 : 0);
+    (void)rnc_rpc_write_bin(w, a.destination, 16);
+    (void)rnc_rpc_write_array(w, 8);
+    (void)rnc_rpc_write_real(w, unix_now + ((double)heard - (double)now) / 1000.0);
+    (void)rnc_rpc_write_nil(w);
+    (void)rnc_rpc_write_bin(w, a.identity.public_key, 64);
+    if (app)
+      (void)rnc_rpc_write_bin(w, a.app_data, a.app_size);
+    else
+      (void)rnc_rpc_write_nil(w);
+    (void)rnc_rpc_write_uint(w, 0);
+    (void)rnc_rpc_write_nil(w);
+    (void)rnc_rpc_write_uint(w, 0);
+    if (cost >= 0)
+      (void)rnc_rpc_write_uint(w, (uint64_t)cost);
+    else
+      (void)rnc_rpc_write_nil(w);
+  }
+}
 /* identity hash -> {source, until, reason}, as Transport.blackholed_identities */
 static void write_blackhole_list(rnc_rpc_writer *w, rnc_node *node) {
   rnc_blackhole_entry e;
@@ -705,6 +739,9 @@ static int rpc_response(uint8_t *out, size_t capacity, size_t *written,
     break;
   case RNC_RPC_RATE_TABLE:
     write_rate_table(&w, node, now, NULL);
+    break;
+  case RNC_RPC_KNOWN_DESTINATIONS:
+    write_known(&w, node, now, capacity);
     break;
   case RNC_RPC_BLACKHOLED_IDENTITIES:
     write_blackhole_list(&w, node);

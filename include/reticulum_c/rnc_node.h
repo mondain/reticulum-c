@@ -456,6 +456,10 @@ rnc_result rnc_node_interface_filtered_requests(const rnc_node *node, uint32_t i
  * RNC_STATE means unknown. Newer announces replace older ones; replays do not. */
 rnc_result rnc_node_recall(const rnc_node *node, const uint8_t destination[16],
                            rnc_announce *announce);
+/* The known destinations one by one, ordinal counting from 0; RNC_STATE past the last. `heard_ms` is on the node's
+ * clock; `link_cost` is negative when none was announced. */
+rnc_result rnc_node_known_at(const rnc_node *node, size_t ordinal, rnc_announce *announce, uint64_t *heard_ms,
+                             double *link_cost);
 /* Versioned, SHA-256-sealed snapshot for host persistence. Import is atomic,
  * rejects any modification (RNC_AUTH) and entries whose destination does not
  * derive from their identity, and merges into the current table. */

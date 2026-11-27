@@ -56,7 +56,8 @@ typedef enum rnc_rpc_query_type {
   RNC_RPC_MEDIUM_PATH_TIMEOUT,
   RNC_RPC_RATE_TABLE,
   RNC_RPC_BLACKHOLED_IDENTITIES,
-  RNC_RPC_IS_BLACKHOLED
+  RNC_RPC_IS_BLACKHOLED,
+  RNC_RPC_KNOWN_DESTINATIONS
 } rnc_rpc_query_type;
 typedef struct rnc_rpc_query {
   rnc_rpc_query_type type;

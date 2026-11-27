@@ -415,7 +415,8 @@ rnc_result rnc_rpc_decode_query(const void *payload, size_t size,
       {"medium_path_timeout", RNC_RPC_MEDIUM_PATH_TIMEOUT, 0},
       {"rate_table", RNC_RPC_RATE_TABLE, 0},
       {"blackholed_identities", RNC_RPC_BLACKHOLED_IDENTITIES, 0},
-      {"is_blackholed", RNC_RPC_IS_BLACKHOLED, 0}};
+      {"is_blackholed", RNC_RPC_IS_BLACKHOLED, 0},
+      {"known_destinations", RNC_RPC_KNOWN_DESTINATIONS, 0}};
   rmp r = {payload, size, 0};
   rnc_rpc_query out = {0};
   const uint8_t *key, *value;

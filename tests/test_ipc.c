@@ -158,6 +158,8 @@ static void blackhole_rpc(void) {
   CHECK(rnc_rpc_decode_query(msg, n, &q) == RNC_OK &&
         q.type == RNC_RPC_IS_BLACKHOLED && q.has_identity &&
         !memcmp(q.identity_hash, id, 16));
+  n = unhex("81a3676574b26b6e6f776e5f64657374696e6174696f6e73", msg); /* {"get": "known_destinations"} */
+  CHECK(rnc_rpc_decode_query(msg, n, &q) == RNC_OK && q.type == RNC_RPC_KNOWN_DESTINATIONS);
   /* is_blackholed needs the identity */
   n = unhex("81a3676574ad69735f626c61636b686f6c6564", msg);
   CHECK(rnc_rpc_decode_query(msg, n, &q) == RNC_PROTOCOL);

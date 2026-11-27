@@ -1255,6 +1255,21 @@ rnc_result rnc_node_recall(const rnc_node *n, const uint8_t address[16],
     }
   return RNC_STATE;
 }
+rnc_result rnc_node_known_at(const rnc_node *n, size_t ordinal, rnc_announce *announce, uint64_t *heard_ms,
+                             double *link_cost) {
+  size_t i, seen = 0;
+  if (!n || !announce || !heard_ms || !link_cost)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_NODE_KNOWN; i++) {
+    if (!n->known[i].used || seen++ != ordinal)
+      continue;
+    *announce = n->known[i].announce;
+    *heard_ms = n->known[i].heard;
+    *link_cost = n->known[i].link_cost;
+    return RNC_OK;
+  }
+  return RNC_STATE;
+}
 rnc_result rnc_node_known_export(const rnc_node *n, void *output,
                                  size_t capacity, size_t *written) {
   uint8_t *o = output;
