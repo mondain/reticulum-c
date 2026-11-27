@@ -174,6 +174,40 @@ static void input_class(void) {
   rnc_node_free(n);
   rnc_node_free(router);
 }
+/* A flood of new announces and of path requests is seen as a burst, and the announces as held. */
+static void ingress_state(void) {
+  rnc_identity self = identity();
+  rnc_node *n = rnc_node_new(&self, 0, rng, NULL);
+  rnc_node_ingress_state state;
+  unsigned i;
+  CHECK(n && rnc_node_add_interface(n, 1, 1000000) == RNC_OK);
+  CHECK(rnc_node_interface_ingress(n, 1, &state) == RNC_OK);
+  CHECK(!state.held_announces && !state.burst_active && !state.pr_burst_active && !state.burst_since_ms);
+  for (i = 0; i < 20; i++) {
+    rnc_identity src = identity();
+    rnc_packet a;
+    CHECK(rnc_announce_create(&src, "flood.test", NULL, 0, 1000, rng, NULL, &a) == RNC_OK);
+    CHECK(rnc_node_input(n, 1, &a, 1000, 1000 + i * 10u) == RNC_OK);
+    discard(n);
+  }
+  CHECK(rnc_node_interface_ingress(n, 1, &state) == RNC_OK);
+  CHECK(state.burst_active && state.held_announces > 0 && state.burst_since_ms >= 1000 && state.burst_since_ms < 1200);
+  CHECK(!state.pr_burst_active);
+  for (i = 0; i < 20; i++) {
+    uint8_t wanted[16], tag[16] = {0};
+    rnc_packet request;
+    CHECK(rng(NULL, wanted, 16) == RNC_OK);
+    tag[0] = (uint8_t)i;
+    CHECK(rnc_path_request_create(wanted, NULL, tag, 16, &request) == RNC_OK);
+    CHECK(rnc_node_input(n, 1, &request, 1000, 2000 + i * 10u) == RNC_OK);
+    discard(n);
+  }
+  CHECK(rnc_node_interface_ingress(n, 1, &state) == RNC_OK);
+  CHECK(state.pr_burst_active && state.pr_burst_since_ms >= 2000);
+  CHECK(rnc_node_interface_ingress(n, 9, &state) == RNC_STATE);
+  CHECK(rnc_node_interface_ingress(n, 1, NULL) == RNC_INVALID);
+  rnc_node_free(n);
+}
 static void mesh(void) {
   rnc_identity ids[4];
   rnc_node *nodes[4];
@@ -836,6 +870,8 @@ int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "paths"))
     paths();
+  else if (!strcmp(argv[1], "ingress_state"))
+    ingress_state();
   else if (!strcmp(argv[1], "input_class"))
     input_class();
   else if (!strcmp(argv[1], "routing"))

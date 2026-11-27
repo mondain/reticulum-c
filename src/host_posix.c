@@ -1988,6 +1988,35 @@ static size_t blocked_count(const rnc_host *h, const host_interface *l) {
       ++n;
   return n;
 }
+rnc_result rnc_host_blocked_ip(const rnc_host *h, uint32_t id, size_t index, char *out, size_t size) {
+  size_t i, k;
+  if (!h || !out || !size)
+    return RNC_INVALID;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i) {
+    const host_interface *l = &h->interfaces[i];
+    if (!l->used || l->status.interface_id != id)
+      continue;
+    for (k = 0; l->flap_on && k < HOST_FLAP_SLOTS; ++k)
+      if (l->flaps[k].count > l->flap_grace && !flap_expired(l, &l->flaps[k], h->now) && !index--)
+        return copy_text(out, size, l->flaps[k].ip) ? RNC_OK : RNC_NO_SPACE;
+    return RNC_AGAIN;
+  }
+  return RNC_STATE;
+}
+/* What is worked out when asked rather than kept up to date. */
+static void fill_status(const rnc_host *h, const host_interface *f, rnc_host_status *out) {
+  size_t k;
+  *out = f->status;
+  out->queued_frames = f->queue_count;
+  out->blocked_ips = blocked_count(h, f);
+  out->queued_announces = 0;
+  for (k = 0; k < f->queue_count; ++k)
+    if (f->queue[k].announce)
+      ++out->queued_announces;
+  out->announce_rate_target = f->policy.announce_rate_target;
+  out->announce_rate_grace = f->policy.announce_rate_grace;
+  out->announce_rate_penalty = f->policy.announce_rate_penalty;
+}
 rnc_result rnc_host_get_status(const rnc_host *h, uint32_t id,
                                rnc_host_status *out) {
   size_t i;
@@ -1995,9 +2024,7 @@ rnc_result rnc_host_get_status(const rnc_host *h, uint32_t id,
     return RNC_INVALID;
   for (i = 0; i < RNC_HOST_SLOTS; ++i)
     if (h->interfaces[i].used && h->interfaces[i].status.interface_id == id) {
-      *out = h->interfaces[i].status;
-      out->queued_frames = h->interfaces[i].queue_count;
-      out->blocked_ips = blocked_count(h, &h->interfaces[i]);
+      fill_status(h, &h->interfaces[i], out);
       return RNC_OK;
     }
   return RNC_AGAIN;
@@ -2016,9 +2043,7 @@ rnc_result rnc_host_status_at(const rnc_host *h, size_t index,
       (h->interfaces[index].sam_role == SAM_ACCEPT &&
        !h->interfaces[index].sam_streamed))
     return RNC_AGAIN; /* an I2P acceptor still waiting is not yet a peer */
-  *out = h->interfaces[index].status;
-  out->queued_frames = h->interfaces[index].queue_count;
-  out->blocked_ips = blocked_count(h, &h->interfaces[index]);
+  fill_status(h, &h->interfaces[index], out);
   return RNC_OK;
 }
 rnc_result rnc_host_poll(rnc_host *h, rnc_host_event *out) {
@@ -2181,8 +2206,10 @@ static void count_input(rnc_host *h, host_interface *f, const rnc_packet *p, siz
     return;
   }
   f->status.rx_bytes += wire_size;
-  if (!f->status.local)
+  if (!f->status.local) {
     h->totals.rx_bytes += wire_size;
+    ++h->totals.rx_packets;
+  }
   if (announce) {
     ++f->status.rx_announces;
     f->status.rx_announce_bytes += wire_size;
@@ -3511,8 +3538,10 @@ static rnc_result flush_interface(rnc_host *h, host_interface *f) {
       if (delivered) {
         ++f->status.tx_packets;
         f->status.tx_bytes += q->wire_size;
-        if (!f->status.local)
+        if (!f->status.local) {
           h->totals.tx_bytes += q->wire_size;
+          ++h->totals.tx_packets;
+        }
         if (q->announce) {
           ++f->status.tx_announces;
           f->status.tx_announce_bytes += q->wire_size;

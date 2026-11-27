@@ -239,17 +239,20 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
                             const rnc_host_status *s) {
   uint64_t filtered = 0;
   const rate_sample *rate = rate_update(s);
-  static const char *zeros[] = {"txdrb", "packet_filter_hits", "burst_count", "pr_burst_count"};
-  static const char *nils[] = {"announce_rate_target", "announce_rate_grace",
-                               "announce_rate_penalty", "burst_activated",
-                               "pr_burst_activated"};
+  static const char *zeros[] = {"txdrb", "packet_filter_hits"};
+  static const char *nils[] = {"burst_count", "pr_burst_count"}; /* the reference reports none either */
   size_t i;
   rnc_tunnel_peer peer;
+  rnc_node_ingress_state ingress;
+  uint64_t now = monotonic_ms();
+  int listener = s->kind == RNC_HOST_TCP_LISTEN;
+  if (rnc_node_interface_ingress(node, s->interface_id, &ingress) != RNC_OK)
+    memset(&ingress, 0, sizeof(ingress));
   (void)rnc_node_interface_filtered(node, s->interface_id, &filtered);
   if (rnc_node_interface_tunnel_peer(node, s->interface_id, &peer) != RNC_OK)
     memset(&peer, 0, sizeof(peer));
   (void)rnc_rpc_write_map(w, 25u + 14u + sizeof(zeros) / sizeof(*zeros) +
-                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u + 7u + 4u);
+                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u + 7u + 4u + 5u + 1u + (listener ? 2u : 0u));
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
   key_string(w, "type", kind_name(s));
@@ -276,7 +279,36 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
   key_uint(w, "atxc", s->tx_announces);
   key_uint(w, "txdrp", s->dropped_packets);
   key_uint(w, "txbuffered", s->queued_frames);
-  key_uint(w, "held_announces", 0);
+  key_uint(w, "held_announces", ingress.held_announces);
+  key_uint(w, "announce_queue", s->queued_announces);
+  if (listener) {
+    char ip[64];
+    size_t count = 0, k;
+    while (count < s->blocked_ips && rnc_host_blocked_ip(h, s->interface_id, count, ip, sizeof(ip)) == RNC_OK)
+      ++count;
+    key_uint(w, "blocked_ips", count);
+    (void)rnc_rpc_write_string(w, "blocked_ip_list");
+    (void)rnc_rpc_write_array(w, count);
+    for (k = 0; k < count; ++k)
+      (void)rnc_rpc_write_string(w, rnc_host_blocked_ip(h, s->interface_id, k, ip, sizeof(ip)) == RNC_OK ? ip : "");
+  }
+  if (s->announce_rate_target) {
+    key_uint(w, "announce_rate_target", s->announce_rate_target);
+    key_uint(w, "announce_rate_grace", s->announce_rate_grace);
+    key_uint(w, "announce_rate_penalty", s->announce_rate_penalty);
+  } else {
+    key_nil(w, "announce_rate_target");
+    key_nil(w, "announce_rate_grace");
+    key_nil(w, "announce_rate_penalty");
+  }
+  if (ingress.burst_active)
+    key_real(w, "burst_activated", (double)time(NULL) - (double)(now - ingress.burst_since_ms) / 1000.0);
+  else
+    key_nil(w, "burst_activated");
+  if (ingress.pr_burst_active)
+    key_real(w, "pr_burst_activated", (double)time(NULL) - (double)(now - ingress.pr_burst_since_ms) / 1000.0);
+  else
+    key_nil(w, "pr_burst_activated");
   key_uint(w, "afrxc", filtered); /* announces discarded */
   key_uint(w, "frxb", s->filtered_bytes);
   key_uint(w, "ftxb", 0); /* nothing is filtered on the way out */
@@ -326,8 +358,8 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
   /* this daemon's own: reading from the peer held back by ingress control, and how often that has happened */
   key_bool(w, "ingress_gated", s->ingress_gated);
   key_uint(w, "ingress_throttles", s->ingress_throttles);
-  key_bool(w, "burst_active", 0);
-  key_bool(w, "pr_burst_active", 0);
+  key_bool(w, "burst_active", ingress.burst_active);
+  key_bool(w, "pr_burst_active", ingress.pr_burst_active);
   key_int(w, "gravity", s->gravity);
   key_bool(w, "announces_to_internal", s->announces_to_internal);
   /* what tunnel synthesis said about the other end, under the reference's names */
@@ -372,7 +404,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
 typedef struct total_rates {
   uint64_t at;
   rnc_host_totals last;
-  double rxs, txs, frxs, lrxs, ltxs;
+  double rxs, txs, frxs, lrxs, ltxs, rxpps, txpps;
 } total_rates;
 static const total_rates *total_rate_update(const rnc_host_totals *t) {
   static total_rates r;
@@ -386,6 +418,8 @@ static const total_rates *total_rate_update(const rnc_host_totals *t) {
     r.frxs = (double)(t->filtered_bytes - r.last.filtered_bytes) * 8.0 / dt;
     r.lrxs = (double)(t->link_rx_bytes - r.last.link_rx_bytes) * 8.0 / dt;
     r.ltxs = (double)(t->link_tx_bytes - r.last.link_tx_bytes) * 8.0 / dt;
+    r.rxpps = (double)(t->rx_packets - r.last.rx_packets) / dt;
+    r.txpps = (double)(t->tx_packets - r.last.tx_packets) / dt;
   }
   r.at = now;
   r.last = *t;
@@ -394,13 +428,13 @@ static const total_rates *total_rate_update(const rnc_host_totals *t) {
 static void all_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node, const config *c,
                       const rnc_identity *id, uint64_t uptime) {
   static const char *zeros[] = {
-      "arxf",       "atxf",       "prxf",       "ptxf",       "rxpps",      "txpps",      "rxqt",
+      "rxqt",
       "rxqd",       "rxqa",       "rxqp",       "rxqil",      "rxqtd",
       "rxqdd",      "rxqad",      "rxqpd",      "rxqild",     "tqpressure",
       "dqpressure", "aqpressure", "pqpressure", "ilqpressure"};
   size_t i, count = 0;
   uint64_t arxb = 0, atxb = 0, prxb = 0, ptxb = 0;
-  double arxs = 0, atxs = 0, prxs = 0, ptxs = 0;
+  double arxs = 0, atxs = 0, prxs = 0, ptxs = 0, arxf = 0, atxf = 0, prxf = 0, ptxf = 0;
   rnc_host_status s;
   rnc_host_totals totals = {0};
   const total_rates *rates;
@@ -414,7 +448,7 @@ static void all_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node, cons
     }
   (void)rnc_host_get_totals(h, &totals);
   rates = total_rate_update(&totals);
-  (void)rnc_rpc_write_map(w, 7u + 16u + sizeof(zeros) / sizeof(*zeros) +
+  (void)rnc_rpc_write_map(w, 7u + 22u + sizeof(zeros) / sizeof(*zeros) +
                                  (c->transport ? 4u : 0u));
   (void)rnc_rpc_write_string(w, "interfaces");
   (void)rnc_rpc_write_array(w, count);
@@ -427,6 +461,12 @@ static void all_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node, cons
       atxs += r->atxs;
       prxs += r->prxs;
       ptxs += r->ptxs;
+      if (!s.local) {
+        arxf += r->arxf;
+        atxf += r->atxf;
+        prxf += r->prxf;
+        ptxf += r->ptxf;
+      }
     }
   key_uint(w, "rxb", totals.rx_bytes);
   key_uint(w, "txb", totals.tx_bytes);
@@ -446,6 +486,12 @@ static void all_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node, cons
   key_real(w, "atxs", atxs);
   key_real(w, "prxs", prxs);
   key_real(w, "ptxs", ptxs);
+  key_real(w, "arxf", arxf);
+  key_real(w, "atxf", atxf);
+  key_real(w, "prxf", prxf);
+  key_real(w, "ptxf", ptxf);
+  key_uint(w, "rxpps", (uint64_t)(rates->rxpps + 0.5));
+  key_uint(w, "txpps", (uint64_t)(rates->txpps + 0.5));
   key_uint(w, "arxb", arxb);
   key_uint(w, "atxb", atxb);
   key_nil(w, "rss");

@@ -438,6 +438,14 @@ rnc_result rnc_node_destination_link_cost(const rnc_node *node, const uint8_t de
  * the destination is not local, its cost is 0, or the request's encryption key meets the cost as a stamped key
  * over destination || signature key; RNC_AUTH when it does not; RNC_PROTOCOL when the request is too short. */
 rnc_result rnc_node_check_link_request(const rnc_node *node, const uint8_t destination[16], const rnc_packet *request);
+/* Ingress control as it stands on an interface (the reference's held_announces, ic_burst_active and the path
+ * request equivalents). The since times are on the node's clock, and 0 when there is no burst. */
+typedef struct rnc_node_ingress_state {
+  size_t held_announces;
+  int burst_active, pr_burst_active;
+  uint64_t burst_since_ms, pr_burst_since_ms;
+} rnc_node_ingress_state;
+rnc_result rnc_node_interface_ingress(const rnc_node *node, uint32_t interface_id, rnc_node_ingress_state *state);
 /* Announces discarded on an interface (a missing or insufficient stamp, a blackholed identity, nothing newer
  * than the known path), and path requests discarded for their stamp. */
 rnc_result rnc_node_interface_filtered(const rnc_node *node, uint32_t interface_id, uint64_t *announces);

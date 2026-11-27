@@ -1388,3 +1388,18 @@ already open is not closed.
 | `reticulum_node_process_x_rns` | 3 MiB of output each way with the unmodified `rnx`; 15 MB each way checked by hand, byte for byte one way and whole inside the reference client's output the other |
 | `reticulum_service_slow_response`, `reticulum_service_expiry` | a response arriving past the deadline is delivered; one that stalls times out |
 | `reticulum_node_process_sh_tools` | identities added to, removed from and deleted with the file while the listener runs |
+
+## rnstatus announce, path request and burst figures (`feature/rnstatus-options`)
+
+The daemon now reports `held_announces`, `announce_queue`, `burst_active`, `burst_activated`,
+`pr_burst_active`, `pr_burst_activated`, the configured `announce_rate_*` limits, `blocked_ips` and
+`blocked_ip_list` on listening interfaces, and in the totals `arxf`, `atxf`, `prxf`, `ptxf`, `rxpps` and
+`txpps`; all were fixed zeros or absent. `burst_count` and `pr_burst_count` are nil, as in the reference.
+`reticulum-c-ctl status` takes `-A`, `-P`, `-B`, `-b`, `-p` and `-a`; `-q` and `-z` say that they do not apply.
+
+Library: `rnc_node_interface_ingress`, `rnc_host_blocked_ip`, and new fields in `rnc_host_status` and
+`rnc_host_totals` (the structures grew, so programs using them need a rebuild).
+
+Verified with `reticulum_node_ingress_state`, `reticulum_node_process_status_options` (a flood and repeated
+short connections against a daemon) and `reticulum_node_process_status_options_rns` (the unmodified
+`rnstatus -a -A -P -b -t -p`).
