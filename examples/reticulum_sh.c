@@ -9,14 +9,15 @@
  * initiator asks for, on a pty when the initiator is a terminal and on pipes
  * otherwise, for identities on its allow list. There is no "accept anyone"
  * option. The initiator puts a terminal into raw mode, forwards window size
- * changes and understands the "~." escape after a newline. It attaches to a
- * node over TCP, like reticulum-c-cp. */
+ * changes and takes the rnsh "~" escapes and line-interactive mode from
+ * sh_line.h. It attaches to a node over TCP, like reticulum-c-cp. */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
 #include "msgpack_tree.h"
+#include "sh_line.h"
 #include "tool_stamps.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -913,6 +914,18 @@ static int initiator_pump(app *a, rnc_link *link, const uint8_t link_id[16],
   (void)rnc_link_tick(link, *now);
   return 1;
 }
+/* local echo and messages of the keyboard handling */
+static void show_typed(void *context, const void *data, size_t size) {
+  const char *p = data;
+  (void)context;
+  while (size) {
+    ssize_t n = write(1, p, size);
+    if (n <= 0)
+      break;
+    p += n;
+    size -= (size_t)n;
+  }
+}
 static int run_initiator(rnc_identity *id, app *a, const uint8_t destination[16]) {
   rnc_route route;
   rnc_link *link;
@@ -922,15 +935,17 @@ static int run_initiator(rnc_identity *id, app *a, const uint8_t destination[16]
   int rc = EXIT_FAILED, have_version = 0, running = 0, stdin_eof = 0,
       sent_eof = 0, tty_in = !opt.no_tty && isatty(0), tty_out = !opt.no_tty && isatty(1),
       tty_err = !opt.no_tty && isatty(2),
-      pre_esc = 1, esc = 0, finished = 0;
+      finished = 0;
   uint8_t exec_buf[1024];
-  uint8_t input[1024];
+  uint8_t input[SH_SEND_MAX];
   size_t input_len = 0;
+  sh_keys keys;
   struct termios tio;
   struct winsize ws;
   int have_tio = 0, have_ws = 0;
   double wait = opt.timeout;
   uint64_t deadline;
+  sh_keys_init(&keys);
   if (!await_path(a, destination, wait)) {
     puts("Path not found");
     return EXIT_NO_PATH;
@@ -1069,41 +1084,23 @@ static int run_initiator(rnc_identity *id, app *a, const uint8_t destination[16]
       break;
     }
     if (running) {
-      /* keyboard or piped input, with the ~. escape on a terminal */
+      /* keyboard or piped input; on a terminal the escapes and line-interactive mode apply */
       if (!stdin_eof && input_len == 0) {
-        ssize_t n = read(0, input, sizeof(input) - 1);
+        uint8_t typed[SH_READ_MAX];
+        ssize_t n = read(0, typed, sizeof(typed));
         if (n > 0) {
-          size_t i, out = 0;
-          for (i = 0; i < (size_t)n; i++) {
-            uint8_t c = input[i];
-            if (!tty_in) {
-              input[out++] = c;
-              continue;
-            }
-            if (c == '\r') {
-              pre_esc = 1;
-              input[out++] = c;
-            } else if (pre_esc && c == '~') {
-              pre_esc = 0;
-              esc = 1;
-            } else if (esc) {
-              esc = 0;
-              if (c == '.') {
-                finished = 1;
-                rc = 0;
-              } else {
-                if (c != '~')
-                  input[out++] = '~';
-                input[out++] = c;
-              }
-            } else {
-              pre_esc = 0;
-              input[out++] = c;
-            }
+          if (!tty_in) {
+            memcpy(input, typed, (size_t)n);
+            input_len = (size_t)n;
+          } else if (sh_keys_feed(&keys, typed, (size_t)n, input, &input_len, show_typed, NULL)) {
+            finished = 1;
+            rc = 0;
           }
-          input_len = out;
-        } else if (n == 0)
+        } else if (n == 0) {
+          if (tty_in) /* whatever was still being typed */
+            sh_send_line(&keys, input, &input_len, show_typed, NULL);
           stdin_eof = 1;
+        }
       }
       while (channel_ready(link) && (input_len || (stdin_eof && !sent_eof))) {
         size_t used = 0;

@@ -6464,6 +6464,90 @@ static int sh_run(const char *sh, const char *connect, char *out, size_t size,
   args[n] = NULL;
   return run_cp_input(sh, out, size, args, input);
 }
+/* A command on a terminal that the test types into step by step. */
+typedef struct typist {
+  int master;
+  pid_t pid;
+  size_t used;
+  char seen[16384];
+} typist;
+static void typist_start(typist *t, const char *program, char *const *args) {
+  memset(t, 0, sizeof(*t));
+  t->master = posix_openpt(O_RDWR | O_NOCTTY);
+  CHECK(t->master >= 0 && grantpt(t->master) == 0 && unlockpt(t->master) == 0);
+  t->pid = fork();
+  CHECK(t->pid >= 0);
+  if (!t->pid) {
+    int slave = open(ptsname(t->master), O_RDWR);
+    CHECK(slave >= 0 && setsid() >= 0 && ioctl(slave, TIOCSCTTY, 0) == 0);
+    CHECK(dup2(slave, 0) >= 0 && dup2(slave, 1) >= 0 && dup2(slave, 2) >= 0);
+    close(slave);
+    close(t->master);
+    execv(program, args);
+    _exit(127);
+  }
+}
+/* reads the terminal for up to `ms`, or until `needle` (which may be NULL) has appeared */
+static int typist_watch(typist *t, const char *needle, unsigned ms) {
+  uint64_t end = now_ms() + ms;
+  for (;;) {
+    struct pollfd p = {t->master, POLLIN, 0};
+    if (needle && strstr(t->seen, needle))
+      return 1;
+    if (now_ms() >= end)
+      return 0;
+    if (poll(&p, 1, 50) > 0) {
+      ssize_t got = read(t->master, t->seen + t->used, sizeof(t->seen) - 1 - t->used);
+      if (got <= 0)
+        return needle && strstr(t->seen, needle) != NULL;
+      t->used += (size_t)got;
+      t->seen[t->used] = 0;
+    }
+  }
+}
+static void typist_type(typist *t, const char *keys) {
+  CHECK(write(t->master, keys, strlen(keys)) == (ssize_t)strlen(keys));
+  (void)typist_watch(t, NULL, 700); /* time to cross the link, and for what comes back */
+}
+static int received_is(const char *path, const char *want) {
+  char got[256];
+  size_t n = file_read(path, got, sizeof(got) - 1);
+  got[n] = 0;
+  if (strcmp(got, want))
+    fprintf(stderr, "remote received \"%s\", expected \"%s\"\n", got, want);
+  return !strcmp(got, want);
+}
+/* "~L": keys are shown here and held until Enter. The remote program stores exactly what reaches it. */
+static void line_mode_session(const char *sh, const char *connect, const char *idb, const char *dest, const char *dir) {
+  char file[300], script[600];
+  char *args[] = {(char *)sh, "--connect", (char *)connect, "--identity", (char *)idb, (char *)dest,
+                  "--", "sh", "-c", script, NULL};
+  typist t;
+  int status;
+  CHECK(snprintf(file, sizeof(file), "%s/received", dir) > 0);
+  CHECK(snprintf(script, sizeof(script), "stty raw -echo; echo READY; exec cat > %s", file) > 0);
+  typist_start(&t, sh, args);
+  CHECK(typist_watch(&t, "READY", 20000));
+  typist_type(&t, "\r~?");
+  CHECK(strstr(t.seen, "Supported rnsh escape sequences:") && strstr(t.seen, "~L"));
+  typist_type(&t, "\r~L");
+  CHECK(strstr(t.seen, "Line-interactive mode enabled"));
+  CHECK(received_is(file, "\r\r"));
+  typist_type(&t, "hello");
+  CHECK(strstr(t.seen, "hello") && received_is(file, "\r\r")); /* shown here, not sent */
+  typist_type(&t, "\x7f\x7f");
+  typist_type(&t, "p\r");
+  CHECK(received_is(file, "\r\rhelp\r"));
+  typist_type(&t, "ab\t"); /* completion keys send what there is */
+  CHECK(received_is(file, "\r\rhelp\rab\t"));
+  typist_type(&t, "\r~L");
+  CHECK(strstr(t.seen, "Line-interactive mode disabled"));
+  typist_type(&t, "z");
+  CHECK(received_is(file, "\r\rhelp\rab\t\rz")); /* sent at once again */
+  typist_type(&t, "\r~.");
+  CHECK(reap(t.pid, &status) == t.pid && WIFEXITED(status) && !WEXITSTATUS(status));
+  close(t.master);
+}
 static void sh_tools(const char *exe, const char *sh) {
   char dir[] = "/tmp/rnc-node-sh-XXXXXX", cfg[256], key[256], admin[256],
        idb[300], idc[300], idl[300], connect[64], hash_b[33], hash_c[33],
@@ -6540,6 +6624,7 @@ static void sh_tools(const char *exe, const char *sh) {
     CHECK(run_in_pty(sh, out, sizeof(out), args, "\r~.") == 0);
     CHECK(time(NULL) - t0 < 20);
   }
+  line_mode_session(sh, connect, idb, dest, dir);
   /* a command that ignores HUP and TERM is still stopped when the session ends */
   {
     char pidfile[300], script[600], pidtext[32];
@@ -6697,6 +6782,8 @@ static void sh_reference(const char *exe, const char *sh, const char *python) {
       CHECK(run_in_pty(sh, out, sizeof(out), args, NULL) == 0 &&
             strstr(out, "hi-from-ref-listener"));
     }
+    /* line-interactive mode is the initiator's own: the reference listener sees whole lines */
+    line_mode_session(sh, connect, idl, dest, dir);
     stop_cp(listener, lfd);
   }
   /* the reference initiator, on a terminal, connects to ours */
