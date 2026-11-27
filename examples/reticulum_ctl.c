@@ -675,6 +675,69 @@ static int make_target(conn *c, target *t) {
   fprintf(stderr, "Specify the daemon identity with --identity or --rpc-key\n");
   return 0;
 }
+/* rnid without -R: what the running instance has heard, as a reference client reads it (RPC get
+ * known_destinations). Tried only when there is an RPC key to try with, from --rpc-key, the config file or the
+ * configuration directory; without one the answer is simply "not known". `hash` is a destination hash or an
+ * identity hash. 1: found. */
+static int recall_identity(const char *config, const char *rpc_key, unsigned long port, const uint8_t hash[16],
+                           rnc_identity *id) {
+  static const char request[] = "\x81\xa3get\xb2known_destinations";
+  conn c = {0}, in_file = {0};
+  char dir[1100] = "", file[1200] = "", identity[1200], key[RNC_RPC_KEY_MAX * 2 + 2];
+  struct stat sb;
+  target t;
+  reply r;
+  size_t k;
+  int found = 0;
+  /* the configuration file: --config itself, or the one in the directory named by it or found */
+  if (config && !stat(config, &sb) && !S_ISDIR(sb.st_mode))
+    (void)snprintf(file, sizeof(file), "%s", config);
+  else {
+    if (config)
+      (void)snprintf(dir, sizeof(dir), "%s", config);
+    else if (!default_config_dir(dir, sizeof(dir)))
+      return 0;
+    (void)snprintf(file, sizeof(file), "%s/config", dir);
+  }
+  c.config = file;
+  c.port = port;
+  c.rpc_key = rpc_key;
+  if (!c.rpc_key) {
+    read_config(file, &in_file, key, sizeof(key));
+    c.rpc_key = in_file.rpc_key;
+  }
+  if (!c.rpc_key) { /* the key then derives from the identity the instance keeps in the directory */
+    if (!dir[0])
+      return 0;
+    (void)snprintf(identity, sizeof(identity), "%s/storage/transport_identity", dir);
+    if (access(identity, R_OK))
+      return 0;
+    c.identity = identity;
+  }
+  if (!make_target(&c, &t))
+    return 0;
+  if (!rpc_query(&t, (const uint8_t *)request, sizeof(request) - 1, &r)) {
+    /* no instance, a wrong key, or a table too large for one RPC message (64 KiB) */
+    fprintf(stderr, "Could not read the identities known to the instance\n");
+    return 0;
+  }
+  /* by destination hash first, then by identity hash, as Identity.recall is tried */
+  for (k = 0; r.root.type == V_MAP && !found && k < 2 * r.root.n; ++k) {
+    const size_t i = k % r.root.n;
+    const val *name = &r.root.kids[2 * i], *entry = &r.root.kids[2 * i + 1];
+    rnc_identity candidate;
+    if (entry->type != V_ARR || entry->n < 3 || entry->kids[2].type != V_BIN || entry->kids[2].n != 64 ||
+        rnc_identity_from_public(&candidate, entry->kids[2].p) != RNC_OK)
+      continue;
+    if (k < r.root.n ? name->type == V_BIN && name->n == 16 && !memcmp(name->p, hash, 16)
+                     : !memcmp(candidate.hash, hash, 16)) {
+      *id = candidate;
+      found = 1;
+    }
+  }
+  reply_free(&r);
+  return found;
+}
 /* shared option handling; returns 1 if argv[*i] was consumed */
 static int conn_option(conn *c, int argc, char **argv, int *i) {
   const char *a = argv[*i];
@@ -2952,7 +3015,8 @@ static int cmd_id(int argc, char **argv) {
   char hex[129], out_path[1024];
   const char *import_pub = NULL, *import_prv = NULL, *how = NULL, *sign_message = NULL, *meta_path = NULL,
              *meta_spec = NULL, *announce = NULL, *config_arg = NULL;
-  unsigned long data_port_arg = 0;
+  unsigned long data_port_arg = 0, port_arg = 0;
+  const char *rpc_key_arg = NULL;
   int request = 0, no_cache = 0, fetched = 0;
   double request_timeout = 15; /* Transport.PATH_REQUEST_TIMEOUT */
   uint8_t wanted[16];
@@ -3032,6 +3096,13 @@ static int cmd_id(int argc, char **argv) {
       request_timeout = strtod(argv[i], &end);
       if (*end || !(request_timeout > 0) || request_timeout > 3600)
         return RC_INVALID_ARGS;
+    } else if (!strcmp(a, "--rpc-key")) {
+      if (++i >= argc)
+        return RC_INVALID_ARGS;
+      rpc_key_arg = argv[i];
+    } else if (!strcmp(a, "--port")) {
+      if (++i >= argc || !number(argv[i], 65535, &port_arg) || !port_arg)
+        return RC_INVALID_ARGS;
     } else if (!strcmp(a, "--meta"))
       show_meta = 1;
     else if (!strcmp(a, "--raw"))
@@ -3087,6 +3158,14 @@ static int cmd_id(int argc, char **argv) {
         puts("Could not resolve identity");
         return RC_NO_IDENTITY;
       }
+    } else if ((required || (!validate && !aspects)) &&
+               recall_identity(config_arg, rpc_key_arg, port_arg, wanted, &id)) {
+      fetched = 1;
+      hex_encode(id.hash, 16, hex);
+      if (!memcmp(id.hash, wanted, 16))
+        printf("Recalled Identity <%s>\n", hex);
+      else
+        printf("Recalled Identity <%s> for destination <%s>\n", hex, identity_path);
     } else if (request) {
       target t;
       int got;
@@ -3107,7 +3186,7 @@ static int cmd_id(int argc, char **argv) {
         if (required)
           return RC_NO_IDENTITY;
       }
-    } else if (required) { /* nothing keeps a list of known identities here, so there is nothing to recall */
+    } else if (required) {
       printf("Could not recall Identity for <%s>.\n", identity_path);
       puts("You can query the network for unknown Identities with the -R option.");
       return RC_NO_IDENTITY;
@@ -3274,7 +3353,8 @@ static void usage(void) {
         "       reticulum-c-ctl path [-t] [-m HOPS] [-j] [HASH] [-b] [-B HASH [--duration HOURS] [--reason TEXT]] [-U HASH] [--stamp-value N] [connection options]\n"
         "       reticulum-c-ctl id (-g FILE | -i FILE [-p] [-P] [-x] [-X] [-H ASPECTS]\n"
         "                          [-s FILE --raw] [-V SIG -r FILE --raw] [-e FILE] [-d FILE] [-w OUT] [-f])\n"
-        "       reticulum-c-ctl id -i HASH [-R [-t SECONDS]] [-N] ...   (a destination or identity hash in place of FILE)\n",
+        "       reticulum-c-ctl id -i HASH [-R [-t SECONDS]] [-N] [--rpc-key HEX] [--port N] ...\n"
+        "                          (a destination or identity hash in place of FILE)\n",
         stderr);
 }
 int main(int argc, char **argv) {

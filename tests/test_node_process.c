@@ -3327,10 +3327,11 @@ static int request_announcer(unsigned world, uint8_t fill, const char *aspects, 
   CHECK(write(fd, framed, m) == (ssize_t)m);
   return fd;
 }
+static const char *test_rpc_key = "8f3c2a1d9e4b7c60a5d1f2837b6e49c0d4a8b1e2f3c5d7a9012b3c4d5e6f7081";
 static void rnid_request(const char *exe, const char *ctl) {
   char base[] = "/tmp/rnc-rnidr-XXXXXX", cfg[400], key[400], admin[400], text[1024], identity[33], out[8192],
        data_arg[16], none_arg[16], dest_a[33], dest_b[33], hash_a[33], hash_b[33], pub_a[129], want[512],
-       a_file[400], b_file[400], plain[400], sealed[400], opened[400], sig[420], msg[400], rsm[420], unknown[33];
+       a_file[400], b_file[400], blind[400], plain[400], sealed[400], opened[400], sig[420], msg[400], rsm[420], unknown[33];
   unsigned data = unused_port(), control = unused_port(), world = unused_port();
   rnc_identity a, b;
   uint64_t began;
@@ -3343,6 +3344,7 @@ static void rnid_request(const char *exe, const char *ctl) {
   CHECK(snprintf(a_file, sizeof(a_file), "%s/a.id", base) > 0);
   CHECK(snprintf(b_file, sizeof(b_file), "%s/b.id", base) > 0);
   CHECK(snprintf(plain, sizeof(plain), "%s/plain", base) > 0);
+  CHECK(snprintf(blind, sizeof(blind), "%s/blind", base) > 0);
   CHECK(snprintf(sealed, sizeof(sealed), "%s/sealed.rfe", base) > 0);
   CHECK(snprintf(opened, sizeof(opened), "%s/opened", base) > 0);
   CHECK(snprintf(sig, sizeof(sig), "%s.rsg", plain) > 0);
@@ -3352,10 +3354,14 @@ static void rnid_request(const char *exe, const char *ctl) {
   CHECK(snprintf(none_arg, sizeof(none_arg), "%u", unused_port()) > 0);
   CHECK(snprintf(text, sizeof(text),
                  "[reticulum]\nenable_transport = Yes\nshare_instance = Yes\nshared_instance_type = tcp\n"
-                 "shared_instance_port = %u\ninstance_control_port = %u\n[interfaces]\n[[World]]\n"
-                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
-                 data, control, world) > 0);
+                 "shared_instance_port = %u\ninstance_control_port = %u\nrpc_key = %s\n[interfaces]\n[[World]]\n"
+                 "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n"
+                 "ingress_control = No\n",
+                 data, control, test_rpc_key, world) > 0);
   config_file(cfg, text);
+  /* the same instance for a tool that has no RPC key, so it cannot recall and must ask the network */
+  CHECK(snprintf(text, sizeof(text), "[reticulum]\nshared_instance_type = tcp\nshared_instance_port = %u\n", data) > 0);
+  config_file(blind, text);
   daemon = start(exe, cfg, key, admin, &dfd);
   ready_line(dfd, identity);
   /* a announces some destination (found by destination hash), b its rnid.id one (found by identity hash too) */
@@ -3369,37 +3375,37 @@ static void rnid_request(const char *exe, const char *ctl) {
   file_bytes(b_file, (const char *)b.private_key, 64);
 
   /* without -R a hash is not looked up */
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-p", "--data-port", data_arg, NULL) == 2);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-p", "--config", blind, NULL) == 2);
   CHECK(snprintf(want, sizeof(want), "Could not recall Identity for <%s>.", dest_a) > 0 && strstr(out, want));
   CHECK(strstr(out, "You can query the network for unknown Identities with the -R option."));
   /* by destination hash */
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-p", "--data-port", data_arg, NULL) == 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-p", "--config", blind, NULL) == 0);
   CHECK(snprintf(want, sizeof(want), "Received Identity <%s> for destination <%s> from the network", hash_a, dest_a) > 0);
   CHECK(strstr(out, want) && strstr(out, pub_a) && strstr(out, "Not available"));
   /* by identity hash, which finds the identity's rnid.id destination */
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_b, "--request", "-x", "--data-port", data_arg, NULL) == 0);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_b, "--request", "-x", "--config", blind, NULL) == 0);
   CHECK(snprintf(want, sizeof(want), "Received Identity <%s> for destination <%s> from the network", hash_b, hash_b) > 0);
   CHECK(strstr(out, want) && strstr(out, "Public identity : "));
   /* nobody answers */
   CHECK(snprintf(unknown, sizeof(unknown), "%s", "00112233445566778899aabbccddeeff") > 0);
   began = now_ms();
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", unknown, "-R", "-t", "1.5", "-p", "--data-port", data_arg, NULL) == 2);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", unknown, "-R", "-t", "1.5", "-p", "--config", blind, NULL) == 2);
   CHECK(strstr(out, "Identity request timed out") && now_ms() - began >= 1400 && now_ms() - began < 10000);
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", unknown, "-R", "-t", "0", "-p", NULL) == 250);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", unknown, "-R", "-t", "0", "-p", "--config", blind, NULL) == 250);
   /* -N uses nothing from the network */
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-N", "-R", "-p", "--data-port", data_arg, NULL) == 2);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-N", "-R", "-p", "--config", blind, NULL) == 2);
   CHECK(strstr(out, "Could not resolve identity") && !strstr(out, "Received Identity"));
   /* no instance to ask */
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-p", "--data-port", none_arg, NULL) == 254);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-p", "--config", blind, "--data-port", none_arg, NULL) == 254);
   CHECK(strstr(out, "could not reach the shared instance"));
   /* encrypt to a fetched identity; only its owner can open it */
   file_bytes(plain, "for a only\n", 11);
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-e", plain, "-w", sealed, "--data-port", data_arg,
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-e", plain, "-w", sealed, "--config", blind,
                 NULL) == 0);
   CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", a_file, "-d", sealed, "-w", opened, NULL) == 0);
   CHECK(file_contains(opened, "for a only"));
   /* a fetched identity cannot sign */
-  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-s", plain, "--data-port", data_arg, NULL) == 4);
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-s", plain, "--config", blind, NULL) == 4);
   CHECK(access(sig, F_OK));
   /* checking a signature against a hash needs no request */
   CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", a_file, "-s", plain, NULL) == 0);
@@ -3416,6 +3422,65 @@ static void rnid_request(const char *exe, const char *ctl) {
   CHECK(strstr(out, dest_b));
   /* and an identity file still loads as before */
   CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", a_file, "-p", NULL) == 0 && strstr(out, "Loaded Identity"));
+  /* with the instance's RPC key a heard identity is recalled, with or without -R */
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-p", "--config", cfg, NULL) == 0);
+  CHECK(snprintf(want, sizeof(want), "Recalled Identity <%s> for destination <%s>", hash_a, dest_a) > 0);
+  CHECK(strstr(out, want) && strstr(out, pub_a));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-R", "-p", "--config", cfg, NULL) == 0);
+  CHECK(strstr(out, want) && !strstr(out, "Requesting"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", hash_b, "-x", "--config", cfg, NULL) == 0);
+  CHECK(snprintf(want, sizeof(want), "Recalled Identity <%s>\n", hash_b) > 0 && strstr(out, want));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", unknown, "-p", "--config", cfg, NULL) == 2);
+  CHECK(strstr(out, "Could not recall Identity"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-N", "-p", "--config", cfg, NULL) == 2);
+  CHECK(strstr(out, "Could not resolve identity"));
+  /* a configuration directory that only has the key in its config file */
+  {
+    char only[400], file[500];
+    CHECK(snprintf(only, sizeof(only), "%s/keyonly", base) > 0 && !mkdir(only, 0700));
+    CHECK(snprintf(file, sizeof(file), "%s/config", only) > 0);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nshared_instance_type = tcp\nshared_instance_port = %u\ninstance_control_port = %u\n"
+                   "rpc_key = %s\n", data, control, test_rpc_key) > 0);
+    config_file(file, text);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-p", "--config", only, NULL) == 0);
+    CHECK(strstr(out, "Recalled Identity"));
+    /* a wrong key is said to have failed rather than passing for an unknown identity */
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", dest_a, "-p", "--config", only, "--rpc-key", "00ff", NULL) == 2);
+    CHECK(strstr(out, "Could not read the identities known to the instance") && strstr(out, "Could not recall"));
+  }
+  /* many identities with long application data: the reply must still fit one RPC message */
+  {
+    char first[33], last[33];
+    uint8_t app[300];
+    unsigned i, random = 5;
+    memset(app, 'x', sizeof(app));
+    for (i = 0; i < 220; ++i) {
+      uint8_t seed[64], name_hash[10], dest[16], raw[RNC_MAX_MTU], framed[RNC_HOST_FRAME_MAX];
+      rnc_identity id;
+      rnc_packet packet;
+      size_t k, n, m;
+      for (k = 0; k < 64; ++k)
+        seed[k] = (uint8_t)(i * 7u + k * 5u + (k == 3 ? i >> 3 : 1));
+      CHECK(rnc_identity_from_private(&id, seed) == RNC_OK);
+      CHECK(rnc_destination_hash("example.request.many", &id, name_hash, dest) == RNC_OK);
+      CHECK(rnc_announce_create(&id, "example.request.many", app, sizeof(app), (uint64_t)time(NULL), rng, &random,
+                                &packet) == RNC_OK);
+      CHECK(rnc_packet_encode(&packet, raw, sizeof(raw), &n) == RNC_OK &&
+            rnc_host_frame_encode(RNC_HOST_HDLC, 0, raw, n, framed, sizeof(framed), &m) == RNC_OK);
+      CHECK(write(fa, framed, m) == (ssize_t)m);
+      if (!i)
+        hex_of(dest, 16, first);
+      if (i == 219)
+        hex_of(dest, 16, last);
+      live_sleep(5);
+    }
+    live_sleep(1000);
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", first, "-p", "--config", cfg, NULL) == 0);
+    CHECK(strstr(out, "Recalled Identity"));
+    CHECK(ctl_run(ctl, out, sizeof(out), "id", "-i", last, "-p", "--config", cfg, NULL) == 0);
+    CHECK(strstr(out, "Recalled Identity"));
+  }
   close(fa);
   close(fb);
   stop(daemon, dfd);
@@ -3428,13 +3493,12 @@ static int ctl_run(const char *ctl, char *out, size_t size, ...);
 static void rnid_request_reference(const char *exe, const char *ctl, const char *reference, const char *python) {
   char base[] = "/tmp/rnc-rnidq-XXXXXX", rdir[400], cdir[400], rcfg[500], ccfg[500], text[1024], ours[8192],
        data_arg[16], dest_a[33], dest_b[33], dest_c[33], hash_a[33], hash_b[33], hash_c[33], pub_a[129], pub_b[129],
-       want[512], line[2048];
+       want[512], line[2048], theirs[8192], key[400], admin[400], identity[33];
   unsigned data = unused_port(), control = unused_port(), world = unused_port(), which;
-  const char *rpc_key = "8f3c2a1d9e4b7c60a5d1f2837b6e49c0d4a8b1e2f3c5d7a9012b3c4d5e6f7081";
+  const char *rpc_key = test_rpc_key;
   rnc_identity a, b, c;
   live_proc rnsd;
   int fa, fb, fc;
-  (void)exe;
   signal(SIGPIPE, SIG_IGN); /* live_end writes to tools that have already exited */
   CHECK(mkdtemp(base));
   CHECK(snprintf(rdir, sizeof(rdir), "%s/rnsd", base) > 0 && !mkdir(rdir, 0700));
@@ -3470,7 +3534,7 @@ static void rnid_request_reference(const char *exe, const char *ctl, const char 
    * instance that already heard one recalls it from the instance without asking, so it must be new to rnsd.) */
   {
     char *argv[] = {(char *)python, "-m", "RNS.Utilities.rnid", "--config", cdir, "-i", dest_c, "-R", "-p", NULL};
-    char *mine[] = {(char *)ctl, "id", "-i", dest_c, "-R", "-p", "--data-port", data_arg, NULL};
+    char *mine[] = {(char *)ctl, "id", "-i", dest_c, "-R", "-p", "--config", ccfg, NULL};
     live_proc ref_ask, our_ask;
     live_spawn_argv(&ref_ask, reference, argv);
     live_spawn_argv(&our_ask, reference, mine);
@@ -3484,18 +3548,50 @@ static void rnid_request_reference(const char *exe, const char *ctl, const char 
     live_end(&our_ask);
     live_end(&ref_ask);
   }
-  /* ones rnsd already knows, answered from its path table: a by destination hash, then b by identity hash */
-  for (which = 0; which < 2; ++which) {
-    const char *asked = which ? hash_b : dest_a;
-    CHECK(snprintf(want, sizeof(want), "Received Identity <%s> for destination <%s> from the network",
-                   which ? hash_b : hash_a, asked) > 0);
-    CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", asked, "-R", "-p", "--data-port", data_arg, NULL) == 0);
+  /* ones rnsd already knows: both tools recall them from the instance, without asking the network */
+  for (which = 0; which < 2; ++which) { /* a by destination hash, then b by identity hash */
+    char *asked = which ? hash_b : dest_a;
+    char *args[] = {"--config", cdir, "-i", asked, "-p", NULL};
+    if (which)
+      CHECK(snprintf(want, sizeof(want), "Recalled Identity <%s>\n", hash_b) > 0);
+    else
+      CHECK(snprintf(want, sizeof(want), "Recalled Identity <%s> for destination <%s>\n", hash_a, dest_a) > 0);
+    CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", asked, "-p", "--config", ccfg, NULL) == 0);
     CHECK(strstr(ours, want) && strstr(ours, which ? pub_b : pub_a));
+    reference_tool(python, reference, "RNS.Utilities.rnid", args, theirs, sizeof(theirs));
+    CHECK(strstr(theirs, want) && strstr(theirs, which ? pub_b : pub_a));
   }
-  close(fa);
   close(fb);
   close(fc);
   live_end(&rnsd);
+  /* this daemon as the shared instance: the reference's rnid recalls from it */
+  {
+    pid_t daemon;
+    int dfd;
+    char *args[] = {"--config", cdir, "-i", dest_a, "-p", NULL};
+    CHECK(snprintf(key, sizeof(key), "%s/daemon_id", base) > 0);
+    CHECK(snprintf(admin, sizeof(admin), "%s/admin", base) > 0);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nenable_transport = Yes\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                   "shared_instance_port = %u\ninstance_control_port = %u\nrpc_key = %s\n[interfaces]\n[[World]]\n"
+                   "type = TCPServerInterface\nenabled = Yes\nlisten_ip = 127.0.0.1\nlisten_port = %u\n",
+                   data, control, rpc_key, world) > 0);
+    config_file(rcfg, text);
+    daemon = start(exe, rcfg, key, admin, &dfd);
+    ready_line(dfd, identity);
+    close(fa);
+    fa = request_announcer(world, 11, "example.request.a", &a, dest_a);
+    live_sleep(500);
+    CHECK(snprintf(want, sizeof(want), "Recalled Identity <%s> for destination <%s>\n", hash_a, dest_a) > 0);
+    reference_tool(python, reference, "RNS.Utilities.rnid", args, theirs, sizeof(theirs));
+    if (!strstr(theirs, want) || !strstr(theirs, pub_a))
+      fprintf(stderr, "THEIRS:\n%s\n", theirs);
+    CHECK(strstr(theirs, want) && strstr(theirs, pub_a));
+    CHECK(ctl_run(ctl, ours, sizeof(ours), "id", "-i", dest_a, "-p", "--config", ccfg, NULL) == 0);
+    CHECK(strstr(ours, want) && strstr(ours, pub_a));
+    close(fa);
+    stop(daemon, dfd);
+  }
   remove_tree(base);
   puts("rnid identity requests agree with the reference");
 }
