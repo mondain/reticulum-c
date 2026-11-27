@@ -639,6 +639,15 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                 $<TARGET_FILE:reticulum-c-node> cli_tools $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
             set_tests_properties(reticulum_node_process_cli PROPERTIES TIMEOUT 20)
+            # AutoInterface over virtual cables between private network namespaces; skipped where they are not allowed
+            if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+                set(RNC_IN_NAMESPACE "unshare -rn true 2>/dev/null || exit 77; exec unshare -rn sh \"$0\" \"$@\"")
+                add_test(NAME reticulum_node_auto_devices COMMAND sh -c "${RNC_IN_NAMESPACE}"
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/auto_netns.sh $<TARGET_FILE:reticulum-c-node>
+                    $<TARGET_FILE:reticulum-c-ctl>)
+                set_tests_properties(reticulum_node_auto_devices PROPERTIES
+                    LABELS network TIMEOUT 240 SKIP_RETURN_CODE 77)
+            endif()
             set_tests_properties(reticulum_node_process_network reticulum_node_process_shared reticulum_node_process_management
                 reticulum_node_process_sources reticulum_node_process_probe reticulum_node_process_netid reticulum_node_process_disc_announce reticulum_node_process_disc_listen reticulum_node_process_disc_autoconnect reticulum_node_process_logging reticulum_node_process_tunnel_persist reticulum_node_process_stamper reticulum_node_process_stamper_shutdown reticulum_node_process_stamper_requests
                 PROPERTIES LABELS network TIMEOUT 60)
@@ -743,6 +752,15 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
                 set_tests_properties(reticulum_node_process_rnid_request_rns
                     PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
+                if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+                    add_test(NAME reticulum_node_auto_devices_rns COMMAND ${CMAKE_COMMAND} -E env
+                        "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                        sh -c "${RNC_IN_NAMESPACE}" ${CMAKE_CURRENT_SOURCE_DIR}/tests/auto_netns.sh
+                        $<TARGET_FILE:reticulum-c-node> $<TARGET_FILE:reticulum-c-ctl>
+                        ${Python3_EXECUTABLE} "${RNC_REFERENCE_DIR}")
+                    set_tests_properties(reticulum_node_auto_devices_rns PROPERTIES
+                        LABELS "reticulum_interop;network" TIMEOUT 240 SKIP_RETURN_CODE 77)
+                endif()
                 add_test(NAME reticulum_node_process_cp_big_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> cp_big_ref
