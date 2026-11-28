@@ -447,7 +447,7 @@ static void test_channel_figures(void) {
   rnc_channel_read(&c, now, &r);
   CHECK(r.airtime_short >= 760 && r.airtime_short <= 780);  /* 10 of 130 */
   CHECK(r.load_short >= 2290 && r.load_short <= 2320);      /* 30 of 130 */
-  CHECK(r.load_long >= 2290 && r.load_long <= 2320);
+  CHECK(r.load_long >= 7 && r.load_long <= 9); /* over the whole hour, as the hour's airtime: 30 of 36000 */
   CHECK_EQ(r.noise_floor_dbm, -100); /* signals do not raise the floor */
   CHECK(!r.has_interference);
   /* 20 s later those have left the short window but not the hour's */
@@ -455,7 +455,7 @@ static void test_channel_figures(void) {
   rnc_channel_read(&c, now, &r);
   CHECK_EQ(r.airtime_short, 0);
   CHECK_EQ(r.load_short, 0);
-  CHECK(r.load_long > 800 && r.load_long < 1000); /* 30 of 330 */
+  CHECK(r.load_long >= 7 && r.load_long <= 9);
   /* something loud that is not LoRa */
   looks(&c, &now, 5, 0, 0, -70);
   rnc_channel_read(&c, now, &r);
@@ -471,6 +471,19 @@ static void test_channel_figures(void) {
   CHECK_EQ(r.load_long, 0);
 }
 /* the radio sends them to its host once a second while it is on */
+static void test_channel_busy_hour(void) {
+  rnc_channel c;
+  rnc_channel_report r;
+  uint64_t now = 1000000;
+  unsigned i;
+  rnc_channel_init(&c);
+  for (i = 0; i < 60; ++i) { /* an hour, the channel taken for half of every minute */
+    looks(&c, &now, 300, 0, 1, -60);
+    looks(&c, &now, 300, 0, 0, -100);
+  }
+  rnc_channel_read(&c, now - 100u, &r);
+  CHECK(r.load_long >= 4900 && r.load_long <= 5100);
+}
 static void test_channel_reports(void) {
   static duo d;
   uint8_t pkt[300], payload[600], cmd;
@@ -895,6 +908,7 @@ int main(void) {
   test_airtime_locks();
   test_data_path();
   test_channel_figures();
+  test_channel_busy_hour();
   test_channel_reports();
   test_battery_from_voltage();
   test_battery_from_axp2101();

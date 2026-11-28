@@ -216,7 +216,7 @@ status` and `rnstatus` show: once a second its airtime and the channel load (15 
 and any interference; every five seconds its temperature (ESP32-S3 and nRF52 boards) and, on the T-Beam Supreme and
 the T-Echo only, the battery. The figures are this firmware's own: the channel is looked at ten times a second, load
 includes the board's own sending, interference is a level at least 11 dB over the noise floor that is not a LoRa
-signal, and the T-Echo's charge is judged from the cell's voltage, which is rough.
+signal, the hour's load is of the whole hour (what came before the radio was turned on counts as quiet), and the T-Echo's charge is judged from the cell's voltage, which is rough.
 
 Destination stamp (RNS 1.6, all PlatformIO boards in node mode): networks running Reticulum 1.6 can
 refuse announces without a proof of work. A board does not search for it: the stamp depends only on the

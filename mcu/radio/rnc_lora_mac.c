@@ -184,7 +184,12 @@ void rnc_channel_read(const rnc_channel *c, uint64_t now_ms, rnc_channel_report 
     }
   out->airtime_short = hundredths_of(sending, looks);
   out->load_short = hundredths_of(taken, looks);
-  out->load_long = hundredths_of(long_taken, long_looks);
+  /* the hour's load is of the whole hour, so that it compares with the hour's airtime: time not yet watched
+   * counts as quiet */
+  {
+    const uint32_t hour_looks = RNC_CHANNEL_MINUTES * (60000u / RNC_CHANNEL_LOOK_MS);
+    out->load_long = hundredths_of(long_taken, long_looks > hour_looks ? long_looks : hour_looks);
+  }
   out->rssi_dbm = c->rssi_dbm;
   out->have_floor = c->have_floor;
   out->noise_floor_dbm = (int16_t)((c->floor_q8 - 128) / 256);

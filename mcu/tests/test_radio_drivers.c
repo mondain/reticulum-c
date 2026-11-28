@@ -650,6 +650,10 @@ static void test_carrier_and_cad(void) {
     int dbm = 0;
     CHECK_EQ(c.drv.base.ops->rssi(&c.drv.base, &dbm), 0);
     CHECK(dbm <= -100);
+    /* an SX126x with nothing measured yet answers 0xFF (-127 dBm, under the thermal noise): not a reading */
+    c.model.rssi_unready = 1;
+    CHECK(c.drv.base.ops->rssi(&c.drv.base, &dbm) != 0);
+    CHECK_EQ(c.drv.base.ops->rssi(&c.drv.base, &dbm), 0);
   }
   /* A transmits 100 bytes: B and C see the preamble after a few symbols and keep seeing a
    * carrier until the frame ends */

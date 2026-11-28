@@ -58,6 +58,7 @@ typedef struct sx126x_model {
   uint8_t rx_len, rx_start;
   uint8_t rx_rssi_raw;
   int8_t rx_snr_raw;
+  uint8_t rssi_unready; /* this many GetRssiInst answer 0xFF, as a chip with nothing measured yet */
   /* transmission */
   uint64_t tx_end_us, cad_end_us, busy_until_us, last_pre_start, last_hdr_start;
   uint8_t tx_frame_len;
