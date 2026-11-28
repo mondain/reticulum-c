@@ -253,8 +253,8 @@ time        millis(), extended to 64 bits (49-day wrap handled)
 identity    ESP32: Preferences (NVS) namespace "reticulum"
             nRF52: InternalFileSystem (LittleFS in internal flash), files /rnc_identity
             and /rnc_time, replaced atomically (write a .tmp file, then rename)
-clock       no unix_seconds hook: build epoch + uptime + persisted high-water mark, one
-            flash write per boot and per 2 minutes of uptime (../README.md, "Unix time policy")
+clock       no unix_seconds hook: build epoch + uptime + persisted mark, written
+            when the node announces (../README.md, "Unix time policy")
 task        the node runs in its own FreeRTOS task with a 16 KB stack
 free heap   reported by /info (ESP.getFreeHeap, dbgHeapFree)
 ```

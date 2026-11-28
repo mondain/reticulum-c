@@ -21,14 +21,13 @@
  * backwards and is never ahead of real time by more than a few minutes:
  *   1. If the platform's unix_seconds hook returns a non-zero value (RTC, SNTP,
  *      GPS) that value is used (never moving the clock backwards).
- *   2. Otherwise the clock is build-time epoch plus uptime, raised to a persisted
- *      high-water mark. The mark is stored under RNC_MCU_KEY_TIME at boot and then every
- *      RNC_MCU_TIME_PERSIST_S seconds, and on boot the clock starts at the stored
- *      mark plus RNC_MCU_TIME_PERSIST_S + 1, which is at least as late as any
- *      announce sent before the reboot, so paths on the other side keep updating.
+ *   2. Otherwise the clock is build-time epoch plus uptime, raised to a persisted mark.
+ *      The mark (RNC_MCU_KEY_TIME) is stored before an announce of ours leaves, whenever
+ *      the announce is later than the mark, RNC_MCU_TIME_RESERVE_S ahead of it. On boot
+ *      the clock starts one second after the mark: later than anything announced before,
+ *      so paths on the other side keep updating, and no more than that reserve ahead.
  *      The build epoch is RNC_MCU_BUILD_EPOCH (set by the build system, else a
- *      constant) and is in the past, so the clock is normally late; each restart can move
- *      it up to RNC_MCU_TIME_PERSIST_S + 1 seconds ahead of the time that really passed.
+ *      constant) and is in the past, so the clock is normally late.
  *   3. rnc_mcu_app_set_unix lets a port move the clock forward when a host or
  *      user tells it the real time; going backwards is refused.
  */
@@ -50,8 +49,8 @@ extern "C" {
 #ifndef RNC_MCU_BUILD_EPOCH
 #define RNC_MCU_BUILD_EPOCH 1767225600u /* 2026-01-01: used when the build supplies none */
 #endif
-#ifndef RNC_MCU_TIME_PERSIST_S
-#define RNC_MCU_TIME_PERSIST_S 120u
+#ifndef RNC_MCU_TIME_RESERVE_S
+#define RNC_MCU_TIME_RESERVE_S 10u
 #endif
 #ifndef RNC_MCU_LINK_UP_DELAY_MS
 #define RNC_MCU_LINK_UP_DELAY_MS 500u /* announce this long after the transport comes up */

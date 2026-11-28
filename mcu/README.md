@@ -586,22 +586,26 @@ application keeps its own, which never goes backwards and is normally late:
 1. If the platform's unix_seconds hook returns a non-zero value (RTC, SNTP, GPS),
    that value is used. The example firmware has no such hook.
 2. Otherwise: build time (RNC_MCU_BUILD_EPOCH, set by the build at configure time)
-   plus uptime, raised to a high-water mark stored in NVS at every boot and then every
-   120 seconds. After a reboot the clock starts at the stored mark plus 121 seconds,
-   so it is later than any announce sent before the reset and paths on the other side
-   keep updating. Each restart can move the clock up to 121 seconds ahead of the time
-   that really passed; a board restarting over and over soon after it was built could
-   so get ahead of real time, and receivers drop announces more than 300 seconds in
-   the future. (Up to 0.8.0 no mark was stored at boot, and a board restarted within
-   120 seconds could repeat its time.)
+   plus uptime, raised to a mark stored in NVS. The mark is stored just before the
+   board announces itself (on its schedule or in answer to a path request), 10 seconds
+   ahead of that announce, and only when the announce is later than the mark. After a
+   reboot the clock starts one second after the mark, so it is later than any announce
+   sent before and paths on the other side keep updating, while a restart moves it
+   ahead of the time that really passed by 10 seconds at most. (Up to 0.8.0 the mark
+   was stored every 120 seconds of uptime: a board restarted sooner could repeat its
+   time and be ignored. A board updated from 0.8.0 or older may be ignored for up to
+   two minutes of announced time, once.)
 3. rnc_mcu_app_set_unix() moves the clock forward when the host or a user tells
    the device the real time (a port can wire this to a command or a GPS fix).
    
 
-Consequences: the clock is behind real time by (now - build time - uptime) until a
-real source is wired in; this only matters for logs and for peers that compare
-timestamps with their own clock. Rebuild or set the time to bring it up to date.
-Flash writes for the mark: one NVS write per boot and one per 2 minutes of uptime.
+Consequences: until a real source is wired in, the clock is behind real time, by the
+time since the build less the time the board has been running (a restart resumes from
+the last announce, so up to an announce interval of running time is also lost). This
+only matters for logs and for peers that compare timestamps with their own clock.
+Rebuild or set the time to bring it up to date. Flash writes for the mark: one NVS
+write per announce (every 10 minutes by default), and at most one per 10 seconds when
+path requests keep coming.
 
 ## Memory
 
