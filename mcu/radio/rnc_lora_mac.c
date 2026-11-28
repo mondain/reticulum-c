@@ -120,3 +120,74 @@ int rnc_csma_step(rnc_csma *c, uint64_t now_ms, int busy, uint32_t random) {
   }
   return 0;
 }
+
+void rnc_channel_init(rnc_channel *c) { memset(c, 0, sizeof(*c)); }
+
+void rnc_channel_sample(rnc_channel *c, uint64_t now_ms, int sending, int carrier, int rssi_valid, int rssi_dbm) {
+  const uint32_t second = (uint32_t)(now_ms / 1000u), minute = (uint32_t)(now_ms / 60000u);
+  const unsigned s = second % RNC_CHANNEL_SECONDS, m = minute % RNC_CHANNEL_MINUTES;
+  if (c->second[s] != second || !c->looks[s]) {
+    c->second[s] = second;
+    c->looks[s] = c->sending[s] = c->taken[s] = 0;
+  }
+  if (c->minute[m] != minute || !c->minute_looks[m]) {
+    c->minute[m] = minute;
+    c->minute_looks[m] = c->minute_taken[m] = 0;
+  }
+  ++c->looks[s];
+  ++c->minute_looks[m];
+  if (sending)
+    ++c->sending[s];
+  if (sending || carrier) {
+    ++c->taken[s];
+    ++c->minute_taken[m];
+  }
+  if (!rssi_valid || sending)
+    return;
+  c->rssi_dbm = (int16_t)rssi_dbm;
+  if (carrier) { /* a signal being received says nothing about the noise */
+    c->interfered = 0;
+    return;
+  }
+  if (!c->have_floor) {
+    c->floor_q8 = rssi_dbm * 256;
+    c->have_floor = 1;
+  }
+  c->interfered = rssi_dbm * 256 >= c->floor_q8 + RNC_CHANNEL_INTERFERENCE_DB * 256;
+  if (c->interfered) {
+    c->interference_dbm = (int16_t)rssi_dbm;
+    c->floor_q8 += (rssi_dbm * 256 - c->floor_q8) / 256; /* slowly: a louder place is a new floor in time */
+  } else {
+    c->floor_q8 += (rssi_dbm * 256 - c->floor_q8) / 16;
+  }
+}
+
+static uint16_t hundredths_of(uint32_t part, uint32_t whole) {
+  return whole ? (uint16_t)((part * 10000u + whole / 2u) / whole) : 0u;
+}
+
+void rnc_channel_read(const rnc_channel *c, uint64_t now_ms, rnc_channel_report *out) {
+  const uint32_t second = (uint32_t)(now_ms / 1000u), minute = (uint32_t)(now_ms / 60000u);
+  uint32_t looks = 0, sending = 0, taken = 0, long_looks = 0, long_taken = 0;
+  unsigned i;
+  memset(out, 0, sizeof(*out));
+  for (i = 0; i < RNC_CHANNEL_SECONDS; ++i)
+    if (c->looks[i] && second - c->second[i] < RNC_CHANNEL_SECONDS) {
+      looks += c->looks[i];
+      sending += c->sending[i];
+      taken += c->taken[i];
+    }
+  for (i = 0; i < RNC_CHANNEL_MINUTES; ++i)
+    if (c->minute_looks[i] && minute - c->minute[i] < RNC_CHANNEL_MINUTES) {
+      long_looks += c->minute_looks[i];
+      long_taken += c->minute_taken[i];
+    }
+  out->airtime_short = hundredths_of(sending, looks);
+  out->load_short = hundredths_of(taken, looks);
+  out->load_long = hundredths_of(long_taken, long_looks);
+  out->rssi_dbm = c->rssi_dbm;
+  out->have_floor = c->have_floor;
+  out->noise_floor_dbm = (int16_t)((c->floor_q8 - 128) / 256);
+  out->has_interference = c->interfered;
+  out->interference_dbm = c->interference_dbm;
+}

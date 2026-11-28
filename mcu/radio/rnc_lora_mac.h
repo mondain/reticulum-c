@@ -50,6 +50,35 @@ int rnc_airtime_allows(const rnc_airtime *a, uint64_t now_ms, uint32_t toa_ms);
 /* Books a transmission. */
 void rnc_airtime_book(rnc_airtime *a, uint64_t now_ms, uint32_t toa_ms);
 
+/* ---- what the channel has been like, for the reports a host asks of an RNode -------------------------------- */
+#define RNC_CHANNEL_SECONDS 15u
+#define RNC_CHANNEL_MINUTES 60u
+#define RNC_CHANNEL_LOOK_MS 100u        /* how often the owner looks */
+#define RNC_CHANNEL_INTERFERENCE_DB 11  /* this far over the noise floor with no LoRa signal is interference */
+
+typedef struct rnc_channel {
+  uint32_t second[RNC_CHANNEL_SECONDS];
+  uint16_t looks[RNC_CHANNEL_SECONDS], sending[RNC_CHANNEL_SECONDS], taken[RNC_CHANNEL_SECONDS];
+  uint32_t minute[RNC_CHANNEL_MINUTES];
+  uint16_t minute_looks[RNC_CHANNEL_MINUTES], minute_taken[RNC_CHANNEL_MINUTES];
+  int32_t floor_q8; /* the noise floor in 1/256 dB, a running average of quiet looks */
+  int16_t rssi_dbm, interference_dbm;
+  uint8_t have_floor, interfered;
+} rnc_channel;
+
+typedef struct rnc_channel_report {
+  /* hundredths of a percent */
+  uint16_t airtime_short, load_short, load_long;
+  int16_t rssi_dbm, noise_floor_dbm, interference_dbm;
+  uint8_t have_floor, has_interference;
+} rnc_channel_report;
+
+void rnc_channel_init(rnc_channel *c);
+/* One look at the channel: whether we are sending, whether a LoRa signal is being received, and the signal level
+ * when it could be read (`rssi_valid`). */
+void rnc_channel_sample(rnc_channel *c, uint64_t now_ms, int sending, int carrier, int rssi_valid, int rssi_dbm);
+void rnc_channel_read(const rnc_channel *c, uint64_t now_ms, rnc_channel_report *out);
+
 typedef struct rnc_csma {
   uint32_t slot_ms, difs_ms;
   uint8_t state;              /* 0 idle, 1 waiting for DIFS, 2 counting slots */

@@ -15,6 +15,7 @@ void rnc_lora_if_init(rnc_lora_if *li, rnc_modem *modem, const rnc_radio_hal *ha
   li->random_context = random_context;
   li->last_seq = 0xFFu;
   rnc_airtime_init(&li->budget, airtime_hundredths);
+  rnc_channel_init(&li->channel);
 }
 
 int rnc_lora_if_start(rnc_lora_if *li, const rnc_lora_params *params) {
@@ -155,6 +156,13 @@ unsigned rnc_lora_if_step(rnc_lora_if *li, uint64_t now_us) {
       (void)rnc_lora_if_start(li, &li->params);
     }
     return 1000u;
+  }
+  if (now_ms >= li->look_ms) {
+    int dbm = 0, sending = li->state == S_TX;
+    int carrier = !sending && li->modem->ops->carrier(li->modem);
+    int heard = !sending && li->modem->ops->rssi(li->modem, &dbm) == 0;
+    rnc_channel_sample(&li->channel, now_ms, sending, carrier, heard, dbm);
+    li->look_ms = now_ms + RNC_CHANNEL_LOOK_MS;
   }
   if (li->state == S_TX) {
     int r = li->modem->ops->poll_tx(li->modem);

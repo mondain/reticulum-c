@@ -55,6 +55,7 @@ typedef struct rnc_rnode {
   uint32_t default_budget_ms;     /* the budget the owner prepared; restored by _reset */
   uint8_t ready_owed;             /* the queue was full: READY is sent when it has room again */
   uint8_t reset_requested;        /* the host sent RESET (0x55, 0xf8) */
+  uint64_t report_ms;             /* when the next channel report is due */
   /* parser */
   uint8_t in[RNC_RNODE_IN_MAX];
   uint16_t in_len;

@@ -415,6 +415,92 @@ static void test_data_path(void) {
   CHECK(seen_rssi && seen_snr && seen_data);
 }
 
+/* ---- what the radio reports about the channel -------------------------------------- */
+/* `n` looks at the channel, a tenth of a second apart */
+static void looks(rnc_channel *c, uint64_t *now, unsigned n, int transmitting, int carrier, int dbm) {
+  unsigned i;
+  for (i = 0; i < n; ++i, *now += 100u)
+    rnc_channel_sample(c, *now, transmitting, carrier, !transmitting, dbm);
+}
+static void test_channel_figures(void) {
+  rnc_channel c;
+  rnc_channel_report r;
+  uint64_t now = 1000000u;
+  rnc_channel_init(&c);
+  rnc_channel_read(&c, now, &r);
+  CHECK(!r.have_floor && !r.has_interference);
+  CHECK_EQ(r.airtime_short, 0);
+  CHECK_EQ(r.load_short, 0);
+  /* a quiet channel at -100 dBm */
+  looks(&c, &now, 100, 0, 0, -100);
+  rnc_channel_read(&c, now, &r);
+  CHECK(r.have_floor && !r.has_interference);
+  CHECK_EQ(r.noise_floor_dbm, -100);
+  CHECK_EQ(r.rssi_dbm, -100);
+  CHECK_EQ(r.load_short, 0);
+  /* then one second sending and two receiving: 13 s measured, 1 s of it our airtime, 3 s of it with the channel
+   * taken (by others or by us) */
+  looks(&c, &now, 10, 1, 0, 0);
+  looks(&c, &now, 20, 0, 1, -60);
+  rnc_channel_read(&c, now, &r);
+  CHECK(r.airtime_short >= 760 && r.airtime_short <= 780);  /* 10 of 130 */
+  CHECK(r.load_short >= 2290 && r.load_short <= 2320);      /* 30 of 130 */
+  CHECK(r.load_long >= 2290 && r.load_long <= 2320);
+  CHECK_EQ(r.noise_floor_dbm, -100); /* signals do not raise the floor */
+  CHECK(!r.has_interference);
+  /* 20 s later those have left the short window but not the hour's */
+  looks(&c, &now, 200, 0, 0, -100);
+  rnc_channel_read(&c, now, &r);
+  CHECK_EQ(r.airtime_short, 0);
+  CHECK_EQ(r.load_short, 0);
+  CHECK(r.load_long > 800 && r.load_long < 1000); /* 30 of 330 */
+  /* something loud that is not LoRa */
+  looks(&c, &now, 5, 0, 0, -70);
+  rnc_channel_read(&c, now, &r);
+  CHECK(r.has_interference);
+  CHECK_EQ(r.interference_dbm, -70);
+  CHECK(r.noise_floor_dbm <= -97);
+  looks(&c, &now, 5, 0, 0, -100);
+  rnc_channel_read(&c, now, &r);
+  CHECK(!r.has_interference);
+  /* an hour on, nothing is left of it */
+  now += 3600000u;
+  rnc_channel_read(&c, now, &r);
+  CHECK_EQ(r.load_long, 0);
+}
+/* the radio sends them to its host once a second while it is on */
+static void test_channel_reports(void) {
+  static duo d;
+  uint8_t pkt[300], payload[600], cmd;
+  size_t pos = 0, plen;
+  int reports = 0, airtime_short = 0, airtime_long = 0;
+  duo_init(&d);
+  d.host_out_len = 0;
+  duo_run(&d, 2100);
+  fill_pattern(pkt, sizeof(pkt));
+  host_sends_packet(&d, pkt, sizeof(pkt));
+  duo_run(&d, 3000);
+  while (next_frame(d.host_out, d.host_out_len, &pos, &cmd, payload, &plen))
+    if (cmd == 0x25) {
+      CHECK_EQ(plen, 11);
+      if (plen == 11) {
+        ++reports;
+        airtime_short = payload[0] << 8 | payload[1];
+        airtime_long = payload[2] << 8 | payload[3];
+        CHECK(payload[9] > 0 && payload[9] < 157); /* a noise floor below 0 dBm */
+      }
+    }
+  CHECK(reports >= 3 && reports <= 6);
+  CHECK(airtime_short > 0 && airtime_long > 0);
+  /* and none once the radio is off */
+  CHECK(set_u8(&d.f.rn, 6, 0));
+  d.host_out_len = 0;
+  duo_run(&d, 2500);
+  pos = 0;
+  while (next_frame(d.host_out, d.host_out_len, &pos, &cmd, payload, &plen))
+    CHECK(cmd != 0x25);
+}
+
 /* Review Focus 1 */
 static void test_data_before_radio_on(void) {
   static duo d;
@@ -700,6 +786,8 @@ int main(void) {
   test_invalid_values();
   test_airtime_locks();
   test_data_path();
+  test_channel_figures();
+  test_channel_reports();
   test_data_before_radio_on();
   test_reset_drops_everything();
   test_flow_control();

@@ -55,6 +55,8 @@ typedef struct rnc_lora_if {
   void *random_context;
   rnc_lora_params params;
   rnc_airtime budget;
+  rnc_channel channel; /* looked at every RNC_CHANNEL_LOOK_MS while the radio is up */
+  uint64_t look_ms;
   rnc_csma csma;
   rnc_air_rx air;
   rnc_lora_if_stats stats;
