@@ -212,6 +212,14 @@ typedef struct rnc_host_status {
    * percent from the SNR and spreading factor). */
   int has_signal, rssi;
   float snr, quality;
+  /* RNode only: what the radio reports about itself, as the stock RNode firmware does from time to time; nothing is
+   * known until it has. Airtime and channel load are percentages over the last 15 seconds and the last hour. */
+  int has_channel_stats, has_noise_floor, has_interference, has_last_interference, has_temperature;
+  double airtime_short, airtime_long, channel_load_short, channel_load_long;
+  int noise_floor, interference, last_interference; /* dBm */
+  uint64_t last_interference_time;                  /* unix seconds */
+  int temperature;                                  /* degrees Celsius */
+  unsigned battery_state, battery_percent;          /* state: 0 unknown, 1 discharging, 2 charging, 3 charged */
   uint32_t announce_cap_permille;
   int gravity, announces_to_internal; /* the interface's policy, as the management RPC reports it */
   size_t blocked_ips; /* TCP_LISTEN: IPs currently refused for flapping */

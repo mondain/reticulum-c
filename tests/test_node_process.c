@@ -3676,6 +3676,121 @@ static void ctl_rnsd(const char *ctl, const char *reference, const char *python)
   remove_tree(base);
   puts("ctl works with a reference rnsd");
 }
+/* What an RNode reports about itself reaches rnstatus: a pretend radio on a pseudo terminal, this port's status
+ * tool and, when given, the reference's rnstatus against the same daemon. */
+static void radio_say(int master, uint8_t command, const uint8_t *data, size_t size) {
+  uint8_t wire[64];
+  size_t m;
+  CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, command, data, size, wire, sizeof(wire), &m) == RNC_OK);
+  CHECK(write(master, wire, m) == (ssize_t)m);
+}
+/* answers detection and configuration as the stock firmware does, then reports statistics until it is stopped */
+static void radio_run(int master) {
+  rnc_host_framer framer = {0};
+  int on = 0;
+  uint64_t next = 0;
+  for (;;) {
+    struct pollfd p = {master, POLLIN, 0};
+    uint8_t in[256], frame[RNC_MAX_FRAME + 1u], command;
+    ssize_t got = 0, i;
+    size_t n;
+    if (poll(&p, 1, 50) > 0)
+      got = read(master, in, sizeof(in));
+    for (i = 0; i < got; ++i) {
+      if (rnc_host_frame_feed(&framer, RNC_HOST_KISS_FRAMING, in[i], &command, frame, sizeof(frame), &n) != RNC_OK)
+        continue;
+      if (command == 0x08) {
+        const uint8_t yes = 0x46;
+        radio_say(master, 0x08, &yes, 1);
+      } else if (command == 0x50) {
+        const uint8_t version[2] = {1, 74};
+        radio_say(master, 0x50, version, 2);
+      } else if (command == 0x48 || command == 0x49) {
+        const uint8_t kind = command == 0x48 ? 0x80 : 0x81;
+        radio_say(master, command, &kind, 1);
+      } else if (command >= 1 && command <= 6) {
+        radio_say(master, command, frame, n);
+        if (command == 6)
+          on = 1;
+      }
+    }
+    if (on && now_ms() >= next) {
+      /* airtime 1.92 % and 0.45 %, channel load 50 % and 2.5 %, noise floor -97 dBm, no interference */
+      const uint8_t chtm[11] = {0x00, 0xc0, 0x00, 45, 0x13, 0x88, 0x00, 250, 100, 60, 0xff};
+      const uint8_t battery[2] = {1, 87}, temperature = 161;
+      radio_say(master, 0x25, chtm, sizeof(chtm));
+      radio_say(master, 0x27, battery, sizeof(battery));
+      radio_say(master, 0x29, &temperature, 1);
+      next = now_ms() + 300;
+    }
+  }
+}
+static void radio_status(const char *exe, const char *ctl, const char *reference, const char *python) {
+  static const char *const lines[] = {"    Noise Fl. : -97 dBm, no interference", "    CPU temp  : 41",
+                                      "    Battery   : 87% (discharging)", "    Airtime   : 1.92% (15s), 0.45% (1h)",
+                                      "    Ch. Load  : 50.0% (15s), 2.5% (1h)"};
+  char base[] = "/tmp/rnc-radio-XXXXXX", cfg[400], key[400], admin[400], text[1200], identity[33], out[8192],
+       theirs[8192], rdir[400], rcfg[500];
+  unsigned data = unused_port(), control = unused_port(), i, tries;
+  int master = posix_openpt(O_RDWR | O_NOCTTY), dfd, shown = 0;
+  pid_t radio, daemon;
+  CHECK(mkdtemp(base) && master >= 0 && !grantpt(master) && !unlockpt(master));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", base) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", base) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", base) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nshare_instance = Yes\nshared_instance_type = tcp\nshared_instance_port = %u\n"
+                 "instance_control_port = %u\nrpc_key = %s\n[interfaces]\n[[Radio]]\ntype = RNodeInterface\n"
+                 "port = %s\nfrequency = 915000000\nbandwidth = 125000\ntxpower = 2\nspreadingfactor = 8\n"
+                 "codingrate = 5\n",
+                 data, control, test_rpc_key, ptsname(master)) > 0);
+  config_file(cfg, text);
+  radio = fork();
+  CHECK(radio >= 0);
+  if (!radio) {
+    radio_run(master);
+    _exit(0);
+  }
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  for (tries = 0; tries < 100 && !shown; ++tries) {
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "--config", cfg, NULL) == 0);
+    shown = strstr(out, "Battery") != NULL;
+    if (!shown)
+      live_sleep(100);
+  }
+  for (i = 0; i < sizeof(lines) / sizeof(*lines); ++i)
+    if (!strstr(out, lines[i])) {
+      fprintf(stderr, "missing \"%s\" in:\n%s\n", lines[i], out);
+      CHECK(0);
+    }
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-j", "--config", cfg, NULL) == 0);
+  CHECK(strstr(out, "\"airtime_short\"") && strstr(out, "\"channel_load_long\"") && strstr(out, "\"noise_floor\"") &&
+        strstr(out, "\"interference\"") && strstr(out, "\"cpu_temp\"") && strstr(out, "\"battery_percent\"") &&
+        strstr(out, "\"signal_quality\""));
+  if (reference) {
+    char *args[] = {"--config", rdir, NULL};
+    CHECK(snprintf(rdir, sizeof(rdir), "%s/client", base) > 0 && !mkdir(rdir, 0700));
+    CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nshare_instance = Yes\nshared_instance_type = tcp\nshared_instance_port = %u\n"
+                   "instance_control_port = %u\nrpc_key = %s\n[interfaces]\n",
+                   data, control, test_rpc_key) > 0);
+    config_file(rcfg, text);
+    reference_tool(python, reference, "RNS.Utilities.rnstatus", args, theirs, sizeof(theirs));
+    for (i = 0; i < sizeof(lines) / sizeof(*lines); ++i)
+      if (!strstr(theirs, lines[i])) {
+        fprintf(stderr, "the reference lacks \"%s\" in:\n%s\n", lines[i], theirs);
+        CHECK(0);
+      }
+  }
+  stop(daemon, dfd);
+  (void)kill(radio, SIGKILL);
+  CHECK(waitpid(radio, NULL, 0) == radio);
+  close(master);
+  remove_tree(base);
+  puts("radio statistics are shown");
+}
 static void write_identity(const char *path, uint8_t fill, char hash[33]);
 /* Metadata for signed messages, with a spec: nested sections, quoting, comments, lists, a trailing comma, an empty
  * value, defaults (including None and a list), and a section only the spec has. */
@@ -8288,6 +8403,10 @@ int main(int argc, char **argv) {
     ctl_rnsd(argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "backbone_device") && argc == 3)
     backbone_device(argv[1]);
+  else if (!strcmp(argv[2], "radio_status") && argc == 4)
+    radio_status(argv[1], argv[3], NULL, NULL);
+  else if (!strcmp(argv[2], "radio_status_ref") && argc == 6)
+    radio_status(argv[1], argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "rnid_request") && argc == 4)
     rnid_request(argv[1], argv[3]);
   else if (!strcmp(argv[2], "rnid_request_ref") && argc == 6)

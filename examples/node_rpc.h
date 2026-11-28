@@ -235,6 +235,45 @@ static const rate_sample *rate_update(const rnc_host_status *s) {
   }
   return r;
 }
+/* What an RNode says about itself, under the reference's names and as Reticulum.get_interface_stats gives them:
+ * always there for an RNode (None until reported), except the battery's state and the last interference. */
+static size_t radio_pairs(const rnc_host_status *s) {
+  if (s->kind != RNC_HOST_RNODE)
+    return 0;
+  return 9u + (s->battery_state ? 1u : 0u) + (s->has_last_interference ? 2u : 0u);
+}
+static void write_radio(rnc_rpc_writer *w, const rnc_host_status *s) {
+  static const char *states[] = {"unknown", "discharging", "charging", "charged"};
+  if (s->kind != RNC_HOST_RNODE)
+    return;
+  if (s->has_signal)
+    key_real(w, "signal_quality", (double)s->quality);
+  else
+    key_nil(w, "signal_quality");
+  key_real(w, "airtime_short", s->airtime_short);
+  key_real(w, "airtime_long", s->airtime_long);
+  key_real(w, "channel_load_short", s->channel_load_short);
+  key_real(w, "channel_load_long", s->channel_load_long);
+  if (s->has_noise_floor)
+    key_int(w, "noise_floor", s->noise_floor);
+  else
+    key_nil(w, "noise_floor");
+  if (s->has_interference)
+    key_int(w, "interference", s->interference);
+  else
+    key_nil(w, "interference");
+  if (s->has_last_interference) {
+    key_real(w, "interference_last_ts", (double)s->last_interference_time);
+    key_int(w, "interference_last_dbm", s->last_interference);
+  }
+  if (s->has_temperature)
+    key_int(w, "cpu_temp", s->temperature);
+  else
+    key_nil(w, "cpu_temp");
+  if (s->battery_state)
+    key_string(w, "battery_state", states[s->battery_state & 3u]);
+  key_uint(w, "battery_percent", s->battery_percent);
+}
 static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node,
                             const rnc_host_status *s) {
   uint64_t filtered = 0;
@@ -252,7 +291,8 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
   if (rnc_node_interface_tunnel_peer(node, s->interface_id, &peer) != RNC_OK)
     memset(&peer, 0, sizeof(peer));
   (void)rnc_rpc_write_map(w, 25u + 14u + sizeof(zeros) / sizeof(*zeros) +
-                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u + 7u + 4u + 5u + 1u + (listener ? 2u : 0u));
+                                 sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u + 7u + 4u + 5u + 1u + (listener ? 2u : 0u) +
+                                 radio_pairs(s));
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
   key_string(w, "type", kind_name(s));
@@ -354,6 +394,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
     key_nil(w, "snr");
     key_nil(w, "q");
   }
+  write_radio(w, s);
   key_bool(w, "txstalled", s->tx_stalled);
   /* this daemon's own: reading from the peer held back by ingress control, and how often that has happened */
   key_bool(w, "ingress_gated", s->ingress_gated);
