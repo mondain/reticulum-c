@@ -7356,6 +7356,92 @@ static void i2p_daemon(const char *exe, const char *fake) {
   puts("node I2P interface tests passed");
 }
 
+static void expect_text(const char *text, const char *want, const char *who) {
+  if (!strstr(text, want)) {
+    fprintf(stderr, "%s lacks \"%s\":\n%s\n", who, want, text);
+    CHECK(0);
+  }
+}
+/* What an I2P interface reports: a connectable node (A, router given in the config) and one that dials it (B,
+ * router given by I2P_SAM_ADDRESS), both through the fake SAM router. */
+static void i2p_status(const char *exe, const char *fake, const char *ctl, const char *reference, const char *python) {
+  char dir[] = "/tmp/rnc-i2p-status-XXXXXX", acfg[300], bcfg[300], akey[300], bkey[300], aadmin[300], badmin[300],
+       astate[300], keydir[320], path[600], hex[65], text[1500], id[33], log[300], value[64], out[8192], bout[8192],
+       want[200], rdir[300], rcfg[320];
+  uint8_t name_hash[32], once[32];
+  unsigned port, adata = unused_port(), acontrol = unused_port(), bdata = unused_port(), bcontrol = unused_port(), tries;
+  int afd, bfd;
+  pid_t router, a, b;
+  FILE *f;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(acfg, sizeof(acfg), "%s/a.config", dir) > 0 && snprintf(bcfg, sizeof(bcfg), "%s/b.config", dir) > 0);
+  CHECK(snprintf(akey, sizeof(akey), "%s/a.identity", dir) > 0 && snprintf(bkey, sizeof(bkey), "%s/b.identity", dir) > 0);
+  CHECK(snprintf(aadmin, sizeof(aadmin), "%s/a.admin", dir) > 0 && snprintf(badmin, sizeof(badmin), "%s/b.admin", dir) > 0);
+  CHECK(snprintf(astate, sizeof(astate), "%s/a.state", dir) > 0);
+  CHECK(snprintf(keydir, sizeof(keydir), "%s.i2p", astate) > 0 && snprintf(log, sizeof(log), "%s/sam.log", dir) > 0);
+  router = start_fake_sam(fake, log, &port);
+  SHA256((const unsigned char *)"I2P", 3, name_hash);
+  SHA256(name_hash, 32, once);
+  hex_of(once, 32, hex);
+  CHECK(mkdir(keydir, 0700) == 0 && snprintf(path, sizeof(path), "%s/%s.i2p", keydir, hex) > 0);
+  f = fopen(path, "w");
+  CHECK(f && fputs(V0_PRIV, f) >= 0 && !fclose(f));
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\nrpc_key = %s\n[interfaces]\n[[I2P]]\n"
+                 "type = I2PInterface\ntarget_host = 127.0.0.1\ntarget_port = %u\nconnectable = yes\n",
+                 adata, acontrol, test_rpc_key, port) > 0);
+  config_file(acfg, text);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nenable_transport = No\nshare_instance = Yes\nshared_instance_type = tcp\n"
+                 "shared_instance_port = %u\ninstance_control_port = %u\nrpc_key = %s\n[interfaces]\n[[I2P]]\n"
+                 "type = I2PInterface\npeers = %s.b32.i2p\n",
+                 bdata, bcontrol, test_rpc_key, V0_B32) > 0);
+  config_file(bcfg, text);
+  a = start_with_state(exe, acfg, akey, aadmin, astate, &afd);
+  ready_line(afd, id);
+  CHECK(snprintf(value, sizeof(value), "127.0.0.1:%u", port) > 0 && !setenv("I2P_SAM_ADDRESS", value, 1));
+  b = start(exe, bcfg, bkey, badmin, &bfd);
+  ready_line(bfd, id);
+  CHECK(!unsetenv("I2P_SAM_ADDRESS"));
+  for (tries = 0; tries < 200; ++tries) {
+    CHECK(ctl_run(ctl, out, sizeof(out), "status", "--config", acfg, NULL) == 0);
+    CHECK(ctl_run(ctl, bout, sizeof(bout), "status", "--config", bcfg, NULL) == 0);
+    if (strstr(out, "Tunnel Active") && strstr(bout, "Tunnel Active"))
+      break;
+    live_sleep(100);
+  }
+  CHECK(snprintf(want, sizeof(want), "    I2P B32   : %s.b32.i2p", V0_B32) > 0);
+  expect_text(out, want, "the connectable node");
+  expect_text(out, "    Peers     : 1 connected I2P endpoint\n", "the connectable node");
+  expect_text(out, "    I2P       : Tunnel Active", "the connectable node");
+  expect_text(bout, "    I2P       : Tunnel Active", "the dialling node");
+  CHECK(!strstr(bout, "I2P B32") && !strstr(bout, "connected I2P"));
+  CHECK(ctl_run(ctl, out, sizeof(out), "status", "-j", "--config", acfg, NULL) == 0);
+  expect_text(out, "\"i2p_connectable\": true", "the connectable node's JSON");
+  CHECK(strstr(out, "\"i2p_b32\"") && strstr(out, "\"tunnelstate\""));
+  if (reference) {
+    char *args[] = {"--config", rdir, "-a", NULL};
+    CHECK(snprintf(rdir, sizeof(rdir), "%s/client", dir) > 0 && !mkdir(rdir, 0700));
+    CHECK(snprintf(rcfg, sizeof(rcfg), "%s/config", rdir) > 0);
+    CHECK(snprintf(text, sizeof(text),
+                   "[reticulum]\nshare_instance = Yes\nshared_instance_type = tcp\nshared_instance_port = %u\n"
+                   "instance_control_port = %u\nrpc_key = %s\n[interfaces]\n",
+                   adata, acontrol, test_rpc_key) > 0);
+    config_file(rcfg, text);
+    reference_tool(python, reference, "RNS.Utilities.rnstatus", args, out, sizeof(out));
+    CHECK(snprintf(want, sizeof(want), "    I2P B32   : %s.b32.i2p", V0_B32) > 0);
+    expect_text(out, want, "the reference");
+    expect_text(out, "    I2P       : Tunnel Active", "the reference");
+  }
+  stop(b, bfd);
+  stop(a, afd);
+  kill(router, SIGKILL);
+  reap(router, NULL);
+  remove_tree(dir);
+  puts("node I2P status tests passed");
+}
+
 static void make_dirs(const char *path) {
   char part[400];
   size_t i;
@@ -8403,6 +8489,10 @@ int main(int argc, char **argv) {
     ctl_rnsd(argv[3], argv[4], argv[5]);
   else if (!strcmp(argv[2], "backbone_device") && argc == 3)
     backbone_device(argv[1]);
+  else if (!strcmp(argv[2], "i2p_status") && argc == 5)
+    i2p_status(argv[1], argv[3], argv[4], NULL, NULL);
+  else if (!strcmp(argv[2], "i2p_status_ref") && argc == 7)
+    i2p_status(argv[1], argv[3], argv[4], argv[5], argv[6]);
   else if (!strcmp(argv[2], "radio_status") && argc == 4)
     radio_status(argv[1], argv[3], NULL, NULL);
   else if (!strcmp(argv[2], "radio_status_ref") && argc == 6)

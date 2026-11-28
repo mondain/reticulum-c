@@ -227,6 +227,11 @@ typedef struct rnc_host_status {
   /* the configured per destination announce rate limit (seconds, violations); target 0: none */
   uint32_t announce_rate_target, announce_rate_grace, announce_rate_penalty;
   char i2p_b32[56];   /* I2P: this node's b32 address, without ".b32.i2p" */
+  int i2p_connectable; /* I2P: others may connect in */
+  int i2p_accepted;    /* an I2P stream: opened from outside, not dialled by us */
+  /* an I2P stream, as the reference's tunnel state: 1 being created, 2 active, 3 unresponsive (nothing heard for
+   * 20 seconds). 0: not an I2P stream. */
+  unsigned i2p_tunnel_state;
 } rnc_host_status;
 typedef struct rnc_host rnc_host;
 typedef enum rnc_host_event_type {

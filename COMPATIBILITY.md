@@ -788,9 +788,9 @@ Not tested against a real WiFi RNode.
 ## I2P interface (`feature/i2p`)
 
 `I2PInterface` (host kind `RNC_HOST_I2P`) talks to a local I2P router through its
-SAM v3 bridge (127.0.0.1:7656 unless `target_host` and `target_port` say
-otherwise; the reference takes that from an environment variable, which is not
-read here). It keeps one session open, creates it from a stored destination key
+SAM v3 bridge. `target_host` and `target_port` say where it is; with neither set
+it is `I2P_SAM_ADDRESS` (`host:port`, the environment variable the reference
+reads) or else 127.0.0.1:7656. It keeps one session open, creates it from a stored destination key
 (or has the router generate one and writes it with owner-only access), and then:
 
 - `peers`: a comma separated list of `<52 chars>.b32.i2p` names, bare 52
@@ -809,6 +809,14 @@ read here). It keeps one session open, creates it from a stored destination key
   it exists. A file that is not an I2P key is reported and never overwritten.
 - If the router goes away, every stream goes with the session; the session is
   rebuilt on the same key when the router is back and the peers are redialled.
+
+Status: each stream reports the reference's tunnel state ("Creating Tunnel",
+"Tunnel Active", or "Tunnel Unresponsive" after 20 s without a byte), and the
+interface whether it is connectable, its b32 address if so, and how many streams
+from outside are up. `reticulum-c-ctl status` shows all of these. The
+reference's `rnstatus` shows the tunnel state and b32 address; its other I2P
+wording (connected endpoints, hiding a dial-only interface) depends on
+interface names of the form `I2PInterface[...]`, which this daemon does not use.
 
 Evidence: unit tests for the I2P base64 alphabet, destination and b32 handling
 against values the reference's i2plib produced, and SAM reply parsing; a fake

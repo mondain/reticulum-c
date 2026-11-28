@@ -512,6 +512,115 @@ static void bad_key(void) {
   puts("i2p bad key test passed");
 }
 
+/* The first child of `parent` that dials out (accepted 0) or was accepted from outside (1). */
+static int stream_status(side *s, uint32_t parent, int accepted, rnc_host_status *out) {
+  size_t i;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i)
+    if (rnc_host_status_at(s->host, i, out) == RNC_OK && out->parent_id == parent && out->i2p_accepted == accepted &&
+        (!accepted || out->online))
+      return 1;
+  return 0;
+}
+
+/* The tunnel states the reference reports, and whether others can connect in. */
+static void tunnel_state(void) {
+  side a, b;
+  side *all[2] = {&a, &b};
+  side *only_b[1] = {&b};
+  rnc_host_config c;
+  rnc_host_status st;
+  uint16_t port;
+  pid_t router = start_router(0, &port);
+  char ak[300], bk[300], name[80];
+  const char *list[1];
+  uint64_t now = 100;
+  online_ctx ca = {&a, 1, 1}, cb = {&b, 2, 1};
+  unsigned i;
+  key_path_for("ta", ak, sizeof(ak));
+  key_path_for("tb", bk, sizeof(bk));
+  side_new(&a, 1);
+  side_new(&b, 2);
+  i2p_config(&c, port, ak, NULL, 0, 1);
+  CHECK(rnc_host_add(a.host, 1, &c) == RNC_OK);
+  until(all, 2, &now, 500, is_online, &ca);
+  CHECK(rnc_host_get_status(a.host, 1, &st) == RNC_OK);
+  CHECK(st.i2p_connectable == 1 && st.i2p_tunnel_state == 0);
+  snprintf(name, sizeof(name), "%s.b32.i2p", st.i2p_b32);
+  /* a peer nobody answers for stays at "creating" */
+  list[0] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p";
+  i2p_config(&c, port, bk, list, 1, 0);
+  CHECK(rnc_host_add(b.host, 3, &c) == RNC_OK);
+  run(all, 2, &now, 200);
+  CHECK(stream_status(&b, 3, 0, &st) && !st.online && st.i2p_tunnel_state == 1);
+  CHECK(rnc_host_remove(b.host, 3) == RNC_OK);
+  list[0] = name;
+  i2p_config(&c, port, bk, list, 1, 0);
+  CHECK(rnc_host_add(b.host, 2, &c) == RNC_OK);
+  until(all, 2, &now, 1000, is_child_online, &cb);
+  run(all, 2, &now, 200);
+  CHECK(rnc_host_get_status(b.host, 2, &st) == RNC_OK && st.i2p_connectable == 0 && st.i2p_tunnel_state == 0);
+  CHECK(stream_status(&b, 2, 0, &st) && st.i2p_tunnel_state == 2 && !st.i2p_accepted);
+  CHECK(stream_status(&a, 1, 1, &st) && st.i2p_tunnel_state == 2);
+  /* A goes quiet: after 20 s without a byte B calls the tunnel unresponsive, and keeps the stream. B's last read
+   * was up to one keepalive interval (10 s) before A went quiet, so that is 10 to 20 s from now */
+  for (i = 1; i <= 30; ++i) {
+    now += 1000;
+    run(only_b, 1, &now, 1);
+    CHECK(stream_status(&b, 2, 0, &st) && st.online);
+    if (st.i2p_tunnel_state != 2)
+      break;
+  }
+  CHECK(st.i2p_tunnel_state == 3 && i >= 9 && i <= 21);
+  /* A is back: its keepalives make the tunnel active again */
+  for (i = 0; i < 15; ++i) {
+    now += 1000;
+    run(all, 2, &now, 3);
+  }
+  CHECK(stream_status(&b, 2, 0, &st) && st.i2p_tunnel_state == 2);
+  side_free(&b);
+  side_free(&a);
+  stop_router(router);
+  puts("i2p tunnel state test passed");
+}
+
+/* Without target_host or target_port the router is found as the reference finds it: I2P_SAM_ADDRESS. */
+static void sam_env(void) {
+  side a;
+  side *all[1] = {&a};
+  rnc_host_config c;
+  rnc_host_status st;
+  uint16_t port;
+  pid_t router = start_router(0, &port);
+  char path[300], value[64];
+  uint64_t now = 100;
+  online_ctx ca = {&a, 1, 1};
+  key_path_for("env", path, sizeof(path));
+  side_new(&a, 1);
+  snprintf(value, sizeof(value), "127.0.0.1:%u", (unsigned)port);
+  CHECK(!setenv("I2P_SAM_ADDRESS", value, 1));
+  i2p_config(&c, 0, path, NULL, 0, 0);
+  c.address = "";
+  CHECK(rnc_host_add(a.host, 1, &c) == RNC_OK);
+  until(all, 1, &now, 500, is_online, &ca);
+  CHECK(rnc_host_get_status(a.host, 1, &st) == RNC_OK && st.online);
+  CHECK(rnc_host_remove(a.host, 1) == RNC_OK);
+  /* a value that is not host:port is refused, as the reference fails on it */
+  CHECK(!setenv("I2P_SAM_ADDRESS", "nonsense", 1));
+  CHECK(rnc_host_add(a.host, 2, &c) == RNC_INVALID);
+  CHECK(!setenv("I2P_SAM_ADDRESS", "127.0.0.1:99999", 1));
+  CHECK(rnc_host_add(a.host, 2, &c) == RNC_INVALID);
+  /* a configured address wins over the environment */
+  CHECK(!setenv("I2P_SAM_ADDRESS", "127.0.0.1:1", 1));
+  i2p_config(&c, port, path, NULL, 0, 0);
+  CHECK(rnc_host_add(a.host, 1, &c) == RNC_OK);
+  until(all, 1, &now, 500, is_online, &ca);
+  CHECK(rnc_host_get_status(a.host, 1, &st) == RNC_OK && st.online);
+  CHECK(!unsetenv("I2P_SAM_ADDRESS"));
+  side_free(&a);
+  stop_router(router);
+  puts("i2p SAM address test passed");
+}
+
 /* No data at all for the reference's read timeout drops the stream; the
  * keepalive that arrives in time prevents it. */
 static void keepalive(void) {
@@ -585,6 +694,10 @@ int main(int argc, char **argv) {
     router_restart();
   else if (!strcmp(argv[2], "bad_key"))
     bad_key();
+  else if (!strcmp(argv[2], "tunnel_state"))
+    tunnel_state();
+  else if (!strcmp(argv[2], "sam_env"))
+    sam_env();
   else if (!strcmp(argv[2], "keepalive"))
     keepalive();
   else

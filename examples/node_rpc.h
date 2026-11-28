@@ -274,6 +274,33 @@ static void write_radio(rnc_rpc_writer *w, const rnc_host_status *s) {
     key_string(w, "battery_state", states[s->battery_state & 3u]);
   key_uint(w, "battery_percent", s->battery_percent);
 }
+/* The reference's I2P keys: the interface says whether it can be reached and where, each stream its tunnel state. */
+static size_t i2p_pairs(const rnc_host_status *s) {
+  return (s->kind == RNC_HOST_I2P ? 2u : 0u) + (s->i2p_tunnel_state ? 1u : 0u);
+}
+static void write_i2p(rnc_rpc_writer *w, const rnc_host_status *s) {
+  static const char *states[] = {"Creating Tunnel", "Tunnel Active", "Tunnel Unresponsive"};
+  if (s->kind == RNC_HOST_I2P) {
+    char name[sizeof(s->i2p_b32) + 8];
+    key_bool(w, "i2p_connectable", s->i2p_connectable);
+    if (s->i2p_connectable && s->i2p_b32[0]) {
+      (void)snprintf(name, sizeof(name), "%s.b32.i2p", s->i2p_b32);
+      key_string(w, "i2p_b32", name);
+    } else
+      key_nil(w, "i2p_b32");
+  }
+  if (s->i2p_tunnel_state)
+    key_string(w, "tunnelstate", states[(s->i2p_tunnel_state - 1u) % 3u]);
+}
+/* Streams from outside that are up: the reference's client count of an I2P interface. */
+static size_t i2p_endpoints(rnc_host *h, uint32_t parent) {
+  size_t i, count = 0;
+  rnc_host_status s;
+  for (i = 0; i < RNC_HOST_SLOTS; ++i)
+    if (rnc_host_status_at(h, i, &s) == RNC_OK && s.parent_id == parent && s.i2p_accepted && s.online)
+      ++count;
+  return count;
+}
 static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node,
                             const rnc_host_status *s) {
   uint64_t filtered = 0;
@@ -292,7 +319,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
     memset(&peer, 0, sizeof(peer));
   (void)rnc_rpc_write_map(w, 25u + 14u + sizeof(zeros) / sizeof(*zeros) +
                                  sizeof(nils) / sizeof(*nils) + 4u + 3u + 2u + 1u + 7u + 4u + 5u + 1u + (listener ? 2u : 0u) +
-                                 radio_pairs(s));
+                                 radio_pairs(s) + i2p_pairs(s));
   key_string(w, "name", s->name);
   key_string(w, "short_name", s->name);
   key_string(w, "type", kind_name(s));
@@ -305,6 +332,8 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
   key_uint(w, "mtu", s->mtu);
   if (s->kind == RNC_HOST_TCP_LISTEN)
     key_uint(w, "clients", peer_count(h, s->interface_id));
+  else if (s->kind == RNC_HOST_I2P && s->i2p_connectable)
+    key_uint(w, "clients", i2p_endpoints(h, s->interface_id));
   else
     key_nil(w, "clients");
   if (s->kind == RNC_HOST_AUTO && !s->parent_id)
@@ -395,6 +424,7 @@ static void interface_stats(rnc_rpc_writer *w, rnc_host *h, const rnc_node *node
     key_nil(w, "q");
   }
   write_radio(w, s);
+  write_i2p(w, s);
   key_bool(w, "txstalled", s->tx_stalled);
   /* this daemon's own: reading from the peer held back by ingress control, and how often that has happened */
   key_bool(w, "ingress_gated", s->ingress_gated);
