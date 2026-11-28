@@ -30,6 +30,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <termios.h>
 #include <unistd.h>
 #define CHECK(x)                                                               \
   do {                                                                         \
@@ -6471,6 +6472,16 @@ static int run_cp_input(const char *cp, char *out, size_t size, char *const *arg
   CHECK(reap(p, &status) == p && WIFEXITED(status));
   return WEXITSTATUS(status);
 }
+/* Waits until the program has put its terminal into raw mode. Typed before that, Enter arrives as a newline instead
+ * of a carriage return (and "~" escapes are not recognised); how long the program takes depends on the machine. */
+static void type_when_raw(int master) {
+  uint64_t deadline = now_ms() + 60000u;
+  struct termios t;
+  while (tcgetattr(master, &t) == 0 && (t.c_lflag & ICANON) && now_ms() < deadline) {
+    struct timespec nap = {0, 20000000};
+    nanosleep(&nap, NULL);
+  }
+}
 /* Runs a command with a real terminal on stdin, stdout and stderr and returns
  * what it wrote to the terminal. */
 static int run_in_pty(const char *cp, char *out, size_t size, char *const *args,
@@ -6478,7 +6489,7 @@ static int run_in_pty(const char *cp, char *out, size_t size, char *const *args,
   int master = posix_openpt(O_RDWR | O_NOCTTY), status = 0;
   size_t n = 0;
   pid_t p;
-  unsigned tries;
+  uint64_t deadline;
   int reaped = 0;
   CHECK(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
   p = fork();
@@ -6495,21 +6506,28 @@ static int run_in_pty(const char *cp, char *out, size_t size, char *const *args,
     _exit(127);
   }
   if (typed && *typed) {
-    struct timespec t = {1, 0};
-    nanosleep(&t, NULL); /* let the client reach raw mode */
+    type_when_raw(master);
     CHECK(write(master, typed, strlen(typed)) == (ssize_t)strlen(typed));
   }
-  for (tries = 0; tries < 900 && !reaped; ++tries) {
+  /* by the clock: once the program has closed the terminal every poll returns at once, so counting polls would
+   * give up in a moment on a program that is still exiting */
+  deadline = now_ms() + 90000u;
+  while (!reaped && now_ms() < deadline) {
     struct pollfd pf = {master, POLLIN, 0};
     int r = poll(&pf, 1, 100);
+    ssize_t got = 0;
     CHECK(r >= 0);
     if (r > 0) {
-      ssize_t got = read(master, out + n, size - 1 - n);
+      got = read(master, out + n, size - 1 - n);
       if (got > 0)
         n += (size_t)got;
     }
     if (waitpid(p, &status, WNOHANG) == p)
       reaped = 1;
+    else if (r > 0 && got <= 0) { /* the terminal is closed: wait for the exit without spinning */
+      struct timespec nap = {0, 10000000};
+      nanosleep(&nap, NULL);
+    }
   }
   CHECK(reaped);
   /* anything the client wrote just before exiting */
@@ -6635,6 +6653,9 @@ static void sh_tools(const char *exe, const char *sh) {
   unsigned port = unused_port();
   int dfd, lfd;
   pid_t daemon, listener;
+  /* no announce stamps here (tool_stamps tests them): searching for one can take longer, on a loaded machine,
+   * than an initiator waits for the listener to be heard */
+  CHECK(!setenv("RNC_STAMP_VALUE", "0", 1));
   CHECK(mkdtemp(dir));
   CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
   CHECK(snprintf(key, sizeof(key), "%s/daemon_id", dir) > 0);
@@ -6713,9 +6734,18 @@ static void sh_tools(const char *exe, const char *sh) {
     pid_t victim;
     CHECK(snprintf(pidfile, sizeof(pidfile), "%s/victim.pid", dir) > 0);
     CHECK(snprintf(script, sizeof(script),
-                   "echo $$ > %s; trap '' HUP TERM; while :; do sleep 1; done",
+                   "echo $$ > %s; trap '' HUP TERM; echo STARTED; while :; do sleep 1; done",
                    pidfile) > 0);
-    CHECK(run_in_pty(sh, out, sizeof(out), args, "\r~.") == 0);
+    { /* leave only once the command is running */
+      typist t;
+      int status;
+      typist_start(&t, sh, args);
+      CHECK(typist_watch(&t, "STARTED", 60000));
+      type_when_raw(t.master);
+      typist_type(&t, "\r~.");
+      CHECK(reap(t.pid, &status) == t.pid && WIFEXITED(status) && !WEXITSTATUS(status));
+      close(t.master);
+    }
     CHECK(file_read(pidfile, pidtext, sizeof(pidtext) - 1) > 0);
     victim = (pid_t)atoi(pidtext);
     CHECK(victim > 1);
@@ -8167,7 +8197,19 @@ static void status_options(const char *exe, const char *ctl, const char *referen
   puts(reference ? "unmodified RNS rnstatus shows the daemon's ingress state" : "status options passed");
 }
 
+/* A failed check leaves by exit(). Whatever the test started must go with it: a daemon left behind holds the
+ * output pipe open, and ctest then reports a timeout instead of the check that failed. */
+static pid_t test_process;
+static void stop_everything_started(void) {
+  if (getpid() != test_process) /* a child of the test that left by exit() */
+    return;
+  (void)signal(SIGTERM, SIG_IGN);
+  (void)kill(0, SIGTERM); /* the process group this test made for itself */
+}
 int main(int argc, char **argv) {
+  test_process = getpid();
+  if (!setpgid(0, 0) || getpgrp() == test_process)
+    CHECK(!atexit(stop_everything_started));
   CHECK(argc >= 3 && argc <= 9);
   if (!strcmp(argv[2], "i2p") && argc == 4)
     i2p_daemon(argv[1], argv[3]);
