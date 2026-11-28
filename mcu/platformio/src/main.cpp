@@ -21,6 +21,9 @@
 // LoRa the only interface (Serial is then free for status text); gateway keeps the serial
 // or Wi-Fi interface and adds LoRa with Reticulum transport on.
 #include <Arduino.h>
+#if defined(ARDUINO_ARCH_ESP32) && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+#include <hal/usb_serial_jtag_ll.h>
+#endif
 #include <string.h>
 
 #include "ble_mode.h"
@@ -216,9 +219,31 @@ static int lora_start(const rnc_mcu_cfg *cfg) {
 }
 
 // ----------------------------------------------------------- transport -------
-static size_t transport_write(void *, const uint8_t *data, size_t size) {
-  return Serial.write(data, size);
+// Writes to the host. On the ESP32-S3's built-in USB Serial/JTAG port the core's driver (arduino-esp32 2.0.17,
+// HWCDC) moves queued bytes into the 64 byte hardware buffer without looking at how many it accepted, so whatever
+// does not fit is lost: packets reached the host with pieces missing. Hand it less than a buffer at a time and wait
+// until the host has taken that before the next piece.
+#if defined(ARDUINO_ARCH_ESP32) && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+#define HOST_PIECE 63u
+static size_t host_write(const uint8_t *data, size_t size) {
+  size_t done = 0;
+  while (done < size) {
+    const size_t piece = size - done < HOST_PIECE ? size - done : HOST_PIECE;
+    const size_t sent = Serial.write(data + done, piece);
+    Serial.flush(); // out of the driver's queue and into the hardware buffer
+    const uint32_t began = millis();
+    while (!usb_serial_jtag_ll_txfifo_writable() && millis() - began < 100u) // until the host has read it
+      delay(1);
+    done += sent;
+    if (sent < piece)
+      break;
+  }
+  return done;
 }
+#else
+static size_t host_write(const uint8_t *data, size_t size) { return Serial.write(data, size); }
+#endif
+static size_t transport_write(void *, const uint8_t *data, size_t size) { return host_write(data, size); }
 static size_t transport_read(void *, uint8_t *buffer, size_t capacity) {
   size_t n = 0;
   while (n < capacity && Serial.available() > 0) {
@@ -275,7 +300,7 @@ static int usb_read(void *, uint8_t *buffer, size_t capacity) {
   }
   return (int)n;
 }
-static int usb_write(void *, const uint8_t *data, size_t size) { return (int)Serial.write(data, size); }
+static int usb_write(void *, const uint8_t *data, size_t size) { return (int)host_write(data, size); }
 static const rnc_rnode_io g_usb_io = {usb_read, usb_write, NULL};
 
 static void rnode_task(void *) {
