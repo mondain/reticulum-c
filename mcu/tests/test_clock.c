@@ -16,6 +16,8 @@
 typedef struct fake {
   uint8_t identity[64], time[8];
   int has_identity, has_time;
+  int time_fails;     /* this many writes of the time mark fail */
+  unsigned time_writes;
   uint64_t real_unix; /* 0 = no clock */
   unsigned seed;
 } fake;
@@ -51,6 +53,11 @@ static int f_persist(void *c, const char *k, const void *d, size_t n) {
     memcpy(f->identity, d, n);
     f->has_identity = 1;
   } else if (!strcmp(k, RNC_MCU_KEY_TIME) && n == 8) {
+    if (f->time_fails) {
+      --f->time_fails;
+      return -1;
+    }
+    ++f->time_writes;
     memcpy(f->time, d, n);
     f->has_time = 1;
   } else
@@ -84,6 +91,46 @@ static rnc_mcu_platform platform(fake *f, int with_clock) {
   return p;
 }
 
+static uint64_t mark(const fake *f) {
+  uint64_t v = 0;
+  unsigned i;
+  for (i = 0; i < 8; i++)
+    v = (v << 8) | f->time[i];
+  return v;
+}
+
+/* Boards restarted before the first periodic mark must not come back with the same time: peers ignore an announce
+ * that is not newer than the one they hold. */
+static void short_runs(void) {
+  fake f;
+  rnc_mcu_platform p;
+  rnc_mcu_app *app;
+  uint64_t last = 0;
+  unsigned boot;
+  memset(&f, 0, sizeof(f));
+  f.seed = 11;
+  p = platform(&f, 0);
+  for (boot = 0; boot < 4; ++boot) {
+    app = rnc_mcu_app_new(&p, NULL);
+    CHECK(app);
+    CHECK(rnc_mcu_app_unix(app, 0) > last);
+    rnc_mcu_app_step(app, 1000);
+    /* the latest time this run can have announced, just short of the next periodic mark */
+    last = rnc_mcu_app_unix(app, (boot % 2u ? 5u : RNC_MCU_TIME_PERSIST_S - 1u) * 1000u);
+    rnc_mcu_app_free(app);
+  }
+  CHECK(f.time_writes == 4); /* one write a boot */
+
+  /* a write that fails at boot is tried again at the next step */
+  f.time_fails = 1;
+  app = rnc_mcu_app_new(&p, NULL);
+  CHECK(app);
+  CHECK(f.time_writes == 4);
+  rnc_mcu_app_step(app, 1000);
+  CHECK(f.time_writes == 5);
+  rnc_mcu_app_free(app);
+}
+
 int main(void) {
   fake f;
   rnc_mcu_platform p;
@@ -101,12 +148,12 @@ int main(void) {
   CHECK(rnc_mcu_app_destination(app, d1) == 0);
   CHECK(rnc_mcu_app_unix(app, 0) == (uint64_t)RNC_MCU_BUILD_EPOCH);
   CHECK(rnc_mcu_app_unix(app, 5000) == (uint64_t)RNC_MCU_BUILD_EPOCH + 5);
-  /* the mark is stored once RNC_MCU_TIME_PERSIST_S seconds passed */
-  CHECK(!f.has_time);
+  /* the mark is stored at boot and again each time RNC_MCU_TIME_PERSIST_S seconds passed */
+  CHECK(f.has_time && mark(&f) == (uint64_t)RNC_MCU_BUILD_EPOCH);
   rnc_mcu_app_step(app, 1000);
-  CHECK(!f.has_time);
+  CHECK(mark(&f) == (uint64_t)RNC_MCU_BUILD_EPOCH);
   rnc_mcu_app_step(app, (RNC_MCU_TIME_PERSIST_S + 1u) * 1000u);
-  CHECK(f.has_time);
+  CHECK(mark(&f) > (uint64_t)RNC_MCU_BUILD_EPOCH);
   last_announced = rnc_mcu_app_unix(app, (RNC_MCU_TIME_PERSIST_S + 1u) * 1000u + 119000u);
   /* going backwards is refused, forwards accepted */
   CHECK(rnc_mcu_app_set_unix(app, 200000, last_announced - 10) == -1);
@@ -123,6 +170,8 @@ int main(void) {
   CHECK(rnc_mcu_app_destination(app, d2) == 0 && !memcmp(d1, d2, 16));
   CHECK(rnc_mcu_app_unix(app, 0) > (uint64_t)RNC_MCU_BUILD_EPOCH + RNC_MCU_TIME_PERSIST_S);
   rnc_mcu_app_free(app);
+
+  short_runs();
 
   /* a real clock wins, and is never moved back by the estimate */
   f.real_unix = UINT64_C(1900000000);

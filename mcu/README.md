@@ -581,18 +581,19 @@ every 5 to 20 ms (more often at higher baud rates; the example UART buffer is 2 
 Announces carry a unix timestamp. A receiving node drops an announce more than 300
 seconds in the future, and the reference stack ignores an announce that is not newer
 than the one behind its stored path. Boards usually have no clock, so the
-application keeps its own, which never goes backwards and is only ever late:
+application keeps its own, which never goes backwards and is normally late:
 
 1. If the platform's unix_seconds hook returns a non-zero value (RTC, SNTP, GPS),
    that value is used. The example firmware has no such hook.
 2. Otherwise: build time (RNC_MCU_BUILD_EPOCH, set by the build at configure time)
-   plus uptime, raised to a high-water mark stored in NVS every 120 seconds. After
-   a reboot the clock starts at the stored mark plus 121 seconds, so, if the previous
-   run lasted at least 120 seconds, it is later than any announce sent before the
-   reset and paths on the other side keep updating. No mark is stored at boot: after a
-   run shorter than 120 seconds the clock can start where that run did, and a node
-   that remembers the board ignores its announces until the clock has passed the
-   last one it heard. It is never ahead of real time by more than about two minutes.
+   plus uptime, raised to a high-water mark stored in NVS at every boot and then every
+   120 seconds. After a reboot the clock starts at the stored mark plus 121 seconds,
+   so it is later than any announce sent before the reset and paths on the other side
+   keep updating. Each restart can move the clock up to 121 seconds ahead of the time
+   that really passed; a board restarting over and over soon after it was built could
+   so get ahead of real time, and receivers drop announces more than 300 seconds in
+   the future. (Up to 0.8.0 no mark was stored at boot, and a board restarted within
+   120 seconds could repeat its time.)
 3. rnc_mcu_app_set_unix() moves the clock forward when the host or a user tells
    the device the real time (a port can wire this to a command or a GPS fix).
    
@@ -600,7 +601,7 @@ application keeps its own, which never goes backwards and is only ever late:
 Consequences: the clock is behind real time by (now - build time - uptime) until a
 real source is wired in; this only matters for logs and for peers that compare
 timestamps with their own clock. Rebuild or set the time to bring it up to date.
-Flash writes for the mark: one NVS write per 2 minutes of uptime.
+Flash writes for the mark: one NVS write per boot and one per 2 minutes of uptime.
 
 ## Memory
 

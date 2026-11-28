@@ -126,7 +126,11 @@ static void clock_init(rnc_mcu_app *app, uint64_t now_ms) {
   }
   app->base = start - now_ms / 1000u;
   app->last_unix = start;
-  app->last_persist_unix = start;
+  /* The mark is stored at boot too, not only every RNC_MCU_TIME_PERSIST_S seconds: without it a run shorter than
+   * that leaves no trace, and the next one starts at the same time again. `last_persist_unix` a period back makes
+   * the write due now, and keeps it due if it fails. One flash write a boot; none with a real clock. */
+  app->last_persist_unix = start - RNC_MCU_TIME_PERSIST_S;
+  persist_time(app, start);
 }
 
 /* ---- request handlers ----------------------------------------------------- */

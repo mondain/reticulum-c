@@ -22,12 +22,13 @@
  *   1. If the platform's unix_seconds hook returns a non-zero value (RTC, SNTP,
  *      GPS) that value is used (never moving the clock backwards).
  *   2. Otherwise the clock is build-time epoch plus uptime, raised to a persisted
- *      high-water mark. The mark is stored under RNC_MCU_KEY_TIME every
+ *      high-water mark. The mark is stored under RNC_MCU_KEY_TIME at boot and then every
  *      RNC_MCU_TIME_PERSIST_S seconds, and on boot the clock starts at the stored
  *      mark plus RNC_MCU_TIME_PERSIST_S + 1, which is at least as late as any
  *      announce sent before the reboot, so paths on the other side keep updating.
  *      The build epoch is RNC_MCU_BUILD_EPOCH (set by the build system, else a
- *      constant) and is always in the past, so the clock is only ever late.
+ *      constant) and is in the past, so the clock is normally late; each restart can move
+ *      it up to RNC_MCU_TIME_PERSIST_S + 1 seconds ahead of the time that really passed.
  *   3. rnc_mcu_app_set_unix lets a port move the clock forward when a host or
  *      user tells it the real time; going backwards is refused.
  */
