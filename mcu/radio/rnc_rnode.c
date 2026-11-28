@@ -19,6 +19,11 @@
 #define CMD_READY 0x0Fu
 #define CMD_STAT_RSSI 0x23u
 #define CMD_STAT_SNR 0x24u
+#define CMD_STAT_CHTM 0x25u
+#define CHTM_PERIOD_MS 1000u
+#define CMD_STAT_BAT 0x27u
+#define CMD_STAT_TEMP 0x29u
+#define SENSOR_PERIOD_MS 5000u
 #define CMD_FREQUENCY 0x01u
 #define CMD_BANDWIDTH 0x02u
 #define CMD_TXPOWER 0x03u
@@ -140,6 +145,61 @@ static void apply_airtime(rnc_rnode *rn) {
     v = l;
   if (v)
     rnc_airtime_set_limit(&rn->li->budget, v);
+}
+
+/* RSSI and noise as the protocol sends them: dBm plus 157, in a byte */
+static uint8_t level_byte(int dbm) {
+  const int v = dbm + 157;
+  return (uint8_t)(v < 0 ? 0 : v > 254 ? 254 : v);
+}
+
+/* Once a second while the radio is on: airtime and channel load over the last 15 seconds and the last hour, the
+ * signal level, the noise floor and any interference (255: none), as the stock firmware's CHTM report. */
+static void report_channel(rnc_rnode *rn, uint64_t now_ms) {
+  rnc_channel_report r;
+  uint32_t hour;
+  uint8_t v[11];
+  if (!rnc_rnode_radio_on(rn) || now_ms < rn->report_ms)
+    return;
+  rn->report_ms = now_ms + CHTM_PERIOD_MS;
+  rnc_channel_read(&rn->li->channel, now_ms, &r);
+  if (!r.have_floor)
+    return;
+  /* our airtime over the hour is what the budget has booked: exact, where the rest is sampled */
+  hour = (uint32_t)(((uint64_t)rnc_airtime_used(&rn->li->budget, now_ms) * 10000u + RNC_AIRTIME_WINDOW_MS / 2u) /
+                    RNC_AIRTIME_WINDOW_MS);
+  v[0] = (uint8_t)(r.airtime_short >> 8);
+  v[1] = (uint8_t)r.airtime_short;
+  v[2] = (uint8_t)(hour >> 8);
+  v[3] = (uint8_t)hour;
+  v[4] = (uint8_t)(r.load_short >> 8);
+  v[5] = (uint8_t)r.load_short;
+  v[6] = (uint8_t)(r.load_long >> 8);
+  v[7] = (uint8_t)r.load_long;
+  v[8] = level_byte(r.rssi_dbm);
+  v[9] = level_byte(r.noise_floor_dbm);
+  v[10] = r.has_interference ? level_byte(r.interference_dbm) : 0xffu;
+  put_frame(rn, CMD_STAT_CHTM, v, sizeof(v));
+}
+
+void rnc_rnode_set_sensors(rnc_rnode *rn, const rnc_rnode_sensors *sensors) { rn->sensors = sensors; }
+
+/* Every few seconds while the radio is on: the battery's state and charge, and the temperature offset by 120. */
+static void report_sensors(rnc_rnode *rn, uint64_t now_ms) {
+  const rnc_rnode_sensors *s = rn->sensors;
+  unsigned state = 0, percent = 0;
+  int celsius = 0;
+  if (!s || !rnc_rnode_radio_on(rn) || now_ms < rn->sensor_ms)
+    return;
+  rn->sensor_ms = now_ms + SENSOR_PERIOD_MS;
+  if (s->battery && s->battery(s->context, &state, &percent) == 0 && state <= 3u && percent <= 100u) {
+    const uint8_t v[2] = {(uint8_t)state, (uint8_t)percent};
+    put_frame(rn, CMD_STAT_BAT, v, sizeof(v));
+  }
+  if (s->temperature && s->temperature(s->context, &celsius) == 0 && celsius >= -30 && celsius <= 90) {
+    const uint8_t v = (uint8_t)(celsius + 120);
+    put_frame(rn, CMD_STAT_TEMP, &v, 1);
+  }
 }
 
 static void send_ready(rnc_rnode *rn) {
@@ -359,6 +419,8 @@ unsigned rnc_rnode_step(rnc_rnode *rn, uint64_t now_us) {
     rn->ready_owed = 0;
     send_ready(rn); /* a slot is free: sent, stale, failed or wiped */
   }
+  report_channel(rn, now_us / 1000u);
+  report_sensors(rn, now_us / 1000u);
   /* a received packet goes to the host with its signal figures; it waits in the interface
    * until the host side has room for the worst case (every byte escaped) */
   if (RNC_RNODE_OUT_MAX - rn->out_len >= 2u * RNC_AIR_PACKET_MAX + 16u) {

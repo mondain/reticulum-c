@@ -346,6 +346,11 @@ static void rnode_prepare(const rnc_mcu_cfg *cfg) {
   // without a usable radio the board still answers DETECT but can never turn the radio on
   rnc_rnode_init(&g_rnode, li, RNC_RNODE_PLATFORM, RNC_RNODE_MCU, RNC_RNODE_BOARD_ID);
   rnc_rnode_set_limits(&g_rnode, sf_min, txp_max);
+  static const rnc_board *s_board = board;
+  static const rnc_rnode_sensors sensors = {
+      [](void *, int *celsius) { return rnc_board_temperature(celsius); },
+      [](void *, unsigned *state, unsigned *percent) { return rnc_board_battery(s_board, state, percent); }, NULL};
+  rnc_rnode_set_sensors(&g_rnode, &sensors);
   (void)rnc_ble_start(cfg); // Bluetooth only when a PIN is set
 }
 

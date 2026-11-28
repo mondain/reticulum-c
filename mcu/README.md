@@ -211,6 +211,13 @@ active: 1 percent of every hour by default; the host may change it with the airt
 commands, within 0.01 to 100 percent, and the smaller of the short and long lock values
 is used. You are responsible for what the host configures.
 
+While the radio is on the board also reports about itself, in the stock firmware's messages, which `reticulum-c-ctl
+status` and `rnstatus` show: once a second its airtime and the channel load (15 seconds and an hour), the noise floor
+and any interference; every five seconds its temperature (ESP32-S3 and nRF52 boards) and, on the T-Beam Supreme and
+the T-Echo only, the battery. The figures are this firmware's own: the channel is looked at ten times a second, load
+includes the board's own sending, interference is a level at least 11 dB over the noise floor that is not a LoRa
+signal, the hour's load is of the whole hour (what came before the radio was turned on counts as quiet), and the T-Echo's charge is judged from the cell's voltage, which is rough.
+
 Destination stamp (RNS 1.6, all PlatformIO boards in node mode): networks running Reticulum 1.6 can
 refuse announces without a proof of work. A board does not search for it: the stamp depends only on the
 board's public data, so it is found elsewhere and loaded. `get stamp.material` prints what to stamp (it is

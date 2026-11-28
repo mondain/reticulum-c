@@ -494,7 +494,9 @@ static int sx_carrier(rnc_modem *m) {
 static int sx_rssi(rnc_modem *m, int *dbm) {
   rnc_sx126x *d = (rnc_sx126x *)m;
   uint8_t v;
-  if (d->mode != MODE_RX || cmd_read(d, OP_GET_RSSI_INST, &v, 1) != 0)
+  /* 0xFF and 0xFE (-127 dBm) are what the chip says before it has measured anything: taken as a level, one of
+   * them would pass for the noise floor and everything after it for interference */
+  if (d->mode != MODE_RX || cmd_read(d, OP_GET_RSSI_INST, &v, 1) != 0 || v >= 0xfeu)
     return -1;
   *dbm = -(int)v / 2;
   return 0;

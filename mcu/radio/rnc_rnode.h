@@ -43,6 +43,13 @@ typedef struct rnc_rnode_stats {
   uint16_t last_len;      /* its payload size */
 } rnc_rnode_stats;
 
+/* What the board can tell about itself; either may be NULL, and each returns 0 when it has an answer. */
+typedef struct rnc_rnode_sensors {
+  int (*temperature)(void *context, int *celsius);
+  int (*battery)(void *context, unsigned *state, unsigned *percent); /* state 0 to 3, as the protocol's */
+  void *context;
+} rnc_rnode_sensors;
+
 typedef struct rnc_rnode {
   rnc_lora_if *li; /* the radio; may be NULL in tests of the framing only */
   uint8_t platform, mcu, board;
@@ -55,6 +62,9 @@ typedef struct rnc_rnode {
   uint32_t default_budget_ms;     /* the budget the owner prepared; restored by _reset */
   uint8_t ready_owed;             /* the queue was full: READY is sent when it has room again */
   uint8_t reset_requested;        /* the host sent RESET (0x55, 0xf8) */
+  uint64_t report_ms;             /* when the next channel report is due */
+  const rnc_rnode_sensors *sensors; /* borrowed; NULL: none */
+  uint64_t sensor_ms;               /* when the next temperature and battery reports are due */
   /* parser */
   uint8_t in[RNC_RNODE_IN_MAX];
   uint16_t in_len;
@@ -68,6 +78,8 @@ typedef struct rnc_rnode {
 /* `platform`, `mcu` and `board` are the identity bytes reported for commands 0x48, 0x49
  * and 0x47. */
 void rnc_rnode_init(rnc_rnode *rn, rnc_lora_if *li, uint8_t platform, uint8_t mcu, uint8_t board);
+/* The board's temperature and battery, reported while the radio is on; `sensors` is borrowed. */
+void rnc_rnode_set_sensors(rnc_rnode *rn, const rnc_rnode_sensors *sensors);
 /* The limits of this chip and board, from the board table; the defaults (5, 22) are those
  * of the SX126x. A setting outside them is refused, not clipped. */
 void rnc_rnode_set_limits(rnc_rnode *rn, uint8_t sf_min, int8_t txp_max_dbm);

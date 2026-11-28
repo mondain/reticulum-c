@@ -5,6 +5,8 @@
  * reference RNodeInterface use; it is not a test on real hardware. */
 #include "../radio/rnc_radio.h"
 #include "../radio/rnc_rnode.h"
+#include "../radio/rnc_axp2101.h"
+#include "../radio/rnc_battery.h"
 #include "radio/sim_board.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -415,6 +417,211 @@ static void test_data_path(void) {
   CHECK(seen_rssi && seen_snr && seen_data);
 }
 
+/* ---- what the radio reports about the channel -------------------------------------- */
+/* `n` looks at the channel, a tenth of a second apart */
+static void looks(rnc_channel *c, uint64_t *now, unsigned n, int transmitting, int carrier, int dbm) {
+  unsigned i;
+  for (i = 0; i < n; ++i, *now += 100u)
+    rnc_channel_sample(c, *now, transmitting, carrier, !transmitting, dbm);
+}
+static void test_channel_figures(void) {
+  rnc_channel c;
+  rnc_channel_report r;
+  uint64_t now = 1000000u;
+  rnc_channel_init(&c);
+  rnc_channel_read(&c, now, &r);
+  CHECK(!r.have_floor && !r.has_interference);
+  CHECK_EQ(r.airtime_short, 0);
+  CHECK_EQ(r.load_short, 0);
+  /* a quiet channel at -100 dBm */
+  looks(&c, &now, 100, 0, 0, -100);
+  rnc_channel_read(&c, now, &r);
+  CHECK(r.have_floor && !r.has_interference);
+  CHECK_EQ(r.noise_floor_dbm, -100);
+  CHECK_EQ(r.rssi_dbm, -100);
+  CHECK_EQ(r.load_short, 0);
+  /* then one second sending and two receiving: 13 s measured, 1 s of it our airtime, 3 s of it with the channel
+   * taken (by others or by us) */
+  looks(&c, &now, 10, 1, 0, 0);
+  looks(&c, &now, 20, 0, 1, -60);
+  rnc_channel_read(&c, now, &r);
+  CHECK(r.airtime_short >= 760 && r.airtime_short <= 780);  /* 10 of 130 */
+  CHECK(r.load_short >= 2290 && r.load_short <= 2320);      /* 30 of 130 */
+  CHECK(r.load_long >= 7 && r.load_long <= 9); /* over the whole hour, as the hour's airtime: 30 of 36000 */
+  CHECK_EQ(r.noise_floor_dbm, -100); /* signals do not raise the floor */
+  CHECK(!r.has_interference);
+  /* 20 s later those have left the short window but not the hour's */
+  looks(&c, &now, 200, 0, 0, -100);
+  rnc_channel_read(&c, now, &r);
+  CHECK_EQ(r.airtime_short, 0);
+  CHECK_EQ(r.load_short, 0);
+  CHECK(r.load_long >= 7 && r.load_long <= 9);
+  /* something loud that is not LoRa */
+  looks(&c, &now, 5, 0, 0, -70);
+  rnc_channel_read(&c, now, &r);
+  CHECK(r.has_interference);
+  CHECK_EQ(r.interference_dbm, -70);
+  CHECK(r.noise_floor_dbm <= -97);
+  looks(&c, &now, 5, 0, 0, -100);
+  rnc_channel_read(&c, now, &r);
+  CHECK(!r.has_interference);
+  /* an hour on, nothing is left of it */
+  now += 3600000u;
+  rnc_channel_read(&c, now, &r);
+  CHECK_EQ(r.load_long, 0);
+}
+/* the radio sends them to its host once a second while it is on */
+static void test_channel_busy_hour(void) {
+  rnc_channel c;
+  rnc_channel_report r;
+  uint64_t now = 1000000;
+  unsigned i;
+  rnc_channel_init(&c);
+  for (i = 0; i < 60; ++i) { /* an hour, the channel taken for half of every minute */
+    looks(&c, &now, 300, 0, 1, -60);
+    looks(&c, &now, 300, 0, 0, -100);
+  }
+  rnc_channel_read(&c, now - 100u, &r);
+  CHECK(r.load_long >= 4900 && r.load_long <= 5100);
+}
+static void test_channel_reports(void) {
+  static duo d;
+  uint8_t pkt[300], payload[600], cmd;
+  size_t pos = 0, plen;
+  int reports = 0, airtime_short = 0, airtime_long = 0;
+  duo_init(&d);
+  d.host_out_len = 0;
+  duo_run(&d, 2100);
+  fill_pattern(pkt, sizeof(pkt));
+  host_sends_packet(&d, pkt, sizeof(pkt));
+  duo_run(&d, 3000);
+  while (next_frame(d.host_out, d.host_out_len, &pos, &cmd, payload, &plen))
+    if (cmd == 0x25) {
+      CHECK_EQ(plen, 11);
+      if (plen == 11) {
+        ++reports;
+        airtime_short = payload[0] << 8 | payload[1];
+        airtime_long = payload[2] << 8 | payload[3];
+        CHECK(payload[9] > 0 && payload[9] < 157); /* a noise floor below 0 dBm */
+      }
+    }
+  CHECK(reports >= 3 && reports <= 6);
+  CHECK(airtime_short > 0 && airtime_long > 0);
+  /* and none once the radio is off */
+  CHECK(set_u8(&d.f.rn, 6, 0));
+  d.host_out_len = 0;
+  duo_run(&d, 2500);
+  pos = 0;
+  while (next_frame(d.host_out, d.host_out_len, &pos, &cmd, payload, &plen))
+    CHECK(cmd != 0x25);
+}
+
+/* ---- temperature and battery ------------------------------------------------------- */
+/* a LiPo cell read through a divider, as the T-Echo's */
+static void test_battery_from_voltage(void) {
+  unsigned state, percent;
+  CHECK_EQ(rnc_lipo_percent(3000), 0);
+  CHECK_EQ(rnc_lipo_percent(3300), 0);
+  CHECK_EQ(rnc_lipo_percent(4150), 100);
+  CHECK_EQ(rnc_lipo_percent(4300), 100);
+  CHECK(rnc_lipo_percent(3700) > 20 && rnc_lipo_percent(3700) < 55);
+  CHECK(rnc_lipo_percent(3900) > rnc_lipo_percent(3700));
+  /* 12 bits of 3.0 V behind a divider of two: 2703 counts is 3.96 V */
+  CHECK_EQ(rnc_adc_millivolts(2703, 12, 3000, 2), 3959);
+  CHECK(rnc_lipo_battery(3800, 0, &state, &percent) == 0 && state == 1);  /* discharging */
+  CHECK(rnc_lipo_battery(3800, 1, &state, &percent) == 0 && state == 2);  /* charging */
+  CHECK(rnc_lipo_battery(4200, 1, &state, &percent) == 0 && state == 3 && percent == 100); /* charged */
+  CHECK(rnc_lipo_battery(100, 0, &state, &percent) != 0); /* no cell there */
+}
+static uint8_t pmu_regs[256];
+static int pmu_fails;
+static int pmu_read(void *context, uint8_t reg, uint8_t *value) {
+  (void)context;
+  if (pmu_fails)
+    return -1;
+  *value = pmu_regs[reg];
+  return 0;
+}
+static void test_battery_from_axp2101(void) {
+  unsigned state = 9, percent = 9;
+  pmu_fails = 0;
+  memset(pmu_regs, 0, sizeof(pmu_regs));
+  CHECK(rnc_axp2101_battery(NULL, pmu_read, &state, &percent) != 0); /* no battery connected */
+  pmu_regs[0x00] = 0x08; /* battery present */
+  pmu_regs[0x01] = 0x40; /* discharging */
+  pmu_regs[0xa4] = 76;
+  CHECK(rnc_axp2101_battery(NULL, pmu_read, &state, &percent) == 0 && state == 1 && percent == 76);
+  pmu_regs[0x01] = 0x22; /* charging, constant current */
+  CHECK(rnc_axp2101_battery(NULL, pmu_read, &state, &percent) == 0 && state == 2);
+  pmu_regs[0x01] = 0x04; /* standby, charge done */
+  pmu_regs[0xa4] = 100;
+  CHECK(rnc_axp2101_battery(NULL, pmu_read, &state, &percent) == 0 && state == 3 && percent == 100);
+  pmu_regs[0x01] = 0x05; /* standby, not charging: nothing to say about the direction */
+  CHECK(rnc_axp2101_battery(NULL, pmu_read, &state, &percent) == 0 && state == 0);
+  pmu_regs[0xa4] = 200; /* not a percentage */
+  CHECK(rnc_axp2101_battery(NULL, pmu_read, &state, &percent) != 0);
+  pmu_regs[0xa4] = 50;
+  pmu_fails = 1;
+  CHECK(rnc_axp2101_battery(NULL, pmu_read, &state, &percent) != 0);
+}
+static int fake_celsius, fake_have_temperature, fake_have_battery;
+static int fake_temperature(void *context, int *celsius) {
+  (void)context;
+  *celsius = fake_celsius;
+  return fake_have_temperature ? 0 : -1;
+}
+static int fake_battery(void *context, unsigned *state, unsigned *percent) {
+  (void)context;
+  *state = 1;
+  *percent = 87;
+  return fake_have_battery ? 0 : -1;
+}
+static void sensor_frames(const duo *d, int *temperature, int *battery_state, int *battery_percent) {
+  uint8_t payload[600], cmd;
+  size_t pos = 0, plen;
+  *temperature = *battery_state = *battery_percent = -1;
+  while (next_frame(d->host_out, d->host_out_len, &pos, &cmd, payload, &plen)) {
+    if (cmd == 0x29 && plen == 1)
+      *temperature = payload[0];
+    if (cmd == 0x27 && plen == 2) {
+      *battery_state = payload[0];
+      *battery_percent = payload[1];
+    }
+  }
+}
+static void test_sensor_reports(void) {
+  static duo d;
+  static const rnc_rnode_sensors sensors = {fake_temperature, fake_battery, NULL};
+  int temperature, state, percent;
+  duo_init(&d);
+  d.host_out_len = 0;
+  duo_run(&d, 6000); /* a board without sensors says nothing */
+  sensor_frames(&d, &temperature, &state, &percent);
+  CHECK(temperature < 0 && state < 0);
+  rnc_rnode_set_sensors(&d.f.rn, &sensors);
+  fake_celsius = 41;
+  fake_have_temperature = fake_have_battery = 1;
+  d.host_out_len = 0;
+  duo_run(&d, 6000);
+  sensor_frames(&d, &temperature, &state, &percent);
+  CHECK_EQ(temperature, 161); /* offset by 120 */
+  CHECK_EQ(state, 1);
+  CHECK_EQ(percent, 87);
+  fake_celsius = 140; /* out of the range the protocol carries sensibly */
+  fake_have_battery = 0;
+  d.host_out_len = 0;
+  duo_run(&d, 6000);
+  sensor_frames(&d, &temperature, &state, &percent);
+  CHECK(temperature < 0 && state < 0);
+  fake_celsius = 20;
+  fake_have_battery = 1;
+  CHECK(set_u8(&d.f.rn, 6, 0)); /* and none while the radio is off */
+  d.host_out_len = 0;
+  duo_run(&d, 6000);
+  sensor_frames(&d, &temperature, &state, &percent);
+  CHECK(temperature < 0 && state < 0);
+}
+
 /* Review Focus 1 */
 static void test_data_before_radio_on(void) {
   static duo d;
@@ -700,6 +907,12 @@ int main(void) {
   test_invalid_values();
   test_airtime_locks();
   test_data_path();
+  test_channel_figures();
+  test_channel_busy_hour();
+  test_channel_reports();
+  test_battery_from_voltage();
+  test_battery_from_axp2101();
+  test_sensor_reports();
   test_data_before_radio_on();
   test_reset_drops_everything();
   test_flow_control();

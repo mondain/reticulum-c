@@ -417,6 +417,10 @@ static void execute(sx126x_model *m, const uint8_t *tx, uint8_t *rx, size_t n) {
       sim_phy phy;
       phy_of(m, &phy);
       rx[2] = (uint8_t)(-2 * sim_rssi(m->medium, m->id, &phy));
+      if (m->rssi_unready) {
+        --m->rssi_unready;
+        rx[2] = 0xFF;
+      }
     }
     break;
   case 0x0E: /* WriteBuffer */
