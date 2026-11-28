@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 /* The release this header belongs to (checked against the other version places). */
-#define RNC_VERSION_STRING "0.7.0"
+#define RNC_VERSION_STRING "0.7.1"
 #define RNC_IMPLEMENTATION_NAME "reticulum-c"
 #define RNC_MTU 500u
 #ifndef RNC_MAX_MTU
