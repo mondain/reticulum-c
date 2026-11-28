@@ -11,8 +11,8 @@ framework so it builds for common LoRa boards with one command:
   boards/ (board definitions PlatformIO
   does not ship), scripts/ (collects the flashable files)
 
-STATUS: every environment below builds. T-Echo and Supreme SX1262 have passed a
-hardware bench exchange; other boards have no execution evidence.
+STATUS: every environment below builds. T-Echo, Supreme SX1262 and XIAO SX1262 have passed
+short hardware bench runs ("Bench record" in ../README.md); other boards have no radio evidence.
 The board talks to a host over its serial/USB port, or (ESP32 and ESP32-S3 environments
 only) over Wi-Fi and TCP, see "Wi-Fi mode" below, and, once configured, over a LoRa radio,
 see "LoRa radio" below. A host client through the Supreme gateway reached the
@@ -409,12 +409,12 @@ library.json) and RNC_MCU_BUILD_EPOCH. Use a task stack of at least 12 KB (16 KB
 
 ## Limits
 
-- Hardware bench coverage: T-Echo leaf and Supreme SX1262 gateway, including
-  routed /echo and /info over LoRa. Other boards retain build/model coverage.
-  Range, sustained load and stock RNode interoperability remain unverified.
-- No RNode KISS host protocol or Bluetooth. Host interfaces are serial/USB or,
-  on ESP32, a Wi-Fi TCP client (no access point mode, UDP/AutoInterface, TLS or
-  IFAC). LoRa is available as a leaf or gateway interface once configured.
+- Hardware bench coverage: short runs on the T-Echo, Supreme SX1262 and XIAO SX1262 ("Bench record" in
+  ../README.md). Other boards retain build/model coverage. Range, sustained load and stock RNode interoperability
+  remain unverified.
+- Host interfaces are serial/USB or, on ESP32, a Wi-Fi TCP client (no access point mode, UDP/AutoInterface, TLS or
+  IFAC). LoRa is available as a leaf or gateway interface once configured, and in RNode mode the board speaks the
+  RNode protocol over USB or Bluetooth LE instead.
 - Wi-Fi mode (ESP32 environments) is built, not run on hardware; its application logic is
   tested on the host (mcu/tests). It adds about 420 KB of flash (heltec V3: 339 KB ->
   759 KB) and 30 KB of static RAM, plus the Wi-Fi driver's heap, and uses more power.

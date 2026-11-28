@@ -248,7 +248,9 @@ exchanged packets at 915 MHz, BW 125 kHz, SF8, CR 4/5 and 0 dBm. A host client
 reached the T-Echo through USB, the Supreme and LoRa, verified a 10-byte `/echo`
 reply and received `/info` (three hops). This is a bench check, with one request
 retry; range, long-running load and stock RNode interoperability remain untested.
-Other boards still have build/model coverage only. AES uses software tables,
+Since then the same boards and a XIAO nRF52840 with Wio-SX1262 have been run as RNodes, driven by this project's node
+and the reference, including through a Raspberry Pi gateway reached over Wi-Fi HaLow; the dated results are in
+[mcu/README.md](mcu/README.md), "Bench record". Other boards still have build/model coverage only. AES uses software tables,
 the T-Deck has no PlatformIO target, and the nRF52 board definitions derive from
 the Adafruit Feather nRF52840.
 
@@ -275,7 +277,7 @@ The PlatformIO firmware also has an `rnode` mode (`set mode rnode`, or "Run as: 
 
 The Pages workflow builds all nine board variants from the displayed source
 commit, validates flash layouts and checksums, and retains up to five versions.
-Only T-Echo and Supreme SX1262 have hardware bench evidence. This does not
+Only a T-Echo, a T-Beam Supreme and a XIAO nRF52840 with Wio-SX1262 have radio bench evidence. This does not
 establish long-running, range, or stock RNode radio interoperability.
 
 To preview locally, build firmware with `mcu/build-platformio.sh`, then:
@@ -380,7 +382,7 @@ are in [COMPATIBILITY.md](COMPATIBILITY.md) and
 
 Defaults remain MTU 500 and a two-message initial Channel TX window. The
 implementation does not claim complete RNS API/configuration compatibility.
-Hardware evidence is limited to the T-Echo/Supreme bench exchange and flashing
+Hardware evidence is limited to the short bench runs and flashing
 checks described above. Other radio boards, Windows, codecs and media devices
 have no execution evidence here.
 Keepalives provide unauthenticated liveness, not identity.

@@ -1209,6 +1209,10 @@ stock RNode firmware has been completed. Other boards remain covered by builds
 and models. Supreme LR1121 variants and the original T-Beam v1.2 are unsupported;
 the Supreme environment targets the SX1262 variant.
 
+Later bench runs (XIAO nRF52840 Wio-SX1262, RNode mode, stamp enforcement by the reference, a Raspberry Pi gateway
+over Wi-Fi HaLow and LoRa, the Supreme's USB byte loss and its fix, and the radio reports) are listed with their
+dates in "Bench record" in [mcu/README.md](mcu/README.md).
+
 ## RNode mode of the microcontroller firmware (`feature/rnode-mode`)
 
 The PlatformIO firmware can run as the device side of the RNode KISS protocol

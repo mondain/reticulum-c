@@ -2,11 +2,10 @@
 
 ## Current status
 
-Latest release: 0.5.2 (2026-11-17), the first with path eviction for the microcontroller
-profile; the entries below are the 2026-11-14 snapshot. Hardware checked since then (T-Echo
-and T-Beam Supreme, rnode mode and Bluetooth, gateway forwarding for 3 hours) is recorded in
-`mcu/README.md` and [COMPATIBILITY.md](../COMPATIBILITY.md); the reference Python RNS and
-Leviculum interoperability jobs now run on tags and on demand, not on every push.
+Latest release: 0.8.0 (2026-11-28). The entries below are the 2026-11-14 snapshot. Hardware checked since then is
+recorded with dates in "Bench record" in [mcu/README.md](../mcu/README.md) (T-Echo, T-Beam Supreme, XIAO nRF52840,
+a Raspberry Pi gateway over Wi-Fi HaLow and LoRa) and in [COMPATIBILITY.md](../COMPATIBILITY.md); the reference
+Python RNS and Leviculum interoperability jobs run on tags and on demand, not on every push.
 
 ### Snapshot of 2026-11-14
 

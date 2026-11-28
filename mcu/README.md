@@ -22,11 +22,9 @@ mcu/platformio/   the same firmware for the Arduino framework on ESP32 and nRF52
 
 STATUS: the firmware builds for ESP32, ESP32-S3 and nRF52840, and the same application logic
 passes the host tests against reticulum-c-node and the reference Reticulum.
-Hardware bench evidence: T-Echo leaf and Supreme SX1262 gateway at 915 MHz,
-BW 125 kHz, SF8, CR 4/5, 0 dBm, 1% airtime budget. A host client reached the
-T-Echo through USB -> Supreme -> LoRa and verified /echo (10 bytes) and /info
-(three hops); one request required a retry. Other boards, range, sustained load
-and stock RNode radio interoperability remain unverified.
+Hardware has been checked on a T-Echo, a T-Beam Supreme, a XIAO nRF52840 with Wio-SX1262 and, for its screen only, a
+Heltec V3: short bench runs, listed in "Bench record" below. Other boards, range, sustained load and stock RNode
+radio interoperability remain unverified.
 
 ## What the firmware is
 
@@ -640,10 +638,32 @@ driven (see the LoRa radio section; GPS, buttons and the battery are not). The T
 and the Supreme and Heltec V3 OLEDs show a status page (see the status screens paragraph in the RNode section).
 Set the board name in menuconfig so /info reports it.
 
+## Bench record
+
+Everything here was short range, on a desk, with a few boards. It is not a range, soak or sustained-load result, and
+no test has had a stock RNode on the other end. Sizes are the payload sent; "intact" means compared byte for byte.
+
+| Date | Hardware | What was run | Result |
+| --- | --- | --- | --- |
+| 2026-11-14 | T-Echo leaf, T-Beam Supreme gateway; 915 MHz, 125 kHz, SF8, CR 4/5, 0 dBm | Host to leaf through the gateway: `/echo`, `/info` | Passed at three hops; one request retried |
+| 2026-11-14 to 17 | T-Echo in RNode mode | USB and Bluetooth from this project's node and the reference RNodeInterface; Sideband over Bluetooth | See "RNode mode" for what passed and what was not checked |
+| 2026-11-23 | XIAO nRF52840 Wio-SX1262 (RNode mode), Supreme gateway; 10 dBm; firmware 0.5.3 | Driven by the reference RNS and by `reticulum-c-node`: announce, `/echo`, `/info` | Passed; RSSI -31 dBm, SNR 14 dB |
+| 2026-11-24 | T-Echo (RNode mode), Supreme gateway; firmware 0.5.3 | `reticulum-c-node` RNodeInterface: announce, `/echo`, `/info` | Passed |
+| 2026-11-24 | XIAO as RNode of a reference RNS 1.6.1 node that enforces stamps; Supreme | Announces from a stamped and an unstamped board | Stamped one accepted, unstamped one dropped |
+| 2026-11-25 | Heltec V3 | OLED status page (serial mode, LoRa gateway) | Shown; its radio was not tested over the air |
+| 2026-11-27 | Raspberry Pi 3 (64-bit OpenMANET) with a Wi-Fi HaLow card, joined to a HaLow access point; release 0.6.1 | `AutoInterface` over HaLow, 256 KiB file | Intact in 1.7 s, also after a reboot |
+| 2026-11-27 | T-Echo (RNode mode) on that Pi, Supreme (RNode mode) on a PC; 920 MHz, 17 dBm at the Pi | LoRa to HaLow to the home network, small files through the Pi | 4 of 8 failed. Traced to the Supreme losing bytes over USB (next row); the through-the-Pi run was not repeated after the fix |
+| 2026-11-27 | Same boards; T-Beam Supreme with the USB fix (0.7.1) | 20 known packets to the Supreme; 100-byte files from it to the Pi | Packets intact: 14 of 20 before, 20 of 20 after. Files: 6 of 8 before, 8 of 8 after |
+| 2026-11-28 | T-Beam Supreme and T-Echo, both RNode mode; 920 MHz, 125 kHz, SF8, CR 4/5, 2 dBm; code of 0.8.0 | Radio reports read by `reticulum-c-ctl status`; 2 KiB and 1 KiB files between the boards | Files intact; RSSI -30 to -33 dBm, SNR 12 to 14 dB. Airtime and channel load rose and fell with the transfers; noise floor -90 to -92 dBm; temperature 29 to 30 C; battery read 100 % charged on USB power (discharging was not checked) |
+| 2026-11-28 | T-Echo back on the Pi (release 0.7.0), T-Beam Supreme on a PC | One announce over LoRa | Received by the Pi; RSSI -65 dBm, SNR 12.5 dB |
+
+Never run on a bench: T-Beam v1.0/v1.1, T3-S3, Heltec V2, RAK4631, Heltec T114, the ESP-IDF builds, the ESP32
+Bluetooth transport, Wi-Fi mode, and the SX1302 concentrator program (`mcu/sx1302/`).
+
 ## Limits
 
 - The LoRa radio (SX126x/SX127x) is optional and OFF until configured. The bench
-  evidence above covers T-Echo, Supreme and XIAO SX1262 using PlatformIO firmware;
+  record above covers T-Echo, Supreme and XIAO SX1262 using PlatformIO firmware;
   ESP-IDF board ports and other boards retain build/model coverage only.
   By default the firmware is a Reticulum node with a LoRa interface; in rnode mode it
   speaks the stock RNode KISS protocol to a host instead (see "RNode mode"). Bluetooth LE

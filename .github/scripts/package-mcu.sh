@@ -124,7 +124,7 @@ of every hour; it is a safety net, not a compliance proof.
   set lora.mode leaf, set lora.freq 868.1, set lora.bw 125, set lora.sf 8, set lora.cr 5,
   set lora.txp 14, set lora.airtime 1, save, reboot)$LORA_TOOL
   The over-the-air format is meant to be compatible with stock RNodes on the same frequency
-  and modem settings. A T-Echo leaf and Supreme SX1262 gateway have passed a short 915 MHz bench exchange;
+  and modem settings. T-Echo, Supreme SX1262 and XIAO SX1262 have passed short bench runs;
   range, sustained load and stock RNode radio interoperability remain unverified.
   Read MANUAL.md and the notes in the project (mcu/radio/README.md) before relying on it.
 "
@@ -194,9 +194,9 @@ Files
 The ELF file with symbols is not included; build from source to debug.
 
 Limits (read MANUAL.md for the complete list)
-  - Hardware bench coverage: T-Echo and Supreme SX1262, including routed /echo and
-    /info over LoRa. Other boards have build/model coverage only. This is not
-    sustained-load, range or independent radio interoperability evidence.
+  - Hardware bench coverage: short runs on T-Echo, Supreme SX1262 and XIAO SX1262
+    ("Bench record" in MANUAL.md). Other boards have build/model coverage only. This
+    is not sustained-load, range or stock RNode interoperability evidence.
   - $LORA_LIMIT; the board talks to a host over serial/USB$WIFI_LIMIT. No Bluetooth.
   - Leaf node (no forwarding) unless the LoRa gateway mode is configured; at most 2 links,
     8 remembered announces, 12 paths.

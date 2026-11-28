@@ -76,10 +76,10 @@ broadest feature set and the application ecosystem.
   point, AutoInterface, UDP, TLS or IFAC).
 - **Firmware security limits.** The Wi-Fi password and settings sit unencrypted in flash, and
   the TCP link is plaintext as in any Reticulum TCP interface. The firmware has no IFAC.
-- **Thin hardware evidence.** Bench results exist for a T-Echo, a T-Beam Supreme and (as of
-  v0.5.3) a Seeed XIAO nRF52840 with Wio-SX1262, at 915 MHz and short range. Range, sustained
-  load and long-term reliability are not established. Wi-Fi mode, the ESP-IDF boards and the
-  ESP32 BLE build are build-tested, not hardware-tested. The XIAO has not been checked with BLE
+- **Thin hardware evidence.** Short bench runs exist for a T-Echo, a T-Beam Supreme and a Seeed XIAO nRF52840 with
+  Wio-SX1262 (dated list: "Bench record" in `mcu/README.md`). One of them found a real fault: the Supreme lost bytes
+  over USB until 0.7.1. Range, sustained load and long-term reliability are not established. Wi-Fi mode, the ESP-IDF
+  boards and the ESP32 BLE build are build-tested, not hardware-tested. The XIAO has not been checked with BLE
   against its SoftDevice 7.3.0 bootloader.
 - **Stock RNode hardware is unverified.** The host RNode adapters were checked against this
   project's own RNode-mode firmware and an emulated RNode, not against a stock RNode device.
@@ -101,9 +101,6 @@ broadest feature set and the application ecosystem.
 
 ## Corrections to other documents
 
-- `mcu/README.md` ("Limits") still says the firmware "is not an RNode" and that Bluetooth is not
-  part of it. RNode mode and BLE exist (see `spec-gap-list.md`, section 1). That paragraph
-  predates them.
 - `spec-gap-list.md` records that host RNode adapters are unverified against stock RNode
   hardware. That remains true, but the project's own firmware has since been driven by both the
   reference RNS and `reticulum-c-node` over the air (XIAO to T-Beam Supreme, 915 MHz, 0.5.3).
