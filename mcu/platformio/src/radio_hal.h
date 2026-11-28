@@ -8,3 +8,8 @@
 // Brings up the SPI bus, the control pins and, where the board needs it, the power
 // management chip's radio rail. Returns 0, or a negative value. `hal` is filled.
 int rnc_radio_hal_init(const rnc_board *board, rnc_radio_hal *hal);
+
+// The chip's temperature in degrees Celsius, and the battery's state (RNode protocol) and charge. 0, or a negative
+// value where this board has nothing to say.
+int rnc_board_temperature(int *celsius);
+int rnc_board_battery(const rnc_board *board, unsigned *state, unsigned *percent);

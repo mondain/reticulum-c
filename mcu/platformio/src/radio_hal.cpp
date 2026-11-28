@@ -1,5 +1,6 @@
 #include "radio_hal.h"
 #include "rnc_axp2101.h"
+#include "rnc_battery.h"
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -7,6 +8,9 @@
 
 #if defined(ARDUINO_ARCH_ESP32)
 #include <Wire.h>
+#else
+#include <nrf_sdm.h>
+#include <nrf_soc.h>
 #endif
 
 #define RADIO_SPI_HZ 4000000u
@@ -194,3 +198,56 @@ int rnc_radio_hal_init(const rnc_board *board, rnc_radio_hal *hal) {
   hal->now_us = hal_now;
   return 0;
 }
+
+// ----------------------------------------------------------- sensors ---------
+// The chip's own temperature sensor. The original ESP32's is not calibrated enough to be worth reporting.
+int rnc_board_temperature(int *celsius) {
+#if defined(ARDUINO_ARCH_NRF52)
+  const float t = readCPUTemperature();
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+  const float t = temperatureRead();
+#else
+  const float t = NAN;
+#endif
+  if (isnan(t))
+    return -1;
+  *celsius = (int)lroundf(t);
+  return 0;
+}
+
+#if defined(ARDUINO_ARCH_NRF52)
+static bool usb_power_present(void) {
+  uint8_t softdevice = 0;
+  uint32_t status = 0;
+  (void)sd_softdevice_is_enabled(&softdevice);
+  if (softdevice) // the POWER registers belong to the SoftDevice then
+    (void)sd_power_usbregstatus_get(&status);
+  else
+    status = NRF_POWER->USBREGSTATUS;
+  return (status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+}
+#endif
+
+// Only the boards checked on a bench: the T-Beam Supreme asks its AXP2101 (read only); the T-Echo's cell is on
+// P0.04 behind a divide by two, read against the 3.0 V reference. Others report nothing.
+int rnc_board_battery(const rnc_board *board, unsigned *state, unsigned *percent) {
+  if (!board)
+    return -1;
+#if defined(ARDUINO_ARCH_ESP32)
+  if (board->pmu != RNC_BOARD_PMU_AXP2101 || !Wire1.begin(board->i2c_sda, board->i2c_scl, 100000))
+    return -1;
+  const int result = rnc_axp2101_battery(NULL, axp2101_read, state, percent);
+  Wire1.end();
+  return result;
+#else
+  if (strcmp(board->id, "lilygo_t_echo") != 0)
+    return -1;
+  analogReference(AR_INTERNAL_3_0);
+  analogReadResolution(12);
+  unsigned sum = 0;
+  for (unsigned i = 0; i < 8; ++i)
+    sum += (unsigned)analogRead(4);
+  return rnc_lipo_battery(rnc_adc_millivolts(sum / 8u, 12, 3000, 2), usb_power_present(), state, percent);
+#endif
+}
+

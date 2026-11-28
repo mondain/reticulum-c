@@ -20,4 +20,17 @@ static inline int rnc_axp2101_enable_radio(void *context,
     return -1;
   return 0;
 }
+/* The AXP2101's own account of the battery, read only (XPowersLib: STATUS1 bit 3 battery present, STATUS2 bits 7:5
+ * 1 charging, 2 discharging, 0 standby, its low three bits 4 when charging is done, 0xA4 the fuel gauge's percent).
+ * States as the RNode protocol has them: 0 unknown, 1 discharging, 2 charging, 3 charged. -1: nothing to report. */
+static inline int rnc_axp2101_battery(void *context, int (*read_reg)(void *, uint8_t, uint8_t *), unsigned *state,
+                                      unsigned *percent) {
+  uint8_t status1, status2, level;
+  if (!read_reg || read_reg(context, 0x00, &status1) != 0 || !(status1 & 0x08u) ||
+      read_reg(context, 0x01, &status2) != 0 || read_reg(context, 0xa4, &level) != 0 || level > 100u)
+    return -1;
+  *percent = level;
+  *state = (status2 >> 5) == 1u ? 2u : (status2 >> 5) == 2u ? 1u : (status2 & 0x07u) == 4u ? 3u : 0u;
+  return 0;
+}
 #endif
