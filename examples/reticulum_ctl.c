@@ -1257,8 +1257,24 @@ static int cmd_status(int argc, char **argv) {
     }
     print_radio(f);
     v = map_get(f, "clients");
-    if (v && v->type == V_UINT)
-      printf("    Clients   : %llu\n", (unsigned long long)v->u);
+    if (v && v->type == V_UINT) {
+      if (map_get(f, "i2p_connectable"))
+        printf("    Peers     : %llu connected I2P endpoint%s\n", (unsigned long long)v->u, v->u == 1 ? "" : "s");
+      else
+        printf("    Clients   : %llu\n", (unsigned long long)v->u);
+    }
+    v = map_get(f, "tunnelstate");
+    if (v && v->type == V_STR) {
+      fputs("    I2P       : ", stdout);
+      print_str(v, "?");
+      putchar('\n');
+    }
+    v = map_get(f, "i2p_b32");
+    if (v && v->type == V_STR) {
+      fputs("    I2P B32   : ", stdout);
+      print_str(v, "?");
+      putchar('\n');
+    }
     pretty_size((double)as_uint(map_get(f, "txb")), a, sizeof(a));
     pretty_size((double)as_uint(map_get(f, "rxb")), b, sizeof(b));
     printf("    Traffic   : %s sent, %s received\n", a, b);

@@ -552,7 +552,7 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
         target_link_libraries(fake_sam PRIVATE reticulum_c OpenSSL::Crypto)
         add_executable(test_i2p_host tests/test_i2p_host.c)
         target_link_libraries(test_i2p_host PRIVATE reticulum_c_host OpenSSL::Crypto)
-        foreach(case session peers peer_forms retry router_restart bad_key keepalive)
+        foreach(case session peers peer_forms retry router_restart bad_key keepalive tunnel_state sam_env)
             add_test(NAME reticulum_i2p_host_${case} COMMAND test_i2p_host $<TARGET_FILE:fake_sam> ${case})
             set_tests_properties(reticulum_i2p_host_${case} PROPERTIES LABELS network TIMEOUT 60)
         endforeach()
@@ -635,6 +635,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             add_test(NAME reticulum_node_process_rnid_request COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> rnid_request $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_rnid_request PROPERTIES LABELS network TIMEOUT 60)
+            add_test(NAME reticulum_node_process_i2p_status COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> i2p_status $<TARGET_FILE:fake_sam> $<TARGET_FILE:reticulum-c-ctl>)
+            set_tests_properties(reticulum_node_process_i2p_status PROPERTIES LABELS network TIMEOUT 60)
             add_test(NAME reticulum_node_process_radio_status COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> radio_status $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_radio_status PROPERTIES LABELS network TIMEOUT 60)
@@ -777,6 +780,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     set_tests_properties(reticulum_node_auto_devices_rns PROPERTIES
                         LABELS "reticulum_interop;network" TIMEOUT 240 SKIP_RETURN_CODE 77)
                 endif()
+                add_test(NAME reticulum_node_process_i2p_status_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> i2p_status_ref
+                    $<TARGET_FILE:fake_sam> $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_i2p_status_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 120)
                 add_test(NAME reticulum_node_process_radio_status_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> radio_status_ref

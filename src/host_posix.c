@@ -984,6 +984,27 @@ static void tcp_tune_with(int fd, int idle, int interval, int probes,
 static void tcp_tune(int fd) { tcp_tune_with(fd, 5, 2, 12, 24000); }
 /* The reference's I2P peers probe after 10 s idle, every 9 s, 5 times, and
  * abort unacknowledged data after 45 s. */
+/* I2P_SAM_ADDRESS as the reference's i2plib reads it, "host:port". 1 and nothing changed without it, 0 when taken,
+ * -1 when it is not that. */
+static int i2p_sam_from_env(char *host, size_t capacity, uint16_t *port, const char **router) {
+  const char *value = getenv("I2P_SAM_ADDRESS"), *colon;
+  char *end = NULL;
+  unsigned long number;
+  size_t length;
+  if (!value || !*value)
+    return 1;
+  colon = strchr(value, ':');
+  if (!colon || colon == value || (length = (size_t)(colon - value)) >= capacity || colon[1] < '0' || colon[1] > '9')
+    return -1;
+  number = strtoul(colon + 1, &end, 10);
+  if (!number || number > 65535u || (*end && *end != ':'))
+    return -1;
+  memcpy(host, value, length);
+  host[length] = 0;
+  *port = (uint16_t)number;
+  *router = host;
+  return 0;
+}
 static void i2p_tune(int fd) { tcp_tune_with(fd, 10, 9, 5, 45000); }
 static rnc_result sam_start(rnc_host *h, host_interface *f);
 static int connect_interface(rnc_host *h, host_interface *f) {
@@ -2122,8 +2143,17 @@ rnc_result rnc_host_add(rnc_host *h, uint32_t id, const rnc_host_config *c) {
       note_connect_failure(h, f);
     }
   } else if (c->kind == RNC_HOST_I2P) {
-    if (resolve(*f->address ? f->address : "127.0.0.1",
-                c->port ? c->port : 7656, SOCK_STREAM, 0, AF_UNSPEC,
+    char env_host[256];
+    const char *router = *f->address ? f->address : "127.0.0.1";
+    uint16_t router_port = c->port ? c->port : 7656;
+    /* with neither given, the router is where the reference looks for it */
+    if (!*f->address && !c->port &&
+        i2p_sam_from_env(env_host, sizeof(env_host), &router_port, &router) < 0) {
+      r = RNC_INVALID;
+      goto fail;
+    }
+    f->status.i2p_connectable = c->i2p_connectable != 0;
+    if (resolve(router, router_port, SOCK_STREAM, 0, AF_UNSPEC,
                 c->prefer_ipv6, &f->peer, &f->peer_size) < 0) {
       r = RNC_INVALID;
       goto fail;
@@ -2899,6 +2929,8 @@ static void i2p_spawn(rnc_host *h, host_interface *c, int role,
   f->status.kind = RNC_HOST_TCP_CONNECT;
   f->status.interface_id = h->next_id++;
   f->status.parent_id = c->status.interface_id;
+  f->status.i2p_accepted = role == SAM_ACCEPT;
+  f->status.i2p_tunnel_state = 1;
   f->status.mtu = c->status.mtu;
   f->status.mode = c->status.mode;
   f->status.announce_cap_permille = c->status.announce_cap_permille;
@@ -2969,6 +3001,9 @@ static void i2p_session_lost(rnc_host *h, host_interface *c) {
 /* Idle streams are kept alive with an empty HDLC frame, and one that has gone
  * silent for the reference's whole probe window is dropped. */
 static void i2p_watchdog(rnc_host *h, host_interface *f, uint64_t now) {
+  /* as the reference's watchdog: unresponsive after two keepalive periods of silence. The state stays through a
+   * reconnect until the new stream is looked at. */
+  f->status.i2p_tunnel_state = now - f->last_read_ms > 2u * I2P_PROBE_AFTER_MS ? 3u : 2u;
   if (now - f->last_read_ms > I2P_READ_TIMEOUT_MS) {
     rnc_logf(RNC_LOG_WARNING, "host", "%s is unresponsive", f->status.name);
     disconnect_interface(h, f, ETIMEDOUT);
