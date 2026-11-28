@@ -135,3 +135,10 @@ Run the Release workflow by hand (Actions, Release, Run workflow) to build and
 package everything without publishing; the archives are kept as workflow
 artifacts. The release job is skipped unless the run was started by a tag. The
 CI workflow's mcu job also builds all firmware on every push and pull request.
+
+## Withdrawing a firmware build
+
+When a published build for a board turns out to be harmful: release the fix, delete that board's archive from the
+earlier releases, add a warning to their notes, and list the board in `WITHDRAWN_BEFORE` in
+`.github/scripts/build-web-flasher.py`, so the browser installer stops carrying the old builds forward (it keeps its
+own copies). The tags stay.
