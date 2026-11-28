@@ -581,26 +581,31 @@ every 5 to 20 ms (more often at higher baud rates; the example UART buffer is 2 
 Announces carry a unix timestamp. A receiving node drops an announce more than 300
 seconds in the future, and the reference stack ignores an announce that is not newer
 than the one behind its stored path. Boards usually have no clock, so the
-application keeps its own, which never goes backwards and is only ever late:
+application keeps its own, which never goes backwards and is normally late:
 
 1. If the platform's unix_seconds hook returns a non-zero value (RTC, SNTP, GPS),
    that value is used. The example firmware has no such hook.
 2. Otherwise: build time (RNC_MCU_BUILD_EPOCH, set by the build at configure time)
-   plus uptime, raised to a high-water mark stored in NVS every 120 seconds. After
-   a reboot the clock starts at the stored mark plus 121 seconds, so, if the previous
-   run lasted at least 120 seconds, it is later than any announce sent before the
-   reset and paths on the other side keep updating. No mark is stored at boot: after a
-   run shorter than 120 seconds the clock can start where that run did, and a node
-   that remembers the board ignores its announces until the clock has passed the
-   last one it heard. It is never ahead of real time by more than about two minutes.
+   plus uptime, raised to a mark stored in NVS. The mark is stored just before the
+   board announces itself (on its schedule or in answer to a path request), 10 seconds
+   ahead of that announce, and only when the announce is later than the mark. After a
+   reboot the clock starts one second after the mark, so it is later than any announce
+   sent before and paths on the other side keep updating, while a restart moves it
+   ahead of the time that really passed by 10 seconds at most. (Up to 0.8.0 the mark
+   was stored every 120 seconds of uptime: a board restarted sooner could repeat its
+   time and be ignored. A board updated from 0.8.0 or older may be ignored for up to
+   two minutes of announced time, once.)
 3. rnc_mcu_app_set_unix() moves the clock forward when the host or a user tells
    the device the real time (a port can wire this to a command or a GPS fix).
    
 
-Consequences: the clock is behind real time by (now - build time - uptime) until a
-real source is wired in; this only matters for logs and for peers that compare
-timestamps with their own clock. Rebuild or set the time to bring it up to date.
-Flash writes for the mark: one NVS write per 2 minutes of uptime.
+Consequences: until a real source is wired in, the clock is behind real time, by the
+time since the build less the time the board has been running (a restart resumes from
+the last announce, so up to an announce interval of running time is also lost). This
+only matters for logs and for peers that compare timestamps with their own clock.
+Rebuild or set the time to bring it up to date. Flash writes for the mark: one NVS
+write per announce (every 10 minutes by default), and at most one per 10 seconds when
+path requests keep coming.
 
 ## Memory
 
@@ -659,6 +664,7 @@ no test has had a stock RNode on the other end. Sizes are the payload sent; "int
 | 2026-11-28 | T-Beam Supreme and T-Echo, both RNode mode; 920 MHz, 125 kHz, SF8, CR 4/5, 2 dBm; code of 0.8.0 | Radio reports read by `reticulum-c-ctl status`; 2 KiB and 1 KiB files between the boards | Files intact; RSSI -30 to -33 dBm, SNR 12 to 14 dB. Airtime and channel load rose and fell with the transfers; noise floor -90 to -92 dBm; temperature 29 to 30 C; battery read 100 % charged on USB power (discharging was not checked) |
 | 2026-11-28 | T-Echo back on the Pi (release 0.7.0), T-Beam Supreme on a PC | One announce over LoRa | Received by the Pi; RSSI -65 dBm, SNR 12.5 dB |
 | 2026-11-28 | Heltec V3 (updated from 0.6.0 keeping its settings), serial mode with LoRa gateway; 915 MHz, 125 kHz, SF8, CR 4/5, 0 dBm; firmware 0.8.0 | Over USB serial: announce, `/echo`, `/info`. Over LoRa from a T-Beam Supreme in RNode mode at 2 dBm, with nothing on the Heltec's serial port: the same, with the board reset before each run | USB passed. LoRa passed 3 of 3 with a node that had no memory of the board, each run needing one or two request retries; RSSI -41 to -42 dBm, SNR 12.5 to 14.5 dB. Forwarding between USB and LoRa was not tested |
+| 2026-11-28 | Heltec V3 LoRa gateway; 915 MHz, 500 kHz, SF8, CR 4/5, 0 dBm, airtime limit 100 %; a T-Beam Supreme in RNode mode listening | Board reset repeatedly a few seconds apart while one node kept running (the clock policy below) | 0.8.0: announces after the first restart ignored. A first fix that stored the time at boot ran the clock about 118 s ahead per restart, until announces were refused. With the time stored when announcing: 10 restarts of 10 accepted (9 also completed `/echo` and `/info`; one `/info` was lost on the air), the clock never ahead |
 
 Never run on a bench: T-Beam v1.0/v1.1, T3-S3, Heltec V2, RAK4631, Heltec T114, the ESP-IDF builds, the ESP32
 Bluetooth transport, Wi-Fi mode, and the SX1302 concentrator program (`mcu/sx1302/`).

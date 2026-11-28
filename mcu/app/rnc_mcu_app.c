@@ -31,7 +31,8 @@ struct rnc_mcu_app {
   rnc_responder *responder;
   uint8_t destination[16];
   /* clock (see the policy in rnc_mcu_app.h): unix = base + now_ms / 1000 */
-  uint64_t base, last_unix, last_persist_unix;
+  uint64_t base, last_unix;
+  uint64_t time_mark; /* the stored mark: no announce has left with a later time */
   int persist_time;
   uint64_t last_now_ms;
   /* transport link (platform link_up): -1 unknown, 0 down, 1 up */
@@ -84,23 +85,30 @@ uint64_t rnc_mcu_app_unix(rnc_mcu_app *app, uint64_t now_ms) {
   app->last_unix = u;
   return u;
 }
+static void store_mark(rnc_mcu_app *app, uint64_t mark) {
+  uint8_t b[8];
+  unsigned i;
+  if (!app->persist_time) /* a real clock needs no mark */
+    return;
+  for (i = 0; i < 8; i++)
+    b[i] = (uint8_t)(mark >> (56u - 8u * i));
+  if (app->platform.persist(app->platform.context, RNC_MCU_KEY_TIME, b, sizeof(b)) == 0)
+    app->time_mark = mark;
+}
+/* Called before an announce of ours leaves: the mark must be at least its time, so that the next run starts later.
+ * It is stored a little ahead, so that answering many path requests does not mean as many flash writes. */
+static void cover_time(rnc_mcu_app *app, uint64_t unix_now) {
+  if (unix_now > app->time_mark)
+    store_mark(app, unix_now + RNC_MCU_TIME_RESERVE_S);
+}
 int rnc_mcu_app_set_unix(rnc_mcu_app *app, uint64_t now_ms, uint64_t unix_seconds) {
   uint64_t u = rnc_mcu_app_unix(app, now_ms);
   if (unix_seconds <= u || unix_seconds > UINT64_C(0xffffffffff))
     return -1;
   app->base = unix_seconds - now_ms / 1000u;
   app->last_unix = unix_seconds;
+  store_mark(app, unix_seconds); /* a time worth keeping even if nothing is announced before a reset */
   return 0;
-}
-static void persist_time(rnc_mcu_app *app, uint64_t unix_now) {
-  uint8_t b[8];
-  unsigned i;
-  if (!app->persist_time || unix_now < app->last_persist_unix + RNC_MCU_TIME_PERSIST_S)
-    return;
-  for (i = 0; i < 8; i++)
-    b[i] = (uint8_t)(unix_now >> (56u - 8u * i));
-  if (app->platform.persist(app->platform.context, RNC_MCU_KEY_TIME, b, sizeof(b)) == 0)
-    app->last_persist_unix = unix_now;
 }
 static void clock_init(rnc_mcu_app *app, uint64_t now_ms) {
   uint64_t start = RNC_MCU_BUILD_EPOCH, real = 0;
@@ -117,8 +125,8 @@ static void clock_init(rnc_mcu_app *app, uint64_t now_ms) {
       unsigned i;
       for (i = 0; i < 8; i++)
         stored = (stored << 8) | b[i];
-      /* later than anything announced before the reboot */
-      stored += RNC_MCU_TIME_PERSIST_S + 1u;
+      app->time_mark = stored;
+      stored += 1u; /* later than anything announced before the reboot */
       if (stored > start && stored < UINT64_C(0xffffffffff))
         start = stored;
     }
@@ -126,7 +134,6 @@ static void clock_init(rnc_mcu_app *app, uint64_t now_ms) {
   }
   app->base = start - now_ms / 1000u;
   app->last_unix = start;
-  app->last_persist_unix = start;
 }
 
 /* ---- request handlers ----------------------------------------------------- */
@@ -222,6 +229,10 @@ static void transmit(rnc_mcu_app *app, const rnc_packet *packet) {
 static void drain(rnc_mcu_app *app, uint64_t unix_now, uint64_t now_ms) {
   while (rnc_node_poll(app->node, &app->event) == RNC_OK) {
     if (app->event.type == RNC_NODE_SEND) {
+      /* scheduled announces and answers to path requests alike */
+      if ((app->event.packet.flags & 3u) == RNC_ANNOUNCE &&
+          !memcmp(app->event.packet.destination, app->destination, 16))
+        cover_time(app, unix_now);
       if (app->event.interface_id == IFACE_LORA)
         transmit_lora(app, &app->event.packet, now_ms);
       else
@@ -473,7 +484,6 @@ unsigned rnc_mcu_app_step(rnc_mcu_app *app, uint64_t now_ms) {
         now_ms + (app->announces == 1u ? FIRST_REPEAT_MS : app->config.announce_interval_ms);
     drain(app, unix_now, now_ms);
   }
-  persist_time(app, unix_now);
   if (((app->primary && app->link != 0) || app->lora_up) && app->next_announce_ms > now_ms &&
       app->next_announce_ms - now_ms < wait)
     wait = (unsigned)(app->next_announce_ms - now_ms);
