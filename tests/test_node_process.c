@@ -6887,6 +6887,61 @@ static void sh_reference(const char *exe, const char *sh, const char *python) {
   puts("sh reference tests passed");
 }
 
+/* BackboneInterface `device`: the listener takes the device's address, which wins over listen_ip, IPv6 with
+ * prefer_ipv6, as the reference's get_address_for_if; a device that is not there is refused. */
+static int loopback_connects(int family, unsigned port) {
+  struct sockaddr_storage address;
+  socklen_t size;
+  int fd = socket(family, SOCK_STREAM, 0), ok;
+  CHECK(fd >= 0);
+  memset(&address, 0, sizeof(address));
+  if (family == AF_INET) {
+    struct sockaddr_in *a = (struct sockaddr_in *)&address;
+    a->sin_family = AF_INET;
+    a->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a->sin_port = htons((uint16_t)port);
+    size = sizeof(*a);
+  } else {
+    struct sockaddr_in6 *a = (struct sockaddr_in6 *)&address;
+    a->sin6_family = AF_INET6;
+    a->sin6_addr = in6addr_loopback;
+    a->sin6_port = htons((uint16_t)port);
+    size = sizeof(*a);
+  }
+  ok = !connect(fd, (struct sockaddr *)&address, size);
+  close(fd);
+  return ok;
+}
+static void backbone_device(const char *exe) {
+  char dir[] = "/tmp/rnc-bbdev-XXXXXX", cfg[256], key[256], admin[256], text[1024], identity[33];
+#ifdef __APPLE__
+  const char *loopback = "lo0";
+#else
+  const char *loopback = "lo";
+#endif
+  unsigned four = unused_port(), six = unused_port(), absent = unused_port();
+  pid_t daemon;
+  int dfd;
+  CHECK(mkdtemp(dir));
+  CHECK(snprintf(cfg, sizeof(cfg), "%s/config", dir) > 0);
+  CHECK(snprintf(key, sizeof(key), "%s/identity", dir) > 0);
+  CHECK(snprintf(admin, sizeof(admin), "%s/admin", dir) > 0);
+  CHECK(snprintf(text, sizeof(text),
+                 "[reticulum]\nshare_instance = No\n[interfaces]\n"
+                 "[[Four]]\ntype = BackboneInterface\ndevice = %s\nlisten_ip = 192.0.2.1\nport = %u\n"
+                 "[[Six]]\ntype = BackboneInterface\ndevice = %s\nprefer_ipv6 = Yes\nport = %u\n"
+                 "[[Absent]]\ntype = BackboneInterface\ndevice = nosuchdev0\nport = %u\n",
+                 loopback, four, loopback, six, absent) > 0);
+  config_file(cfg, text);
+  daemon = start(exe, cfg, key, admin, &dfd);
+  ready_line(dfd, identity);
+  CHECK(loopback_connects(AF_INET, four)); /* not the unusable listen_ip */
+  CHECK(loopback_connects(AF_INET6, six) && !loopback_connects(AF_INET, six));
+  CHECK(!loopback_connects(AF_INET, absent) && !loopback_connects(AF_INET6, absent));
+  stop(daemon, dfd);
+  remove_tree(dir);
+  puts("backbone device binding works");
+}
 /* An interface that cannot be opened is skipped (the reference's default) and
  * the rest keep working; panic_on_interface_error makes it fatal. */
 static void panic_on_interface(const char *exe) {
@@ -8179,6 +8234,8 @@ int main(int argc, char **argv) {
     cli_tools(argv[1], argv[3]);
   else if (!strcmp(argv[2], "ctl_rnsd_ref") && argc == 6)
     ctl_rnsd(argv[3], argv[4], argv[5]);
+  else if (!strcmp(argv[2], "backbone_device") && argc == 3)
+    backbone_device(argv[1]);
   else if (!strcmp(argv[2], "rnid_request") && argc == 4)
     rnid_request(argv[1], argv[3]);
   else if (!strcmp(argv[2], "rnid_request_ref") && argc == 6)

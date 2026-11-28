@@ -570,7 +570,7 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             add_test(NAME reticulum_sh_line COMMAND test_sh_line)
             add_executable(test_node_process tests/test_node_process.c)
             target_link_libraries(test_node_process PRIVATE reticulum_c_host OpenSSL::Crypto)
-            foreach(case cli panic mtu network shared blackhole management sources probe netid disc_announce disc_listen disc_autoconnect logging tunnel_persist stamper stamper_shutdown stamper_requests)
+            foreach(case cli panic backbone_device mtu network shared blackhole management sources probe netid disc_announce disc_listen disc_autoconnect logging tunnel_persist stamper stamper_shutdown stamper_requests)
                 add_test(NAME reticulum_node_process_${case} COMMAND test_node_process
                     $<TARGET_FILE:reticulum-c-node> ${case})
             endforeach()
@@ -654,7 +654,8 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                 set_tests_properties(reticulum_node_tcp_names PROPERTIES
                     LABELS network TIMEOUT 200 SKIP_RETURN_CODE 77)
             endif()
-            set_tests_properties(reticulum_node_process_network reticulum_node_process_shared reticulum_node_process_management
+            set_tests_properties(reticulum_node_process_network reticulum_node_process_backbone_device reticulum_node_process_shared
+                reticulum_node_process_management
                 reticulum_node_process_sources reticulum_node_process_probe reticulum_node_process_netid reticulum_node_process_disc_announce reticulum_node_process_disc_listen reticulum_node_process_disc_autoconnect reticulum_node_process_logging reticulum_node_process_tunnel_persist reticulum_node_process_stamper reticulum_node_process_stamper_shutdown reticulum_node_process_stamper_requests
                 PROPERTIES LABELS network TIMEOUT 60)
             if(RNC_INTEROP_TESTS)
