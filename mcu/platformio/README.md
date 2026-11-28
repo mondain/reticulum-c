@@ -11,7 +11,7 @@ framework so it builds for common LoRa boards with one command:
   boards/ (board definitions PlatformIO
   does not ship), scripts/ (collects the flashable files)
 
-STATUS: every environment below builds. T-Echo, Supreme SX1262 and XIAO SX1262 have passed
+STATUS: every environment below builds. T-Echo, Supreme SX1262, XIAO SX1262 and Heltec V3 have passed
 short hardware bench runs ("Bench record" in ../README.md); other boards have no radio evidence.
 The board talks to a host over its serial/USB port, or (ESP32 and ESP32-S3 environments
 only) over Wi-Fi and TCP, see "Wi-Fi mode" below, and, once configured, over a LoRa radio,
@@ -409,7 +409,7 @@ library.json) and RNC_MCU_BUILD_EPOCH. Use a task stack of at least 12 KB (16 KB
 
 ## Limits
 
-- Hardware bench coverage: short runs on the T-Echo, Supreme SX1262 and XIAO SX1262 ("Bench record" in
+- Hardware bench coverage: short runs on the T-Echo, Supreme SX1262, XIAO SX1262 and Heltec V3 ("Bench record" in
   ../README.md). Other boards retain build/model coverage. Range, sustained load and stock RNode interoperability
   remain unverified.
 - Host interfaces are serial/USB or, on ESP32, a Wi-Fi TCP client (no access point mode, UDP/AutoInterface, TLS or

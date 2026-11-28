@@ -22,8 +22,7 @@ mcu/platformio/   the same firmware for the Arduino framework on ESP32 and nRF52
 
 STATUS: the firmware builds for ESP32, ESP32-S3 and nRF52840, and the same application logic
 passes the host tests against reticulum-c-node and the reference Reticulum.
-Hardware has been checked on a T-Echo, a T-Beam Supreme, a XIAO nRF52840 with Wio-SX1262 and, for its screen only, a
-Heltec V3: short bench runs, listed in "Bench record" below. Other boards, range, sustained load and stock RNode
+Hardware has been checked on a T-Echo, a T-Beam Supreme, a XIAO nRF52840 with Wio-SX1262 and a Heltec V3: short bench runs, listed in "Bench record" below. Other boards, range, sustained load and stock RNode
 radio interoperability remain unverified.
 
 ## What the firmware is
@@ -588,9 +587,12 @@ application keeps its own, which never goes backwards and is only ever late:
    that value is used. The example firmware has no such hook.
 2. Otherwise: build time (RNC_MCU_BUILD_EPOCH, set by the build at configure time)
    plus uptime, raised to a high-water mark stored in NVS every 120 seconds. After
-   a reboot the clock starts at the stored mark plus 121 seconds, so it is later
-   than any announce sent before the reset and paths on the other side keep
-   updating. It is never ahead of real time by more than about two minutes.
+   a reboot the clock starts at the stored mark plus 121 seconds, so, if the previous
+   run lasted at least 120 seconds, it is later than any announce sent before the
+   reset and paths on the other side keep updating. No mark is stored at boot: after a
+   run shorter than 120 seconds the clock can start where that run did, and a node
+   that remembers the board ignores its announces until the clock has passed the
+   last one it heard. It is never ahead of real time by more than about two minutes.
 3. rnc_mcu_app_set_unix() moves the clock forward when the host or a user tells
    the device the real time (a port can wire this to a command or a GPS fix).
    
@@ -656,6 +658,7 @@ no test has had a stock RNode on the other end. Sizes are the payload sent; "int
 | 2026-11-27 | Same boards; T-Beam Supreme with the USB fix (0.7.1) | 20 known packets to the Supreme; 100-byte files from it to the Pi | Packets intact: 14 of 20 before, 20 of 20 after. Files: 6 of 8 before, 8 of 8 after |
 | 2026-11-28 | T-Beam Supreme and T-Echo, both RNode mode; 920 MHz, 125 kHz, SF8, CR 4/5, 2 dBm; code of 0.8.0 | Radio reports read by `reticulum-c-ctl status`; 2 KiB and 1 KiB files between the boards | Files intact; RSSI -30 to -33 dBm, SNR 12 to 14 dB. Airtime and channel load rose and fell with the transfers; noise floor -90 to -92 dBm; temperature 29 to 30 C; battery read 100 % charged on USB power (discharging was not checked) |
 | 2026-11-28 | T-Echo back on the Pi (release 0.7.0), T-Beam Supreme on a PC | One announce over LoRa | Received by the Pi; RSSI -65 dBm, SNR 12.5 dB |
+| 2026-11-28 | Heltec V3 (updated from 0.6.0 keeping its settings), serial mode with LoRa gateway; 915 MHz, 125 kHz, SF8, CR 4/5, 0 dBm; firmware 0.8.0 | Over USB serial: announce, `/echo`, `/info`. Over LoRa from a T-Beam Supreme in RNode mode at 2 dBm, with nothing on the Heltec's serial port: the same, with the board reset before each run | USB passed. LoRa passed 3 of 3 with a node that had no memory of the board, each run needing one or two request retries; RSSI -41 to -42 dBm, SNR 12.5 to 14.5 dB. Forwarding between USB and LoRa was not tested |
 
 Never run on a bench: T-Beam v1.0/v1.1, T3-S3, Heltec V2, RAK4631, Heltec T114, the ESP-IDF builds, the ESP32
 Bluetooth transport, Wi-Fi mode, and the SX1302 concentrator program (`mcu/sx1302/`).

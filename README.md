@@ -277,7 +277,7 @@ The PlatformIO firmware also has an `rnode` mode (`set mode rnode`, or "Run as: 
 
 The Pages workflow builds all nine board variants from the displayed source
 commit, validates flash layouts and checksums, and retains up to five versions.
-Only a T-Echo, a T-Beam Supreme and a XIAO nRF52840 with Wio-SX1262 have radio bench evidence. This does not
+Only a T-Echo, a T-Beam Supreme, a XIAO nRF52840 with Wio-SX1262 and a Heltec V3 have radio bench evidence. This does not
 establish long-running, range, or stock RNode radio interoperability.
 
 To preview locally, build firmware with `mcu/build-platformio.sh`, then:
