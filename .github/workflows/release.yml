@@ -182,11 +182,32 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat > notes.md <<'NOTES'
-          ## Security
+          ## Check before upgrading from v0.6.x
 
-          Fixed in v0.6.1: `reticulum-c-git` v0.2.0-rc2 to v0.6.0 passed repository files to the image encoder of its media pages without checking their format. With some ImageMagick installations a crafted file can use this to read files that the node's user can read. It applies when the page server is enabled (`serve_nomadnet`), `media_conversion` is on (the default), an encoder is installed and someone else can get a file into a served repository. Upgrade, or set `media_conversion = no` in the `[pages]` section. RNS fixed the same issue in its re-released 1.6.1 on 2026-11-19.
+          - **`AutoInterface` now uses every suitable network device.** Before, it used only the first. Without a `devices` line, announces now go out on every such network (container, VM and VPN devices included). Limit it with `devices` or `ignored_devices`.
+          - **Traffic statistics read differently:** discarded packets are no longer counted in received bytes, and totals are running totals that keep closed connections and leave out local programs.
+          - **Request timeouts** (`rnc_service`, `rnc_requester`) are now the time for the answer to begin: a response that is already arriving is no longer cut off.
+          - `reticulum-c-ctl id -a` takes 3 seconds, so that `rnsd` passes the announce on.
+          - **Library users must rebuild:** `rnc_host_status` and `rnc_host_totals` grew, so the shared library's ABI number is now 2.
 
-          **Check before upgrading from v0.6.0:** tunnel synthesis is now sent in the RNS 1.6 form, which a server running RNS 1.5 refuses. For a connection to such a server set `tunnel_extension = No` on that interface.
+          ## New since v0.6.1
+
+          - `reticulum-c-ctl id` takes a destination or identity hash: it recalls identities the running instance has heard, and `-R` asks the network (`-t`, `-N`). The node answers the shared-instance call for known destinations, so the reference's `rnid` finds them too.
+          - `reticulum-c-ctl status`: `-F`, `-t`, `-A`, `-P`, `-B`, `-b`, `-p`, with real figures, also shown by the reference's `rnstatus`.
+          - `reticulum-c-sh`: line-interactive mode (`~L`) and `~?`; the allowed-identities file is read for every connection.
+          - `reticulum-c-x -l` runs commands as jobs while serving, with up to 16 MiB of output.
+          - `AutoInterface` follows address changes, drops duplicates across devices, and takes up devices that appear after start.
+          - TCP clients and Wi-Fi RNodes given by name look it up for every connection, without stopping the node; a name that does not resolve yet is retried.
+          - Library: stamped identities, filtered and link traffic statistics, ingress state, known-destination listing.
+          - Examples: plain, group, ratchet, link, identify, channel and buffer.
+          - `reticulum-c-rnode-sx1302` presents a WM1302 concentrator HAT as an RNode. **Not tested on hardware**, and not part of these builds (it needs Semtech's `sx1302_hal`).
+
+          ## Fixed
+
+          - `reticulum-c-ctl path` and `path -t` without `-m` failed against `rnsd`.
+          - Announces from `reticulum-c-ctl id -a` could be dropped by `rnsd`.
+
+          Upgrading from v0.6.0 or older: also read the v0.6.1 notes (a `reticulum-c-git` security fix and the RNS 1.6 tunnel form).
 
           ## Linux builds
 
