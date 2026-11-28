@@ -653,6 +653,14 @@ static void flap_record(host_interface *l, const char *ip, uint64_t now) {
   l->flaps[slot].last = now;
 }
 static void i2p_session_lost(rnc_host *h, host_interface *controller);
+/* Forgets what the radio had reported: it is not true of a radio that has gone away. */
+static void rnode_stats_clear(rnc_host_status *s) {
+  s->has_channel_stats = s->has_noise_floor = s->has_interference = s->has_last_interference = s->has_temperature = 0;
+  s->airtime_short = s->airtime_long = s->channel_load_short = s->channel_load_long = 0;
+  s->noise_floor = s->interference = s->last_interference = s->temperature = 0;
+  s->last_interference_time = 0;
+  s->battery_state = s->battery_percent = 0;
+}
 static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
   int was_connecting = f->connecting || f->connect_failed;
   if (f->flap_pending) {
@@ -710,6 +718,7 @@ static void disconnect_interface(rnc_host *h, host_interface *f, int error) {
   if (f->status.kind == RNC_HOST_I2P)
     i2p_session_lost(h, f);
   if (f->status.kind == RNC_HOST_RNODE) {
+    rnode_stats_clear(&f->status);
     f->status.radio_ready = 0;
     f->radio_ack_mask = 0;
     f->radio_deadline = 0;
@@ -3119,8 +3128,9 @@ static rnc_result receive_datagram(rnc_host *h, host_interface *f,
              ? RNC_OK
              : pump_node(h);
 }
+static double hundredths(const uint8_t *b) { return (double)(((unsigned)b[0] << 8) | b[1]) / 100.0; }
 static int rnode_report(host_interface *f, uint8_t command, const uint8_t *raw,
-                        size_t n) {
+                        size_t n, uint64_t unix_seconds) {
   if (command == 0x23 && n >= 1) { /* RSSI of the next frame */
     f->status.rssi = (int)raw[0] - 157;
     f->status.has_signal = 1;
@@ -3132,6 +3142,29 @@ static int rnode_report(host_interface *f, uint8_t command, const uint8_t *raw,
     f->status.snr = (float)snr;
     f->status.quality = (float)(q > 100.0 ? 100.0 : q < 0.0 ? 0.0 : q);
     f->status.has_signal = 1;
+  } else if (command == 0x25 && n >= 11) {
+    /* airtime and channel load, short and long; current RSSI; noise floor; interference (0xff: none) */
+    rnc_host_status *s = &f->status;
+    s->airtime_short = hundredths(raw);
+    s->airtime_long = hundredths(raw + 2);
+    s->channel_load_short = hundredths(raw + 4);
+    s->channel_load_long = hundredths(raw + 6);
+    s->has_channel_stats = 1;
+    s->noise_floor = (int)raw[9] - 157;
+    s->has_noise_floor = 1;
+    s->has_interference = raw[10] != 0xff;
+    if (s->has_interference) {
+      s->interference = s->last_interference = (int)raw[10] - 157;
+      s->last_interference_time = unix_seconds;
+      s->has_last_interference = 1;
+    }
+  } else if (command == 0x27 && n >= 2) { /* battery state and charge */
+    f->status.battery_state = raw[0] <= 3 ? raw[0] : 0;
+    f->status.battery_percent = raw[1] > 100 ? 100u : raw[1];
+  } else if (command == 0x29 && n >= 1) { /* temperature, offset by 120 */
+    const int temperature = (int)raw[0] - 120;
+    f->status.has_temperature = temperature >= -30 && temperature <= 90;
+    f->status.temperature = f->status.has_temperature ? temperature : 0;
   } else if (command >= 1 && command <= 6) {
     uint8_t expected[4];
     size_t expected_size = 1;
@@ -3255,7 +3288,7 @@ static rnc_result multi_frame(rnc_host *h, host_interface *dev,
   default:
     radio = find_sub(h, dev, dev->selected);
     if (radio)
-      (void)rnode_report(radio, command, raw, n);
+      (void)rnode_report(radio, command, raw, n, unix_seconds);
     return RNC_OK;
   }
 }
@@ -3637,7 +3670,7 @@ static rnc_result receive_stream(rnc_host *h, host_interface *f,
             disconnect_interface(h, f, EPROTONOSUPPORT);
             return RNC_OK;
           }
-        } else if (rnode_report(f, command, raw, n)) {
+        } else if (rnode_report(f, command, raw, n, unix_seconds)) {
           /* signal statistics, radio parameter acknowledgements, ready */
         } else if (command == 0x90 || (command == 0x55 && n && raw[0] == 0xf8)) {
           disconnect_interface(h, f, EIO);

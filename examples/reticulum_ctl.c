@@ -926,6 +926,54 @@ static void print_burst(const val *f, const char *active, const char *since) {
   printf(", burst for %.0f s", age > 0 ? age : 0);
 }
 /* The lines rnstatus -A and -P add to an interface, and the addresses it refuses. */
+static void disc_pretty(double seconds, char *out, size_t cap);
+/* a percentage as Python prints the float: up to two decimals, at least one */
+static void percent_text(double value, char *out, size_t cap) {
+  size_t n;
+  (void)snprintf(out, cap, "%.2f", value);
+  n = strlen(out);
+  while (n > 2 && out[n - 1] == '0' && out[n - 2] != '.')
+    out[--n] = 0;
+}
+/* the radio's own figures, as rnstatus shows them */
+static void print_radio(const val *f) {
+  const val *v = map_get(f, "noise_floor"), *seen, *when, *dbm;
+  char a[32], b[32];
+  if (v && (v->type == V_INT || v->type == V_UINT)) {
+    printf("    Noise Fl. : %.0f dBm", as_double(v));
+    seen = map_get(f, "interference");
+    when = map_get(f, "interference_last_ts");
+    dbm = map_get(f, "interference_last_dbm");
+    if (seen && seen->type != V_NIL && as_double(seen) != 0)
+      printf("\n    Intrfrnc. : %.0f dBm", as_double(seen));
+    else if (when && dbm) {
+      disc_pretty((double)time(NULL) - as_double(when), a, sizeof(a));
+      printf("\n    Intrfrnc. : %.0f dBm %s ago", as_double(dbm), a);
+    } else if (seen)
+      fputs(", no interference", stdout);
+    putchar('\n');
+  } else if (v)
+    puts("    Noise Fl. : Unknown");
+  v = map_get(f, "cpu_temp");
+  if (v && v->type != V_NIL)
+    printf("    CPU temp  : %.0f\xc2\xb0" "C\n", as_double(v));
+  else if (v)
+    puts("    CPU temp  : Unknown");
+  v = map_get(f, "battery_state");
+  if (v && v->type == V_STR && map_get(f, "battery_percent"))
+    printf("    Battery   : %llu%% (%.*s)\n", (unsigned long long)as_uint(map_get(f, "battery_percent")), (int)v->n,
+           (const char *)v->p);
+  if (map_get(f, "airtime_short") && map_get(f, "airtime_long")) {
+    percent_text(as_double(map_get(f, "airtime_short")), a, sizeof(a));
+    percent_text(as_double(map_get(f, "airtime_long")), b, sizeof(b));
+    printf("    Airtime   : %s%% (15s), %s%% (1h)\n", a, b);
+  }
+  if (map_get(f, "channel_load_short") && map_get(f, "channel_load_long")) {
+    percent_text(as_double(map_get(f, "channel_load_short")), a, sizeof(a));
+    percent_text(as_double(map_get(f, "channel_load_long")), b, sizeof(b));
+    printf("    Ch. Load  : %s%% (15s), %s%% (1h)\n", a, b);
+  }
+}
 static void print_ingress(const val *f, const status_parts *parts) {
   const val *v = map_get(f, "blocked_ips");
   uint64_t n;
@@ -1207,6 +1255,7 @@ static int cmd_status(int argc, char **argv) {
              v->type == V_INT ? (long long)v->i : (long long)v->u,
              as_double(map_get(f, "snr")), as_double(map_get(f, "q")));
     }
+    print_radio(f);
     v = map_get(f, "clients");
     if (v && v->type == V_UINT)
       printf("    Clients   : %llu\n", (unsigned long long)v->u);

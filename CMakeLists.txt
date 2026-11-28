@@ -521,10 +521,10 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
     if(BUILD_TESTING)
         add_executable(test_host tests/test_host.c)
         target_link_libraries(test_host PRIVATE reticulum_c_host OpenSSL::Crypto)
-        foreach(case codecs serial network keys rnode rnode_extras rnode_detect rnode_signal rnode_tcp pipe ax25 fast_flap tcp_options i2p_tunneled connect_late_clock no_output identity_files await_path serial_params kiss log tunnel pressure ingress_control egress_control udp unix device policy)
+        foreach(case codecs serial network keys rnode rnode_extras rnode_detect rnode_signal rnode_stats rnode_tcp pipe ax25 fast_flap tcp_options i2p_tunneled connect_late_clock no_output identity_files await_path serial_params kiss log tunnel pressure ingress_control egress_control udp unix device policy)
             add_test(NAME reticulum_host_${case} COMMAND test_host ${case})
         endforeach()
-        set_tests_properties(reticulum_host_serial reticulum_host_kiss reticulum_host_rnode reticulum_host_rnode_extras reticulum_host_rnode_detect reticulum_host_rnode_signal reticulum_host_pipe reticulum_host_ax25 reticulum_host_pressure
+        set_tests_properties(reticulum_host_serial reticulum_host_kiss reticulum_host_rnode reticulum_host_rnode_extras reticulum_host_rnode_detect reticulum_host_rnode_signal reticulum_host_rnode_stats reticulum_host_pipe reticulum_host_ax25 reticulum_host_pressure
             PROPERTIES LABELS pty)
         set_tests_properties(reticulum_host_network reticulum_host_udp reticulum_host_await_path reticulum_host_rnode_tcp
             PROPERTIES LABELS network TIMEOUT 30)
@@ -635,6 +635,9 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
             add_test(NAME reticulum_node_process_rnid_request COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> rnid_request $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_rnid_request PROPERTIES LABELS network TIMEOUT 60)
+            add_test(NAME reticulum_node_process_radio_status COMMAND test_node_process
+                $<TARGET_FILE:reticulum-c-node> radio_status $<TARGET_FILE:reticulum-c-ctl>)
+            set_tests_properties(reticulum_node_process_radio_status PROPERTIES LABELS network TIMEOUT 60)
             add_test(NAME reticulum_node_process_cli_tools COMMAND test_node_process
                 $<TARGET_FILE:reticulum-c-node> cli_tools $<TARGET_FILE:reticulum-c-ctl>)
             set_tests_properties(reticulum_node_process_cli_tools PROPERTIES LABELS network TIMEOUT 60)
@@ -774,6 +777,12 @@ if(UNIX AND RNC_BUILD_HOST AND RNC_HAVE_OPENSSL)
                     set_tests_properties(reticulum_node_auto_devices_rns PROPERTIES
                         LABELS "reticulum_interop;network" TIMEOUT 240 SKIP_RETURN_CODE 77)
                 endif()
+                add_test(NAME reticulum_node_process_radio_status_rns COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
+                    $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> radio_status_ref
+                    $<TARGET_FILE:reticulum-c-ctl> "${RNC_REFERENCE_DIR}" ${Python3_EXECUTABLE})
+                set_tests_properties(reticulum_node_process_radio_status_rns
+                    PROPERTIES LABELS "reticulum_interop;network" TIMEOUT 90)
                 add_test(NAME reticulum_node_process_cp_big_rns COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${RNC_REFERENCE_DIR}:${RNC_INTEROP_PYTHONPATH}"
                     $<TARGET_FILE:test_node_process> $<TARGET_FILE:reticulum-c-node> cp_big_ref

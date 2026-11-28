@@ -1232,6 +1232,108 @@ static void rnode_signal_run(unsigned sf, uint8_t rssi_byte, uint8_t snr_byte,
   rnc_node_free(node);
   close(tap.master);
 }
+/* one report from the radio, and time for the host to read what was written */
+static void stats_frame(int master, uint8_t command, const uint8_t *data, size_t size) {
+  uint8_t wire[64];
+  size_t m;
+  CHECK(rnc_host_frame_encode(RNC_HOST_KISS_FRAMING, command, data, size, wire, sizeof(wire), &m) == RNC_OK);
+  CHECK(write(master, wire, m) == (ssize_t)m);
+}
+static void stats_wait(rnc_host *host, uint64_t *now, unsigned steps) {
+  unsigned i;
+  for (i = 0; i < steps; ++i)
+    CHECK(rnc_host_step(host, 1, 1700000000, *now += 10) == RNC_OK);
+}
+static void rnode_stats_test(void) {
+  const unsigned sf = 8;
+  uint8_t key[64] = {0}, key2[64] = {9}, raw[RNC_MAX_MTU], wire[RNC_HOST_FRAME_MAX],
+          stats[8];
+  unsigned rng = 0, i;
+  uint64_t now = 100;
+  size_t n, m;
+  detect_tap tap;
+  rnc_identity id, other;
+  rnc_node *node;
+  rnc_host *host;
+  rnc_host_config cfg = {0};
+  rnc_host_status status;
+  rnc_host_event event;
+  rnc_packet announce;
+  int found = 0;
+  memset(&tap, 0, sizeof(tap));
+  tap.mode = 2;
+  tap.fw[0] = 1;
+  tap.fw[1] = 74;
+  tap.master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  CHECK(tap.master >= 0 && !grantpt(tap.master) && !unlockpt(tap.master));
+  CHECK(rnc_identity_from_private(&id, key) == RNC_OK &&
+        rnc_identity_from_private(&other, key2) == RNC_OK);
+  node = rnc_node_new(&id, 0, random_bytes, &rng);
+  host = node ? rnc_host_new(node) : NULL;
+  CHECK(host);
+  cfg.kind = RNC_HOST_RNODE;
+  cfg.address = ptsname(tap.master);
+  cfg.serial_baud = 115200;
+  cfg.frequency = 915000000;
+  cfg.bandwidth = 125000;
+  cfg.tx_power = 10;
+  cfg.spreading_factor = sf;
+  cfg.coding_rate = 5;
+  CHECK(rnc_host_add(host, 1, &cfg) == RNC_OK);
+  for (i = 0; i < 1000; ++i) {
+    CHECK(rnc_host_step(host, 0, 1700000000, now += 10) == RNC_OK);
+    detect_drain(&tap);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    if (status.radio_ready)
+      break;
+  }
+  CHECK(status.radio_ready);
+  /* nothing is known until the radio says so */
+  CHECK(!status.has_channel_stats && !status.has_noise_floor && !status.has_interference &&
+        !status.has_temperature && status.battery_state == 0 && status.battery_percent == 0);
+  /* airtime 1.92 % and 0.45 %, channel load 50 % and 2.5 %, current RSSI, noise floor -97 dBm, no interference.
+   * 192 is the byte KISS has to escape. */
+  {
+    const uint8_t chtm[11] = {0x00, 0xc0, 0x00, 45, 0x13, 0x88, 0x00, 250, 100, 60, 0xff};
+    const uint8_t battery[2] = {1, 87}, temperature[1] = {161};
+    stats_frame(tap.master, 0x25, chtm, sizeof(chtm));
+    stats_frame(tap.master, 0x27, battery, sizeof(battery));
+    stats_frame(tap.master, 0x29, temperature, sizeof(temperature));
+  }
+  stats_wait(host, &now, 20);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+  CHECK(status.has_channel_stats && status.airtime_short > 1.9199 && status.airtime_short < 1.9201 &&
+        status.airtime_long > 0.4499 && status.airtime_long < 0.4501 && status.channel_load_short == 50.0 &&
+        status.channel_load_long == 2.5);
+  CHECK(status.has_noise_floor && status.noise_floor == -97 && !status.has_interference &&
+        !status.has_last_interference);
+  CHECK(status.has_temperature && status.temperature == 41 && status.battery_state == 1 &&
+        status.battery_percent == 87);
+  /* interference seen, then gone: the last sighting is kept; a percentage over 100 reads as 100, and a
+   * temperature outside -30 to 90 as unknown */
+  {
+    const uint8_t seen[11] = {0, 0, 0, 0, 0, 0, 0, 0, 100, 60, 80};
+    const uint8_t gone[11] = {0, 0, 0, 0, 0, 0, 0, 0, 100, 60, 0xff};
+    const uint8_t battery[2] = {2, 150}, temperature[1] = {255};
+    stats_frame(tap.master, 0x25, seen, sizeof(seen));
+    stats_wait(host, &now, 20);
+    CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+    CHECK(status.has_interference && status.interference == -77 && status.has_last_interference &&
+          status.last_interference == -77 && status.last_interference_time == 1700000000);
+    stats_frame(tap.master, 0x25, gone, sizeof(gone));
+    stats_frame(tap.master, 0x27, battery, sizeof(battery));
+    stats_frame(tap.master, 0x29, temperature, sizeof(temperature));
+    stats_frame(tap.master, 0x25, seen, 3); /* a short report is ignored */
+  }
+  stats_wait(host, &now, 20);
+  CHECK(rnc_host_get_status(host, 1, &status) == RNC_OK);
+  CHECK(!status.has_interference && status.has_last_interference && status.last_interference == -77);
+  CHECK(status.battery_state == 2 && status.battery_percent == 100 && !status.has_temperature);
+  rnc_host_free(host);
+  rnc_node_free(node);
+  close(tap.master);
+  puts("host RNode statistics tests passed");
+}
 static void rnode_signal_test(void) {
   /* SF7: quality spans -9 to 6 dB; RSSI is the byte less 157 */
   rnode_signal_run(7, 100, 13, -57, 3.25, 81.7);
@@ -2233,6 +2335,8 @@ int main(int argc, char **argv) {
     radio_test();
   else if (!strcmp(argv[1], "rnode_detect"))
     rnode_detect_test();
+  else if (!strcmp(argv[1], "rnode_stats"))
+    rnode_stats_test();
   else if (!strcmp(argv[1], "rnode_signal"))
     rnode_signal_test();
   else if (!strcmp(argv[1], "rnode_tcp"))
