@@ -313,6 +313,27 @@ class WebFirmwareTests(unittest.TestCase):
         releases = self.history_stage('main-0005', self.site)['releases']
         self.assertEqual([r['version'] for r in releases], ['main-0005', 'v2', 'v1-test', 'main-0004', 'main-0003'])
 
+    def test_history_withdraws_builds_known_to_lose_data(self):
+        # releases before v0.7.1 had firmware for the two ESP32-S3 native USB boards that lost bytes to the host
+        import shutil
+        for name in ('lilygo_t_beam_supreme', 'lilygo_t3_s3'):
+            other = self.fw / name
+            shutil.copytree(self.board, other)
+            info = other / 'build-info.txt'
+            info.write_text(info.read_text().replace('platformio-heltec_wifi_lora_32_V3', 'platformio-' + name))
+        everything = ['heltec_wifi_lora_32_v3', 'lilygo_t3_s3', 'lilygo_t_beam_supreme']
+        self.history_stage('v0.7.0')
+        self.history_stage('v0.7.1', self.site)
+        releases = self.history_stage('main-0001', self.site)['releases']
+        boards = {r['version']: sorted(b['id'] for b in r['boards']) for r in releases}
+        self.assertEqual(boards, {'main-0001': everything, 'v0.7.1': everything,
+                                  'v0.7.0': ['heltec_wifi_lora_32_v3']})
+        self.assertEqual(sorted(p.name for p in (self.site / 'firmware/v0.7.0').iterdir()), ['heltec_wifi_lora_32_v3'])
+        # and they stay out when the history is carried forward again
+        releases = self.history_stage('main-0002', self.site)['releases']
+        self.assertEqual([sorted(b['id'] for b in r['boards']) for r in releases if r['version'] == 'v0.7.0'],
+                         [['heltec_wifi_lora_32_v3']])
+
     def test_rejects_unsafe_version(self):
         self.stage()
         spec = importlib.util.spec_from_file_location('web_firmware', SCRIPT)

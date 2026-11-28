@@ -241,6 +241,16 @@ def history_reader(previous_site, previous_site_dir):
     return None
 
 
+# Builds that must not be offered again. Before v0.7.1 the firmware for the ESP32-S3 boards with the built-in USB
+# port lost bytes on the way to the host.
+WITHDRAWN_BEFORE = {'lilygo_t_beam_supreme': (0, 7, 1), 'lilygo_t3_s3': (0, 7, 1)}
+
+
+def withdrawn(version, key):
+    tag = re.match(r'v(\d+)\.(\d+)\.(\d+)', version)
+    return bool(tag) and key in WITHDRAWN_BEFORE and tuple(map(int, tag.groups())) < WITHDRAWN_BEFORE[key]
+
+
 def retain_history(output, current_version, previous_site, previous_site_dir, allow_development):
     read = history_reader(previous_site, previous_site_dir)
     if read is None:
@@ -340,13 +350,13 @@ def retain_history(output, current_version, previous_site, previous_site_dir, al
                 validate_nrf(blobs, key)
             # Validate every old asset, including the oldest release dropped by
             # the bound, so corruption never silently discards established history.
-            if keep:
+            if keep and not withdrawn(version, key):
                 dest = output / version / key
                 dest.mkdir(parents=True)
                 for filename, blob in blobs.items():
                     (dest / filename).write_bytes(blob)
         if keep:
-            retained.append(release)
+            retained.append({**release, 'boards': [b for b in release['boards'] if not withdrawn(version, b['id'])]})
     return retained
 
 
