@@ -6473,12 +6473,22 @@ static int run_cp_input(const char *cp, char *out, size_t size, char *const *arg
   return WEXITSTATUS(status);
 }
 /* Waits until the program has put its terminal into raw mode. Typed before that, Enter arrives as a newline instead
- * of a carriage return (and "~" escapes are not recognised); how long the program takes depends on the machine. */
+ * of a carriage return (and "~" escapes are not recognised); how long the program takes depends on the machine.
+ * The settings are read from the program's end of the terminal: macOS does not give them at the controlling end. */
 static void type_when_raw(int master) {
   uint64_t deadline = now_ms() + 60000u;
-  struct termios t;
-  while (tcgetattr(master, &t) == 0 && (t.c_lflag & ICANON) && now_ms() < deadline) {
+  for (;;) {
     struct timespec nap = {0, 20000000};
+    struct termios t;
+    const char *name = ptsname(master);
+    int slave = name ? open(name, O_RDWR | O_NOCTTY) : -1, known, raw;
+    CHECK(slave >= 0);
+    known = !tcgetattr(slave, &t);
+    raw = known && !(t.c_lflag & ICANON);
+    close(slave);
+    CHECK(known);
+    if (raw || now_ms() >= deadline)
+      return;
     nanosleep(&nap, NULL);
   }
 }
