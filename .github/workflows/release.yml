@@ -182,11 +182,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat > notes.md <<'NOTES'
-          ## Fixed in v0.7.1
+          ## New in v0.8.0
 
-          **Firmware for the LilyGo T-Beam Supreme and T3-S3** (ESP32-S3 with the built-in USB port): bytes sent to the computer could be lost. In RNode mode, packets arrived with the middle missing, so links over LoRa often failed to establish. Update the board with the separate-parts command in `flash.txt`, which keeps its identity and settings. Serial (node) mode writes the same way and has the same fix. Seen and verified fixed on a T-Beam Supreme in RNode mode; serial mode and the T3-S3 were not tested. Other boards, and the Linux programs, are unchanged from v0.7.0.
+          **What a radio reports about itself.** `reticulum-c-ctl status`, and the reference's `rnstatus`, now show an RNode interface's airtime and channel load (15 seconds and an hour), noise floor and interference, CPU temperature and battery, alongside the signal figures. Update the Linux programs to see them. Not read from `RNodeMultiInterface` radios.
 
-          Upgrading from v0.6.x: read on.
+          **This project's firmware in RNode mode sends those figures** while its radio is on: airtime, channel load, noise floor and interference on every board with a radio; temperature on ESP32-S3 and nRF52 boards; battery on the T-Beam Supreme and T-Echo only. The channel figures are this firmware's own method (a look every 0.1 s; interference is 11 dB over the noise floor with no LoRa signal), so do not compare them closely with a stock RNode's, and the T-Echo's charge is judged from the cell's voltage, which is rough. Checked on a T-Beam Supreme and a T-Echo, with batteries seen only while charged on USB power; other boards were built, not run.
+
+          ## Upgrading from v0.7.x
+
+          **Library users must rebuild:** `rnc_host_status` grew, so the shared library's ABI number is now 3. If you update from v0.7.0 and use a T-Beam Supreme or T3-S3, this firmware also carries v0.7.1's fix for bytes lost over USB.
 
           ## Check before upgrading from v0.6.x
 
@@ -194,26 +198,8 @@ jobs:
           - **Traffic statistics read differently:** discarded packets are no longer counted in received bytes, and totals are running totals that keep closed connections and leave out local programs.
           - **Request timeouts** (`rnc_service`, `rnc_requester`) are now the time for the answer to begin: a response that is already arriving is no longer cut off.
           - `reticulum-c-ctl id -a` takes 3 seconds, so that `rnsd` passes the announce on.
-          - **Library users must rebuild:** `rnc_host_status` and `rnc_host_totals` grew, so the shared library's ABI number is now 2.
 
-          ## New since v0.6.1
-
-          - `reticulum-c-ctl id` takes a destination or identity hash: it recalls identities the running instance has heard, and `-R` asks the network (`-t`, `-N`). The node answers the shared-instance call for known destinations, so the reference's `rnid` finds them too.
-          - `reticulum-c-ctl status`: `-F`, `-t`, `-A`, `-P`, `-B`, `-b`, `-p`, with real figures, also shown by the reference's `rnstatus`.
-          - `reticulum-c-sh`: line-interactive mode (`~L`) and `~?`; the allowed-identities file is read for every connection.
-          - `reticulum-c-x -l` runs commands as jobs while serving, with up to 16 MiB of output.
-          - `AutoInterface` follows address changes, drops duplicates across devices, and takes up devices that appear after start.
-          - TCP clients and Wi-Fi RNodes given by name look it up for every connection, without stopping the node; a name that does not resolve yet is retried.
-          - Library: stamped identities, filtered and link traffic statistics, ingress state, known-destination listing.
-          - Examples: plain, group, ratchet, link, identify, channel and buffer.
-          - `reticulum-c-rnode-sx1302` presents a WM1302 concentrator HAT as an RNode. **Not tested on hardware**, and not part of these builds (it needs Semtech's `sx1302_hal`).
-
-          ## Fixed
-
-          - `reticulum-c-ctl path` and `path -t` without `-m` failed against `rnsd`.
-          - Announces from `reticulum-c-ctl id -a` could be dropped by `rnsd`.
-
-          Upgrading from v0.6.0 or older: also read the v0.6.1 notes (a `reticulum-c-git` security fix and the RNS 1.6 tunnel form).
+          The v0.7.0 and v0.7.1 notes list what else changed. Upgrading from v0.6.0 or older: also read the v0.6.1 notes (a `reticulum-c-git` security fix and the RNS 1.6 tunnel form).
 
           ## Linux builds
 
@@ -234,7 +220,7 @@ jobs:
 
           **Wi-Fi (ESP32 and ESP32-S3 archives).** Unprovisioned images start in serial mode and contain no Wi-Fi credentials; updates that preserve settings retain the selected mode. To join a network, provision the board after flashing: run `tools/wifi-config.sh` from the archive (writes the Wi-Fi settings as an NVS image with esptool, no console needed; `--arduino` for the PlatformIO archives, which replaces their NVS partition and so their identity), or send the line `rnc-config` on the serial port within 2 seconds after reset (or press BOOT) and use the `set`/`save`/`reboot` console. The board then connects as a TCP client to a node's TCPServerInterface (same HDLC framing). The TCP link is plaintext and unauthenticated at the transport level and the credentials are stored unencrypted in flash; `MANUAL.md` has the details. The nRF52 archives have no Wi-Fi.
 
-          **LoRa radio (the nine PlatformIO board archives).** Each of those images contains a driver for its board's radio (SX1262 on the Heltec V3, T3-S3, T-Beam Supreme, RAK4631, T114, XIAO nRF52840 Wio-SX1262 and T-Echo; SX1276 on the Heltec V2 and the T-Beam v1.0/1.1) and a Reticulum LoRa interface whose over-the-air format is meant to be compatible with stock RNodes on the same frequency and modem settings (header byte with sequence nibble and split flag, packets above 254 bytes in two frames, private-network sync word, CRC on, explicit header). `lora.mode leaf` makes LoRa the node's only interface; `lora.mode gateway` adds it to the serial or Wi-Fi interface with Reticulum transport on. **The radio is off, and never transmits, until you have set the mode and all of frequency, bandwidth, spreading factor, coding rate and transmit power** (console `set lora.freq 868.1` ... or `tools/wifi-config.sh --lora-mode ...`); no default settings are in any image. **You are responsible for a legal frequency, power and duty cycle** where you use the board; the power setting is the power at the chip's output. The airtime budget defaults to 1% of every hour. Hardware bench testing covers a T-Echo leaf and Supreme SX1262 gateway at 915 MHz, including routed /echo and /info, and a short RNode-mode packet exchange between the XIAO nRF52840 Wio-SX1262 and a T-Echo at 915 MHz. Other boards retain build/model coverage; range, sustained load and stock RNode interoperability are unverified. The ESP-IDF archives are generic images without a board selection and have no radio; select a LoRa board in `idf.py menuconfig` and build from source to get one. The Supreme SX1262 target initializes its AXP2101 radio rail. Supreme LR1121 variants and T-Beam v1.2 are not supported.
+          **LoRa radio (the nine PlatformIO board archives).** Each of those images contains a driver for its board's radio (SX1262 on the Heltec V3, T3-S3, T-Beam Supreme, RAK4631, T114, XIAO nRF52840 Wio-SX1262 and T-Echo; SX1276 on the Heltec V2 and the T-Beam v1.0/1.1) and a Reticulum LoRa interface whose over-the-air format is meant to be compatible with stock RNodes on the same frequency and modem settings (header byte with sequence nibble and split flag, packets above 254 bytes in two frames, private-network sync word, CRC on, explicit header). `lora.mode leaf` makes LoRa the node's only interface; `lora.mode gateway` adds it to the serial or Wi-Fi interface with Reticulum transport on. **The radio is off, and never transmits, until you have set the mode and all of frequency, bandwidth, spreading factor, coding rate and transmit power** (console `set lora.freq 868.1` ... or `tools/wifi-config.sh --lora-mode ...`); no default settings are in any image. **You are responsible for a legal frequency, power and duty cycle** where you use the board; the power setting is the power at the chip's output. The airtime budget defaults to 1% of every hour. Hardware bench testing is short runs on the T-Echo, T-Beam Supreme and XIAO nRF52840 Wio-SX1262, listed with dates under "Bench record" in `MANUAL.md`. Other boards retain build/model coverage; range, sustained load and stock RNode interoperability are unverified. The ESP-IDF archives are generic images without a board selection and have no radio; select a LoRa board in `idf.py menuconfig` and build from source to get one. The Supreme SX1262 target initializes its AXP2101 radio rail. Supreme LR1121 variants and T-Beam v1.2 are not supported.
 
           | Archive | Board | Build |
           | --- | --- | --- |
@@ -249,7 +235,7 @@ jobs:
 
           `esp-idf-component.tar.gz` is the protocol core and the example application as ESP-IDF components (use it with `EXTRA_COMPONENT_DIRS`). `platformio-library.tar.gz` is the same as a PlatformIO library (`library.json`; `lib_deps = file:///path`). Both are source archives.
 
-          **Limits.** The boards talk to a host over serial or USB (or, on ESP32 once provisioned, over Wi-Fi and TCP), and over LoRa once configured (see above). In these node modes they have no Bluetooth; Bluetooth LE is available only in `rnode` mode. Hardware coverage is the short T-Echo/Supreme SX1262 bench exchange described above, including serial provisioning and routed LoRa requests; other boards have build/model coverage. Wi-Fi hardware behavior, range, sustained load and stock RNode interoperability remain unverified. The same application logic passes host tests against reticulum-c-node and the reference Reticulum. The nRF52 board definitions for the RAK4631, T114 and T-Echo are derived from the Adafruit nRF52840 Feather and assume the Adafruit bootloader; serial DFU has been exercised on the T-Echo. It is a leaf node (no forwarding) unless the LoRa gateway mode is configured. The `rnode` mode (a host-driven LoRa modem for Sideband or rnsd, over USB or, once a PIN is set, Bluetooth LE) has been run on a T-Echo: driven over USB by this project's host adapter, and over Bluetooth LE from a Linux PC and from Sideband on one Android phone, which connected while the T-Echo exchanged packets with a Supreme over the air. Sideband showing the announces the board receives, other phones, rnsd, the reference RNodeInterface in its own Bluetooth mode (over USB it configured the T-Echo and sent announces with its default timing; through a Bluetooth bridge only once its 0.25 second readback wait was lengthened), range, and the ESP32 Bluetooth transport (compiled only) remain unverified.
+          **Limits.** The boards talk to a host over serial or USB (or, on ESP32 once provisioned, over Wi-Fi and TCP), and over LoRa once configured (see above). In these node modes they have no Bluetooth; Bluetooth LE is available only in `rnode` mode. Hardware coverage is the short bench runs described above, including serial provisioning, routed LoRa requests and RNode-mode file transfers; other boards have build/model coverage. Wi-Fi hardware behavior, range, sustained load and stock RNode interoperability remain unverified. The same application logic passes host tests against reticulum-c-node and the reference Reticulum. The nRF52 board definitions for the RAK4631, T114 and T-Echo are derived from the Adafruit nRF52840 Feather and assume the Adafruit bootloader; serial DFU has been exercised on the T-Echo. It is a leaf node (no forwarding) unless the LoRa gateway mode is configured. The `rnode` mode (a host-driven LoRa modem for Sideband or rnsd, over USB or, once a PIN is set, Bluetooth LE) has been run on a T-Echo: driven over USB by this project's host adapter, and over Bluetooth LE from a Linux PC and from Sideband on one Android phone, which connected while the T-Echo exchanged packets with a Supreme over the air. Sideband showing the announces the board receives, other phones, rnsd, the reference RNodeInterface in its own Bluetooth mode (over USB it configured the T-Echo and sent announces with its default timing; through a Bluetooth bridge only once its 0.25 second readback wait was lengthened), range, and the ESP32 Bluetooth transport (compiled only) remain unverified.
 
           Check every download with `sha256sum -c SHA256SUMS`.
           NOTES

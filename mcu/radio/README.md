@@ -9,7 +9,8 @@ With normal firmware, a host client through USB -> Supreme -> LoRa reached the
 T-Echo at three hops, verified a 10-byte /echo reply and a 116-byte /info reply; one
 request needed a retry. The first unsynchronized attempt timed out.
 
-This does not establish range, sustained-load reliability, other board pin maps,
+Later runs, including a XIAO nRF52840 with Wio-SX1262 and the radio reports of 2026-11-28, are listed in "Bench
+record" in mcu/README.md. They do not establish range, sustained-load reliability, other board pin maps,
 or on-air interoperability with stock RNode firmware. The additional chip models
 are authored from the same datasheets as the drivers and can share mistakes.
 
@@ -300,9 +301,8 @@ written by the author of the drivers.
 
 ## Limits
 
-- Hardware coverage is the short T-Echo/Supreme SX1262 bench exchange described
-  above. Range, sustained load, other boards and stock RNode interoperability
-  remain unverified.
+- Hardware coverage is short bench runs on the T-Echo, T-Beam Supreme and XIAO SX1262 (see "Bench record" in
+  mcu/README.md). Range, sustained load, other boards and stock RNode interoperability remain unverified.
 - Half duplex, one radio, one channel, one set of modem settings at a time.
 - No frequency hopping, no FSK, no implicit-header traffic, no Bluetooth, no display.
 - No IFAC.

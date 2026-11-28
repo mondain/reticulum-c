@@ -4,7 +4,7 @@
 ## Where the version lives
 
 The version is the VERSION in the project() line of CMakeLists.txt (today
-0.7.1); the library and package version, the shared library version and the CMake
+0.8.0); the library and package version, the shared library version and the CMake
 package compatibility all read it, and so do the firmware build scripts. SOVERSION
 (the ABI number) is separate, also in CMakeLists.txt; raise it only for an
 incompatible ABI change.
@@ -87,9 +87,11 @@ Toolchain pins that change the firmware builds: the ESP-IDF Docker image
 (espressif/idf:v5.4.4, in mcu/build-esp-idf.sh), PlatformIO 6.1.19 (in
 mcu/build-platformio.sh, whose hash is also the CI cache key) and the platform
 versions in mcu/platformio/platformio.ini. The Linux archives use alpine:3.20.
-Hardware bench coverage is a T-Echo leaf and Supreme SX1262 gateway using
-PlatformIO firmware, including routed /echo and /info at 915 MHz. Other boards,
-range, sustained load and stock RNode interoperability remain unverified.
+Hardware bench coverage is short runs on the T-Echo, T-Beam Supreme and XIAO
+nRF52840 Wio-SX1262 with PlatformIO firmware; the dated list is "Bench record" in
+mcu/README.md. Add to it, and update the release notes' summary, after bench
+work. Other boards, range, sustained load and stock RNode interoperability
+remain unverified.
 ESP-IDF archives are generic (no LoRa board selected, so no radio); only the
 PlatformIO board archives carry a selected board's radio pin table. Radio and
 Wi-Fi settings are provisioned at run time, so no archive
