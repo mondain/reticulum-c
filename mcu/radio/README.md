@@ -301,7 +301,7 @@ written by the author of the drivers.
 
 ## Limits
 
-- Hardware coverage is short bench runs on the T-Echo, T-Beam Supreme and XIAO SX1262 (see "Bench record" in
+- Hardware coverage is short bench runs on the T-Echo, T-Beam Supreme, XIAO SX1262 and Heltec V3 (see "Bench record" in
   mcu/README.md). Range, sustained load, other boards and stock RNode interoperability remain unverified.
 - Half duplex, one radio, one channel, one set of modem settings at a time.
 - No frequency hopping, no FSK, no implicit-header traffic, no Bluetooth, no display.

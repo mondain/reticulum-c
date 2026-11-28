@@ -77,7 +77,7 @@ broadest feature set and the application ecosystem.
 - **Firmware security limits.** The Wi-Fi password and settings sit unencrypted in flash, and
   the TCP link is plaintext as in any Reticulum TCP interface. The firmware has no IFAC.
 - **Thin hardware evidence.** Short bench runs exist for a T-Echo, a T-Beam Supreme and a Seeed XIAO nRF52840 with
-  Wio-SX1262 (dated list: "Bench record" in `mcu/README.md`). One of them found a real fault: the Supreme lost bytes
+  Wio-SX1262 and a Heltec V3 (dated list: "Bench record" in `mcu/README.md`). One of them found a real fault: the Supreme lost bytes
   over USB until 0.7.1. Range, sustained load and long-term reliability are not established. Wi-Fi mode, the ESP-IDF
   boards and the ESP32 BLE build are build-tested, not hardware-tested. The XIAO has not been checked with BLE
   against its SoftDevice 7.3.0 bootloader.

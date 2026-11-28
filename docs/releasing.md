@@ -87,8 +87,8 @@ Toolchain pins that change the firmware builds: the ESP-IDF Docker image
 (espressif/idf:v5.4.4, in mcu/build-esp-idf.sh), PlatformIO 6.1.19 (in
 mcu/build-platformio.sh, whose hash is also the CI cache key) and the platform
 versions in mcu/platformio/platformio.ini. The Linux archives use alpine:3.20.
-Hardware bench coverage is short runs on the T-Echo, T-Beam Supreme and XIAO
-nRF52840 Wio-SX1262 with PlatformIO firmware; the dated list is "Bench record" in
+Hardware bench coverage is short runs on the T-Echo, T-Beam Supreme, XIAO
+nRF52840 Wio-SX1262 and Heltec V3 with PlatformIO firmware; the dated list is "Bench record" in
 mcu/README.md. Add to it, and update the release notes' summary, after bench
 work. Other boards, range, sustained load and stock RNode interoperability
 remain unverified.
